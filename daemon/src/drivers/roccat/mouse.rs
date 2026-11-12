@@ -123,7 +123,7 @@ fn switch(on: bool) -> [u8; 6] {
 fn aimo_frame([r, g, b]: [u8; 3]) -> [u8; 46] {
     let mut p = [0u8; 46];
     p[..2].copy_from_slice(&[0x0d, 0x2e]);
-    for led in p[2..].chunks_exact_mut(4) {
+    for led in p[2..].as_chunks_mut::<4>().0 {
         led[..3].copy_from_slice(&[r, g, b]);
     }
     p
@@ -132,8 +132,8 @@ fn aimo_frame([r, g, b]: [u8; 3]) -> [u8; 46] {
 fn xp_frame([r, g, b]: [u8; 3]) -> [u8; 0x7a] {
     let mut p = [0u8; 0x7a];
     p[..2].copy_from_slice(&[0x0d, 0x7a]);
-    for led in p[2..].chunks_exact_mut(6) {
-        led.copy_from_slice(&[r, g, b, 0xff, 0xff, 0xff]);
+    for led in p[2..].as_chunks_mut::<6>().0 {
+        *led = [r, g, b, 0xff, 0xff, 0xff];
     }
     p
 }
@@ -141,8 +141,8 @@ fn xp_frame([r, g, b]: [u8; 3]) -> [u8; 0x7a] {
 fn pro_frame(leds: usize, color: [u8; 3]) -> [u8; 11] {
     let mut p = [0u8; 11];
     p[..2].copy_from_slice(&[0x0d, 0x0b]);
-    for led in p[2..].chunks_exact_mut(3).take(leds) {
-        led.copy_from_slice(&color);
+    for led in p[2..].as_chunks_mut::<3>().0.iter_mut().take(leds) {
+        *led = color;
     }
     p
 }

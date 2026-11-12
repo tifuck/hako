@@ -260,10 +260,27 @@ Hako also recognises devices that aren't in the list:
 
 ## Install
 
-### From a release (recommended)
+### Ubuntu, Debian, Pop!_OS, Mint (`.deb`, recommended)
 
-Prebuilt for **x86_64 Linux**, built on Ubuntu 22.04: runs on Ubuntu 22.04 and
-newer, Debian 12, Fedora, Arch and anything else with glibc 2.35 or later.
+Download `hako_<version>_amd64.deb` from the
+[latest release](https://github.com/tifuck/Hako/releases/latest), then
+double-click it, or:
+
+```bash
+sudo apt install ./hako_*_amd64.deb
+```
+
+That's it: launch **Hako** from your app menu. The package installs the app,
+the device permissions (udev rules) and the background service, and starts the
+service for you. It works on Ubuntu 22.04 and newer and Debian 12 and newer.
+
+Remove it with `sudo apt remove hako`. Your settings in `~/.config/hako` are
+kept.
+
+### Any other distribution (tarball)
+
+Prebuilt for **x86_64 Linux** with glibc 2.35 or later (Fedora, Arch,
+openSUSE, ...). Installs for your user only.
 
 1. Download `hako-<version>-x86_64-linux.tar.gz` and `SHA256SUMS` from the
    [latest release](https://github.com/tifuck/Hako/releases/latest).
@@ -285,10 +302,10 @@ once), and starts the daemon. Nothing else on the system is touched.
 <details>
 <summary><b>Verify where a release was built</b></summary>
 
-Every release tarball carries a GitHub build provenance attestation:
+Every `.deb` and tarball carries a GitHub build provenance attestation:
 
 ```bash
-gh attestation verify hako-*-x86_64-linux.tar.gz --repo tifuck/Hako
+gh attestation verify hako_*_amd64.deb --repo tifuck/Hako
 ```
 
 </details>
@@ -303,7 +320,7 @@ gh attestation verify hako-*-x86_64-linux.tar.gz --repo tifuck/Hako
 | [LSP plugins](https://lsp-plug.in/) (LADSPA), optional | line-in gate, compressor and EQ |
 | `curl` | update checks |
 
-On Ubuntu and Debian:
+The `.deb` pulls these in for you. For the tarball on Ubuntu or Debian:
 
 ```bash
 sudo apt install pipewire-bin wireplumber alsa-utils curl lsp-plugins-ladspa
@@ -314,11 +331,13 @@ sudo apt install pipewire-bin wireplumber alsa-utils curl lsp-plugins-ladspa
 Release builds look for a new version a minute after the window opens, then
 every 6 hours. When one is out, a card offers **Restart and update**. Hako
 downloads the release, checks it against `SHA256SUMS`, installs it, restarts
-the daemon and reopens. If the new version changes device permissions, your
-desktop asks for your password once. Turn checks off, or check now, under
-**Settings → Updates**.
+the daemon and reopens. A `.deb` install updates through apt, so your desktop
+asks for your password; a tarball install only asks when device permissions
+change. Turn checks off, or check now, under **Settings → Updates**.
 
 ### Uninstall
+
+`.deb`: `sudo apt remove hako`. Tarball install:
 
 ```bash
 systemctl --user disable --now hakod

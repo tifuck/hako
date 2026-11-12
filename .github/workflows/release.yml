@@ -50,13 +50,26 @@ jobs:
             udev/70-hako.rules client/assets/icon.png "$d/"
           cp README.md LICENSE NOTICE "$d/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS)
+          packaging/deb/build-deb.sh "${GITHUB_REF_NAME#v}" target/release dist
+          (cd dist && sha256sum *.tar.gz *.deb > SHA256SUMS && cat SHA256SUMS)
+      - name: Install test (.deb)
+        run: |
+          sudo apt-get install -y ./dist/hako_*.deb
+          dpkg -s hako | grep -E '^(Version|Depends)'
+          /usr/bin/hako --version && /usr/bin/hakod --version
+          test -f /usr/lib/udev/rules.d/70-hako.rules
+          test -f /usr/lib/systemd/user/hakod.service
+          test -L /etc/systemd/user/default.target.wants/hakod.service
+          sudo apt-get remove -y hako
+          test ! -e /etc/systemd/user/default.target.wants/hakod.service
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/*.tar.gz
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.deb
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/*.tar.gz dist/SHA256SUMS \
             --title "Hako $GITHUB_REF_NAME" --generate-notes --verify-tag

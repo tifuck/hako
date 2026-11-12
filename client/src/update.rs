@@ -1,8 +1,9 @@
 //! Self-update from GitHub releases.
 //!
 //! Only release builds know their repo (`HAKO_REPO`, set by the release
-//! workflow), and only an install made by `install-user.sh` (`~/.local/bin`)
-//! updates itself. Every other build never touches the network.
+//! workflow), and only an install from a release updates itself: the `.deb`
+//! (`/usr/bin`, updated through apt) or `install-user.sh` (`~/.local/bin`,
+//! updated from the tarball). Every other build never touches the network.
 //!
 //! Uses `curl`, `sha256sum` and `tar` like the daemon uses `pw-*`: present on
 //! every desktop, no TLS stack in the binary.
@@ -12,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const REPO: Option<&str> = option_env!("HAKO_REPO");
+const DEB_BIN: &str = "/usr/bin/hako";
 const UDEV_RULES: &str = "/etc/udev/rules.d/70-hako.rules";
 /// Set for the restarted UI so it can confirm the update.
 pub const UPDATED_ENV: &str = "HAKO_UPDATED";
@@ -21,7 +23,7 @@ pub const WARN_ENV: &str = "HAKO_UPDATE_WARN";
 #[derive(Clone, Debug)]
 pub struct Release {
     pub version: String,
-    /// Tarball asset name and URL.
+    /// Asset name (tarball or `.deb`) and URL.
     name: String,
     url: String,
     sums_url: String,
@@ -31,9 +33,26 @@ pub struct Release {
 /// Resolve once at startup: after an update the running exe is replaced.
 pub fn target() -> Option<(&'static str, PathBuf)> {
     let repo = REPO.filter(|r| !r.is_empty())?;
-    let bin = PathBuf::from(std::env::var_os("HOME")?).join(".local/bin/hako");
     let exe = std::env::current_exe().ok()?;
-    (std::fs::canonicalize(&bin).ok()? == exe).then_some((repo, bin))
+    let user = PathBuf::from(std::env::var_os("HOME")?).join(".local/bin/hako");
+    [user, PathBuf::from(DEB_BIN)]
+        .into_iter()
+        .find(|bin| std::fs::canonicalize(bin).is_ok_and(|b| b == exe))
+        .map(|bin| (repo, bin))
+}
+
+/// Installed from the `.deb`, so apt owns the files.
+fn deb_install() -> bool {
+    std::env::current_exe().is_ok_and(|e| e.starts_with("/usr/"))
+}
+
+/// Debian name for this CPU, as used in `.deb` file names.
+fn deb_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }
 }
 
 /// The latest release, if newer than this build.
@@ -50,7 +69,11 @@ pub fn check(repo: &str) -> Result<Option<Release>> {
     if !newer(version, env!("CARGO_PKG_VERSION")) {
         return Ok(None);
     }
-    let suffix = format!("-{}-linux.tar.gz", std::env::consts::ARCH);
+    let suffix = if deb_install() {
+        format!("_{}.deb", deb_arch())
+    } else {
+        format!("-{}-linux.tar.gz", std::env::consts::ARCH)
+    };
     // Only follow download links of this repo's own releases.
     let prefix = format!("https://github.com/{repo}/releases/download/");
     let asset = |want: &dyn Fn(&str) -> bool| {
@@ -84,17 +107,25 @@ pub fn install(rel: &Release) -> Result<Option<String>> {
 }
 
 fn install_in(rel: &Release, dir: &Path) -> Result<Option<String>> {
-    let tarball = dir.join(&rel.name);
-    run(curl().arg("-o").arg(&tarball).arg(&rel.url)).context("download failed")?;
+    let file = dir.join(&rel.name);
+    run(curl().arg("-o").arg(&file).arg(&rel.url)).context("download failed")?;
     let sums = String::from_utf8(run(curl().arg(&rel.sums_url))?)?;
     let want = expected_sum(&sums, &rel.name).context("checksums do not list the download")?;
-    let got = String::from_utf8(run(Command::new("sha256sum").arg(&tarball))?)?;
+    let got = String::from_utf8(run(Command::new("sha256sum").arg(&file))?)?;
     if got.split_whitespace().next() != Some(want.as_str()) {
         bail!("checksum mismatch, download discarded");
     }
+    if rel.name.ends_with(".deb") {
+        // apt installs rules and units and restarts the daemons (postinst).
+        run(Command::new("pkexec")
+            .args(["apt-get", "install", "-y", "--allow-downgrades"])
+            .arg(&file))
+        .context("install was cancelled or failed")?;
+        return Ok(None);
+    }
     run(Command::new("tar")
         .arg("-xzf")
-        .arg(&tarball)
+        .arg(&file)
         .arg("-C")
         .arg(dir))?;
     let root = dir.join(rel.name.trim_end_matches(".tar.gz"));

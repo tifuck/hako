@@ -302,8 +302,10 @@ pub fn percent_from_mv(mv: u16) -> Option<u8> {
 /// bits are set is a step `v & 0x1fff` from the previous value up to the next.
 pub fn parse_dpi_list(bytes: &[u8]) -> Vec<u16> {
     let vals: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| u16::from_be_bytes(c))
         .take_while(|&v| v != 0)
         .collect();
     let mut out: Vec<u16> = Vec::new();

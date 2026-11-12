@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+# Each logged-in user's systemd manager (ignored where unavailable).
+for_users() {
+    for user in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
+        systemctl --user -M "$user@" "$@" >/dev/null 2>&1 || true
+    done
+}
+
+if [ "$1" = configure ]; then
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
+    systemctl --global enable hakod.service >/dev/null 2>&1 || true
+    # Start (or, on upgrade, restart) the daemon for everyone logged in now;
+    # other users get it at their next login.
+    for_users daemon-reload
+    for_users restart hakod.service
+fi

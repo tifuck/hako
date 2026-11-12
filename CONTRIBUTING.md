@@ -110,7 +110,8 @@ onboard key maps / macros.
 
 Pushing a tag `vX.Y.Z` that matches `version` in the workspace `Cargo.toml`
 runs `.github/workflows/release.yml`: it checks, tests, builds on Ubuntu 22.04
-(glibc 2.35+), and publishes `hako-X.Y.Z-x86_64-linux.tar.gz` plus
-`SHA256SUMS` and a provenance attestation. Installed release builds find it
-through the GitHub API and offer the update. Keep the tarball name and layout
+(glibc 2.35+), builds `hako_X.Y.Z_amd64.deb` (`packaging/deb/`) and test-installs
+it, and publishes the `.deb`, `hako-X.Y.Z-x86_64-linux.tar.gz`, `SHA256SUMS`
+and provenance attestations. Installed release builds find it through the
+GitHub API and offer the update. Keep the asset names and the tarball layout
 (`bin/`, `scripts/install-user.sh`, `udev/`) stable: the updater relies on them.

@@ -417,7 +417,7 @@ impl HidppAdapter {
                         Ok(r) => bytes.extend_from_slice(&r[7..20]),
                         Err(_) => break,
                     }
-                    if bytes.chunks_exact(2).any(|c| c == [0, 0]) {
+                    if bytes.as_chunks::<2>().0.contains(&[0, 0]) {
                         break;
                     }
                 }

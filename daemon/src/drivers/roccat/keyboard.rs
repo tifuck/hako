@@ -426,8 +426,8 @@ impl Lights for Keyboard {
 fn horde_frame(color: [u8; 3]) -> [u8; 24] {
     let mut p = [0u8; 24];
     p[..4].copy_from_slice(&[0x18, 0x18, 0xff, 0xff]);
-    for zone in p[4..22].chunks_exact_mut(3) {
-        zone.copy_from_slice(&color);
+    for zone in p[4..22].as_chunks_mut::<3>().0 {
+        *zone = color;
     }
     checksum(&mut p);
     p

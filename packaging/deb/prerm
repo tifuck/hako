@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = remove ]; then
+    # Stopping the daemon removes its audio nodes and restores the default output.
+    for user in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
+        systemctl --user -M "$user@" stop hakod.service >/dev/null 2>&1 || true
+    done
+    systemctl --global disable hakod.service >/dev/null 2>&1 || true
+fi

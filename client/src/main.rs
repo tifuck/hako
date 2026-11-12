@@ -369,7 +369,7 @@ impl App {
         let Some((repo, _)) = self.updater else {
             self.state.lock().unwrap().notices.push((
                 Tone::Warn,
-                "Updates are only available for release builds installed with install-user.sh"
+                "Updates are only available for installs from a GitHub release (.deb or tarball)"
                     .into(),
             ));
             return;
