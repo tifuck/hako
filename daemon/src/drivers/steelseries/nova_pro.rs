@@ -3,6 +3,10 @@
 //! (white) `225d` shares it per Linux-Arctis-Manager `nova_pro_wireless.yaml`
 //! (same variant list and interface 4), the only source listing that PID, so
 //! it never gets the `06 09` flash save.
+//!
+//! Setters are volatile and re-sent on open. "Save changes to device memory"
+//! (`save_to_device`, behind the owner's onboard-memory opt-in) adds the
+//! `06 09` flash save after each setter; turning it on saves once.
 
 use crate::drivers::{DeviceAdapter, DriverCtx, Opened};
 use crate::hid::{find_hidraw, pad64, HidrawDevice};
@@ -145,11 +149,10 @@ impl SteelSeriesAdapter {
     }
 
     /// `06 09`: HeadsetControl's "save state" and Linux-Arctis-Manager's
-    /// `save_to_flash` for this PID, i.e. a flash write after every setter.
-    /// Kept byte-identical (hardware-verified driver); not behind the
-    /// onboard-memory opt-in yet, see `docs/onboard-writes/steelseries.md`.
-    fn commit(&mut self) -> Result<()> {
-        if !saves_after_set(self.id.product_id) {
+    /// `save_to_flash` for this PID, a flash write; only in save mode, see
+    /// `docs/onboard-writes/steelseries.md`.
+    fn commit(&mut self, save: bool) -> Result<()> {
+        if !save {
             return Ok(());
         }
         self.write_cmd(&[0x06, 0x09, 0x00])
@@ -383,8 +386,14 @@ fn defaults_into(s: &mut SettingsMap) {
     }
 }
 
-fn controls() -> Vec<SettingMeta> {
+fn controls(pid: u16) -> Vec<SettingMeta> {
     use SettingKey::*;
+    let save = SettingMeta::toggle(SaveToDevice, "Save changes to device memory").persistent();
+    let save = if saves_after_set(pid) {
+        save
+    } else {
+        save.blocked("only Linux-Arctis-Manager lists this PID's flash save")
+    };
     // Labels are section-relative (the UI card header supplies context), so they
     // stay short and the control column lines up. Order = non-mic first.
     vec![
@@ -422,6 +431,7 @@ fn controls() -> Vec<SettingMeta> {
         // unverified for this device family — HeadsetControl does not implement
         // it, and on the 12e5 variant it drives output level, not mic gain.
         SettingMeta::slider(MicLedBrightness, "Mute LED", 1.0, 10.0, 1.0),
+        save,
     ]
 }
 
@@ -448,7 +458,7 @@ impl DeviceAdapter for SteelSeriesAdapter {
                 );
                 s
             },
-            controls: controls(),
+            controls: controls(self.id.product_id),
             // HID errors first; audio errors live in the audio service.
             last_error: self.last_error.clone().or_else(|| self.audio.last_error()),
         }
@@ -457,26 +467,31 @@ impl DeviceAdapter for SteelSeriesAdapter {
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
         let mut proposed = self.settings.clone();
         merge_setting(&mut proposed, key, value.clone());
+        let save = saves_after_set(self.id.product_id)
+            && get_setting(&proposed, SettingKey::SaveToDevice)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
         match key {
+            SettingKey::SaveToDevice => self.commit(save)?,
             SettingKey::MicVolume => {
                 let v = value.as_int().unwrap_or(10) as u8;
                 self.write_cmd(&[0x06, 0x37, v])?;
-                self.commit()?;
+                self.commit(save)?;
             }
             SettingKey::MicSideTone => {
                 let v = value.as_int().unwrap_or(0) as u8;
                 self.write_cmd(&[0x06, 0x39, v])?;
-                self.commit()?;
+                self.commit(save)?;
             }
             SettingKey::MicLedBrightness => {
                 let v = value.as_int().unwrap_or(10) as u8;
                 self.write_cmd(&[0x06, 0xbf, v])?;
-                self.commit()?;
+                self.commit(save)?;
             }
             SettingKey::PmShutdown => {
                 let v = value.as_int().unwrap_or(5) as u8;
                 self.write_cmd(&[0x06, 0xc1, v])?;
-                self.commit()?;
+                self.commit(save)?;
             }
             SettingKey::WirelessModeRange => {
                 let v = if value.as_bool().unwrap_or(false) {
@@ -485,7 +500,7 @@ impl DeviceAdapter for SteelSeriesAdapter {
                     0x00
                 };
                 self.write_cmd(&[0x06, 0xc3, v])?;
-                self.commit()?;
+                self.commit(save)?;
             }
             SettingKey::AuxEnabled => {
                 let on = value.as_bool().unwrap_or(false);
@@ -584,7 +599,10 @@ mod tests {
 
     #[test]
     fn controls_only_list_supported_keys() {
-        let keys: Vec<_> = controls().into_iter().map(|control| control.key).collect();
+        let keys: Vec<_> = controls(0x12e5)
+            .into_iter()
+            .map(|control| control.key)
+            .collect();
         assert_eq!(
             keys,
             vec![
@@ -597,9 +615,18 @@ mod tests {
                 SettingKey::MicVolume,
                 SettingKey::MicSideTone,
                 SettingKey::MicLedBrightness,
+                SettingKey::SaveToDevice,
             ]
         );
-        assert!(controls()
+        let save = |pid| {
+            controls(pid)
+                .into_iter()
+                .find(|c| c.key == SettingKey::SaveToDevice)
+                .unwrap()
+        };
+        assert!(save(0x12e5).persistent && save(0x12e5).blocked.is_none());
+        assert!(save(0x225d).blocked.is_some());
+        assert!(controls(0x12e5)
             .into_iter()
             .filter(|control| control.read_only)
             .all(|control| matches!(

@@ -20,10 +20,14 @@
 //! when interface 3 has no hidraw node (e.g. left unbound by a crashed daemon).
 //!
 //! Onboard memory: brightness (0x0f/0x04) and effect (0x0f/0x02) go out with
-//! VARSTORE (profile 1), as OpenRazer sends them for this PID, on every open
-//! (restore) and every change, so the keyboard keeps the last lighting across
-//! power cycles. These bytes are frozen (hardware-verified) and predate the
-//! onboard-memory opt-in; docs/onboard-writes/razer.md has the details.
+//! NOSTORE, also when re-applied on open, so the keyboard keeps nothing and
+//! the daemon restores the user's choice on every open. "Save changes to
+//! device memory" (`save_to_device`, behind the owner's onboard-memory
+//! opt-in) sends them with VARSTORE (profile 1), as OpenRazer does for this
+//! PID, only inside `set`: turning it on stores the current lighting once,
+//! later user changes are stored too. Brightness is read back (VARSTORE, the
+//! stored value) only in that mode; docs/onboard-writes/razer.md has the
+//! details.
 //!
 //! Report rate (HyperPolling `00/40 [00 rate]`, read `00/c0`) and game mode
 //! (game LED `03/00 [NOSTORE 08 on]`, read `03/80`), both on transaction
@@ -205,16 +209,18 @@ impl RazerKeyboardAdapter {
             a.last_error = Some(format!("device mode: {e}"));
         }
 
-        // Read live brightness so the slider reflects hardware.
-        if let Ok(Some(br)) = a.read_brightness_pct() {
-            merge_setting(
-                &mut a.settings,
-                SettingKey::Brightness,
-                SettingValue::Int(br as i64),
-            );
+        // In save mode the stored brightness (changed with Fn keys) is current.
+        if a.saving() {
+            if let Ok(Some(br)) = a.read_brightness_pct() {
+                merge_setting(
+                    &mut a.settings,
+                    SettingKey::Brightness,
+                    SettingValue::Int(br as i64),
+                );
+            }
         }
-        // Re-apply saved effect/color to hardware (restore across reboot).
-        if let Err(e) = a.apply_all() {
+        // Re-apply the chosen lighting, never stored on open.
+        if let Err(e) = a.apply_all(NOSTORE) {
             warn!("razer restore on open: {e}");
             a.last_error = Some(e.to_string());
         }
@@ -244,26 +250,31 @@ impl RazerKeyboardAdapter {
             .transact(&report)
     }
 
-    fn set_brightness_pct(&mut self, pct: u8) -> Result<()> {
+    fn saving(&self) -> bool {
+        get_setting(&self.settings, SettingKey::SaveToDevice)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    fn set_brightness_pct(&mut self, pct: u8, store: u8) -> Result<()> {
         let wire = ((pct.min(100) as u16) * 255 / 100) as u8;
-        self.send(TXN_LED, 0x0f, 0x04, &[VARSTORE, BACKLIGHT_LED, wire])
+        self.send(TXN_LED, 0x0f, 0x04, &[store, BACKLIGHT_LED, wire])
     }
 
     fn read_brightness_pct(&mut self) -> Result<Option<u8>> {
         let resp = self.send_get(TXN_LED, 0x0f, 0x84, &[VARSTORE, BACKLIGHT_LED, 0x00])?;
         // arguments[2] = brightness (status already checked by transact)
         if resp[5] >= 3 {
-            let wire = resp[10]; // arg[2]
-            return Ok(Some(((wire as u16) * 100 / 255).min(100) as u8));
+            return Ok(Some(pct_from_wire(resp[10]))); // arg[2]
         }
         Ok(None)
     }
 
-    fn apply_all(&mut self) -> Result<()> {
+    fn apply_all(&mut self, store: u8) -> Result<()> {
         let br = get_setting(&self.settings, SettingKey::Brightness)
             .and_then(|v| v.as_int())
             .unwrap_or(80) as u8;
-        self.set_brightness_pct(br)?;
+        self.set_brightness_pct(br, store)?;
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         let effect = KbEffectKind::from_str(
@@ -288,8 +299,12 @@ impl RazerKeyboardAdapter {
             .and_then(|v| v.as_str())
             .unwrap_or("left")
             .to_string();
-        let args = kb_effect_args(effect, r, g, b, &speed, &direction);
+        let args = kb_effect_args(store, effect, r, g, b, &speed, &direction);
         self.send(TXN_LED, 0x0f, 0x02, &args)?;
+        let wire = (u16::from(br.min(100)) * 255 / 100) as u8;
+        if store == VARSTORE && self.read_brightness_pct()? != Some(pct_from_wire(wire)) {
+            bail!("stored brightness reads back differently");
+        }
         Ok(())
     }
 
@@ -361,6 +376,10 @@ fn open_transport() -> Result<(Transport, String)> {
     bail!("no Razer control path ({})", errs.join("; "))
 }
 
+fn pct_from_wire(wire: u8) -> u8 {
+    ((wire as u16) * 100 / 255).min(100) as u8
+}
+
 fn defaults(s: &mut SettingsMap) {
     for (k, v) in [
         (SettingKey::Brightness, SettingValue::Int(80)),
@@ -382,8 +401,8 @@ fn kb_wave_dir(direction: &str) -> u8 {
 }
 
 /// Argument bytes for the extended-matrix effect command (class 0x0f, cmd 0x02).
-/// VARSTORE kept from the original driver: this keyboard's wire bytes are frozen.
 fn kb_effect_args(
+    store: u8,
     effect: KbEffectKind,
     r: u8,
     g: u8,
@@ -392,7 +411,7 @@ fn kb_effect_args(
     direction: &str,
 ) -> Vec<u8> {
     protocol::effect_args(
-        VARSTORE,
+        store,
         BACKLIGHT_LED,
         effect,
         [r, g, b],
@@ -449,6 +468,7 @@ fn controls(effect: KbEffectKind) -> Vec<SettingMeta> {
         SettingMeta::color(ColorR, "Red").hidden(!has_color),
         SettingMeta::color(ColorG, "Green").hidden(!has_color),
         SettingMeta::color(ColorB, "Blue").hidden(!has_color),
+        SettingMeta::toggle(SaveToDevice, "Save changes to device memory").persistent(),
     ]
 }
 
@@ -479,7 +499,10 @@ impl DeviceAdapter for RazerKeyboardAdapter {
         merge_setting(&mut self.settings, key, value.clone());
         let result = match key {
             SettingKey::ReportRate | SettingKey::GameMode => self.write_misc(key, &value),
-            _ => self.apply_all(),
+            // Turning it on stores the current lighting once; off sends nothing.
+            SettingKey::SaveToDevice if !self.saving() => Ok(()),
+            _ if self.saving() => self.apply_all(VARSTORE),
+            _ => self.apply_all(NOSTORE),
         };
         if let Err(e) = result {
             // Not applied: keep the UI and the file on the old value.
@@ -496,7 +519,8 @@ impl DeviceAdapter for RazerKeyboardAdapter {
             return Ok(());
         }
         self.last_poll = std::time::Instant::now();
-        if let Ok(Some(br)) = self.read_brightness_pct() {
+        // VARSTORE reads the stored brightness: current only in save mode.
+        if let Some(Ok(Some(br))) = self.saving().then(|| self.read_brightness_pct()) {
             let cur = get_setting(&self.settings, SettingKey::Brightness)
                 .and_then(|v| v.as_int())
                 .unwrap_or(-1);
@@ -539,40 +563,89 @@ mod tests {
     fn kb_effect_args_match_wire_tables() {
         // Static red: 01 05 01 00 00 01 FF 00 00
         assert_eq!(
-            kb_effect_args(KbEffectKind::Static, 0xFF, 0x00, 0x00, "medium", "left"),
+            kb_effect_args(
+                VARSTORE,
+                KbEffectKind::Static,
+                0xFF,
+                0x00,
+                0x00,
+                "medium",
+                "left"
+            ),
             vec![0x01, 0x05, 0x01, 0x00, 0x00, 0x01, 0xFF, 0x00, 0x00]
         );
         // Off: 01 05 00 00 00 00
         assert_eq!(
-            kb_effect_args(KbEffectKind::Off, 0, 0, 0, "medium", "left"),
+            kb_effect_args(VARSTORE, KbEffectKind::Off, 0, 0, 0, "medium", "left"),
             vec![0x01, 0x05, 0x00, 0x00, 0x00, 0x00]
         );
         // Spectrum: 01 05 03 00 00 00
         assert_eq!(
-            kb_effect_args(KbEffectKind::Spectrum, 0, 0, 0, "medium", "left"),
+            kb_effect_args(VARSTORE, KbEffectKind::Spectrum, 0, 0, 0, "medium", "left"),
             vec![0x01, 0x05, 0x03, 0x00, 0x00, 0x00]
         );
         // Wave left: 01 05 04 01 28 00 ; right dir byte = 0x02
         assert_eq!(
-            kb_effect_args(KbEffectKind::Wave, 0, 0, 0, "medium", "left"),
+            kb_effect_args(VARSTORE, KbEffectKind::Wave, 0, 0, 0, "medium", "left"),
             vec![0x01, 0x05, 0x04, 0x01, 0x28, 0x00]
         );
         assert_eq!(kb_wave_dir("right"), 0x02);
         // Reactive fast green: 01 05 05 00 01 01 00 FF 00
         assert_eq!(
-            kb_effect_args(KbEffectKind::Reactive, 0x00, 0xFF, 0x00, "fast", "left"),
+            kb_effect_args(
+                VARSTORE,
+                KbEffectKind::Reactive,
+                0x00,
+                0xFF,
+                0x00,
+                "fast",
+                "left"
+            ),
             vec![0x01, 0x05, 0x05, 0x00, 0x01, 0x01, 0x00, 0xFF, 0x00]
         );
         // Breathing single blue: 01 05 02 01 00 01 00 00 FF
         assert_eq!(
-            kb_effect_args(KbEffectKind::Breathing, 0x00, 0x00, 0xFF, "medium", "left"),
+            kb_effect_args(
+                VARSTORE,
+                KbEffectKind::Breathing,
+                0x00,
+                0x00,
+                0xFF,
+                "medium",
+                "left"
+            ),
             vec![0x01, 0x05, 0x02, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF]
         );
         // Starlight slow white: 01 05 07 00 03 01 FF FF FF
         assert_eq!(
-            kb_effect_args(KbEffectKind::Starlight, 0xFF, 0xFF, 0xFF, "slow", "left"),
+            kb_effect_args(
+                VARSTORE,
+                KbEffectKind::Starlight,
+                0xFF,
+                0xFF,
+                0xFF,
+                "slow",
+                "left"
+            ),
             vec![0x01, 0x05, 0x07, 0x00, 0x03, 0x01, 0xFF, 0xFF, 0xFF]
         );
+    }
+
+    /// Lighting is volatile unless save mode is on; the toggle needs the opt-in.
+    #[test]
+    fn huntsman_stores_only_in_save_mode() {
+        assert_eq!(
+            kb_effect_args(NOSTORE, KbEffectKind::Static, 1, 2, 3, "medium", "left"),
+            vec![0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 1, 2, 3]
+        );
+        let c = controls(KbEffectKind::Static);
+        let save = c
+            .iter()
+            .find(|m| m.key == SettingKey::SaveToDevice)
+            .unwrap();
+        assert!(save.persistent && save.blocked.is_none());
+        assert!(c.iter().filter(|m| m.persistent).count() == 1);
+        assert_eq!(pct_from_wire((33u16 * 255 / 100) as u8), 32);
     }
 
     #[test]
@@ -626,7 +699,15 @@ mod tests {
             )
         );
         // Default static colour (0,120,255): 00 1f 0000 00 09 0f 02 010501000001 0078ff
-        let args = kb_effect_args(KbEffectKind::Static, 0, 120, 255, "medium", "left");
+        let args = kb_effect_args(
+            VARSTORE,
+            KbEffectKind::Static,
+            0,
+            120,
+            255,
+            "medium",
+            "left",
+        );
         assert_eq!(
             make_report(TXN_LED, 0x0f, 0x02, &args),
             literal(
@@ -639,15 +720,15 @@ mod tests {
         );
         // Wave right and Starlight medium keep their bytes too.
         assert_eq!(
-            kb_effect_args(KbEffectKind::Wave, 0, 0, 0, "medium", "right"),
+            kb_effect_args(VARSTORE, KbEffectKind::Wave, 0, 0, 0, "medium", "right"),
             vec![0x01, 0x05, 0x04, 0x02, 0x28, 0x00]
         );
         assert_eq!(
-            kb_effect_args(KbEffectKind::Starlight, 1, 2, 3, "medium", "left"),
+            kb_effect_args(VARSTORE, KbEffectKind::Starlight, 1, 2, 3, "medium", "left"),
             vec![0x01, 0x05, 0x07, 0x00, 0x02, 0x01, 1, 2, 3]
         );
         assert_eq!(
-            kb_effect_args(KbEffectKind::Reactive, 1, 2, 3, "slow", "left"),
+            kb_effect_args(VARSTORE, KbEffectKind::Reactive, 1, 2, 3, "slow", "left"),
             vec![0x01, 0x05, 0x05, 0x00, 0x04, 0x01, 1, 2, 3]
         );
     }

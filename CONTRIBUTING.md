@@ -14,7 +14,11 @@ scripts/check-public.sh   # no local paths, user names or secrets
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
+
+The toolchain is pinned in `rust-toolchain.toml` (rustup picks it up), so
+local checks match CI.
 
 Hardware tests are `#[ignore]`d; run them locally with
 `cargo test -- --ignored` with the device plugged in.

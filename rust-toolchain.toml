@@ -1,0 +1,7 @@
+# CI and release builds use this exact toolchain (dtolnay/rust-toolchain@<same>
+# in .github/workflows); scripts/publish.sh refuses to run if they differ.
+# Bump all three together.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
