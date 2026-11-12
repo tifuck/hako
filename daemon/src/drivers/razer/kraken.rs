@@ -1,4 +1,5 @@
-//! Razer headsets: Kraken lighting and BlackShark V2 Pro (PlayStation) battery.
+//! Razer headsets: Kraken lighting, BlackShark V2 Pro (PlayStation) and
+//! BlackShark V2 Pro (2023) battery.
 //!
 //! Kraken (OpenRazer `driver/razerkraken_driver.{c,h}`, GPL; byte layouts
 //! only, reimplemented): a 37-byte output report (id 0x04) sent as
@@ -24,11 +25,25 @@
 //! by an input report `02 LL 'P' 'I' .. type(12) 0x80|seq(13) status(14) data`.
 //! The battery voltage (mV) is read from the headset by switching the dongle
 //! to "remote" mode and always back to "local" (a runtime mode, not stored).
+//!
+//! BlackShark V2 Pro (2023), dongle 1532:0555 (OpenRazer PR #2862
+//! `driver/razerblackshark_driver.{c,h}`, unmerged, and blackshark-control
+//! `blackshark/protocol.py`, which follows it; both GPL, reimplemented):
+//! the vendor node (usage page 0xFF00, report id 0x02) takes 64-byte output
+//! reports `02 80 LL 00 00 'P' 'A' 08 00 type cmd 00 len payload` (no CRC;
+//! LL = 8 + len) and answers with input reports `[12]` cmd, `[13]` 0x01 ack,
+//! `[14]` length, data from `[15]`. A query (type 0x03) is wrapped in
+//! set_remote_mode frames `02 80 07 00 00 'P' 'A' 0e 00 02 e1 on`: one
+//! sacrificial "on" wakes the dozing link, each attempt re-sends "on", the
+//! last frame is "off"; 35 ms after each, replies within 150 ms. Battery
+//! (0x21) is 0..=100, charging (0x2a) nonzero on the cable. The headset
+//! stores sidetone and auto-off (PR #2862: "settings persist in the
+//! device"), so those are listed blocked.
 
 use super::protocol::Effect;
 use super::VID;
 use crate::drivers::{DeviceAdapter, DriverCtx, Model, Opened};
-use crate::hid::{find_hidraw, hidioc, HidrawDevice};
+use crate::hid::{enumerate_hidraw, find_hidraw, hidioc, report_ids, usage_pages, HidrawDevice};
 use anyhow::{anyhow, bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
@@ -133,6 +148,7 @@ const fn kraken_model(k: &Kraken) -> Model {
 }
 
 const BLACKSHARK_PID: u16 = 0x1014;
+const BLACKSHARK_2023_PID: u16 = 0x0555;
 
 pub const MODELS: &[Model] = &[
     kraken_model(&KRAKENS[0]),
@@ -149,6 +165,15 @@ pub const MODELS: &[Model] = &[
         usbfs: false,
         multi: false,
         open: open_blackshark,
+    },
+    Model {
+        vendor_id: VID,
+        product_ids: &[BLACKSHARK_2023_PID],
+        kind: DeviceKind::Headset,
+        name: "Razer BlackShark V2 Pro (2023)",
+        usbfs: false,
+        multi: false,
+        open: open_blackshark_2023,
     },
 ];
 
@@ -663,6 +688,210 @@ impl DeviceAdapter for BlackSharkAdapter {
     }
 }
 
+// ── BlackShark V2 Pro (2023) battery ───────────────────────────────────────
+
+const BS23_USAGE_PAGE: u16 = 0xff00;
+const BS23_QUERY: u8 = 0x03;
+const BS23_BATTERY: u8 = 0x21;
+const BS23_CHARGING: u8 = 0x2a;
+const BS23_SETTLE: Duration = Duration::from_millis(35);
+/// Per-attempt reply wait, below the ~0.3 s after which the link dozes.
+const BS23_REPLY: Duration = Duration::from_millis(150);
+const BS23_STORED: &str =
+    "the headset stores it; layout from one unmerged OpenRazer PR (#2862) and a tool based on it";
+
+/// A query (type 0x03) without payload.
+fn bs23_query(cmd: u8) -> [u8; 64] {
+    let mut f = [0u8; 64];
+    f[..3].copy_from_slice(&[BS_REPORT_ID, BS_FRAME_OUT, 0x08]);
+    f[5..8].copy_from_slice(&[0x50, 0x41, 0x08]);
+    f[9..11].copy_from_slice(&[BS23_QUERY, cmd]);
+    f
+}
+
+/// set_remote_mode (type 0x02, cmd 0xe1, the flag byte carries on / off).
+fn bs23_remote(on: bool) -> [u8; 64] {
+    let mut f = [0u8; 64];
+    f[..3].copy_from_slice(&[BS_REPORT_ID, BS_FRAME_OUT, 0x07]);
+    f[5..8].copy_from_slice(&[0x50, 0x41, 0x0e]);
+    f[9..12].copy_from_slice(&[0x02, SET_MODE, u8::from(on)]);
+    f
+}
+
+/// Payload of an acknowledged reply to `cmd`, cut to the length it reports.
+fn bs23_reply(report: &[u8], cmd: u8) -> Option<&[u8]> {
+    (report.len() > 15 && report[0] == BS_REPORT_ID && report[12] == cmd && report[13] == 0x01)
+        .then(|| &report[15..report.len().min(15 + usize::from(report[14]))])
+}
+
+fn open_blackshark_2023(pid: u16, _ctx: &DriverCtx) -> Opened {
+    let info = enumerate_hidraw()?
+        .into_iter()
+        .find(|d| {
+            let desc = d.report_descriptor();
+            d.vendor_id == VID
+                && d.product_id == pid
+                && usage_pages(&desc).contains(&BS23_USAGE_PAGE)
+                && report_ids(&desc).contains(&BS_REPORT_ID)
+        })
+        .context("no vendor control node (usage page ff00, report id 2)")?;
+    let a = BlackShark2023Adapter {
+        id: DeviceId {
+            vendor_id: VID,
+            product_id: pid,
+            instance: info.path.display().to_string(),
+        },
+        dev: Some(HidrawDevice::open(&info.path)?),
+        state: None,
+        last_poll: None,
+        last_error: None,
+    };
+    info!(
+        "Razer BlackShark V2 Pro (2023) open via {}",
+        info.path.display()
+    );
+    Ok(vec![Box::new(a)])
+}
+
+struct BlackShark2023Adapter {
+    id: DeviceId,
+    dev: Option<HidrawDevice>,
+    /// (percent, charging) while the headset answers.
+    state: Option<(u8, bool)>,
+    last_poll: Option<Instant>,
+    last_error: Option<String>,
+}
+
+impl BlackShark2023Adapter {
+    fn send(&mut self, frame: &[u8; 64]) -> Result<()> {
+        let dev = self.dev.as_mut().context("device not open")?;
+        if let Err(e) = dev.write(frame) {
+            if !dev.path.exists() {
+                self.dev = None;
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn remote(&mut self, on: bool) -> Result<()> {
+        self.send(&bs23_remote(on))?;
+        std::thread::sleep(BS23_SETTLE);
+        Ok(())
+    }
+
+    /// First payload byte of the answer, `None` if the headset does not
+    /// answer (off or out of range: the dongle enumerates either way).
+    fn query(&mut self, cmd: u8) -> Result<Option<u8>> {
+        self.dev
+            .as_mut()
+            .context("device not open")?
+            .drain(Duration::ZERO);
+        self.remote(true)?;
+        let mut answer = None;
+        for _ in 0..ATTEMPTS {
+            self.remote(true)?;
+            self.send(&bs23_query(cmd))?;
+            answer = self.await_reply(cmd);
+            if answer.is_some() {
+                break;
+            }
+        }
+        self.remote(false)?;
+        Ok(answer)
+    }
+
+    fn await_reply(&mut self, cmd: u8) -> Option<u8> {
+        let dev = self.dev.as_mut()?;
+        let start = Instant::now();
+        let mut buf = [0u8; 64];
+        loop {
+            let left = BS23_REPLY
+                .checked_sub(start.elapsed())
+                .filter(|d| !d.is_zero())?;
+            let n = dev.read_timeout(&mut buf, left).ok()?;
+            if let Some(data) = bs23_reply(&buf[..n], cmd) {
+                return data.first().copied();
+            }
+        }
+    }
+
+    fn read_state(&mut self) -> Result<Option<(u8, bool)>> {
+        let Some(level) = self.query(BS23_BATTERY)? else {
+            return Ok(None);
+        };
+        let charging = self.query(BS23_CHARGING)?.is_some_and(|c| c != 0);
+        Ok(Some((level.min(100), charging)))
+    }
+}
+
+impl DeviceAdapter for BlackShark2023Adapter {
+    fn id(&self) -> &DeviceId {
+        &self.id
+    }
+
+    fn snapshot(&self) -> DeviceSnapshot {
+        let stored = |meta: SettingMeta| meta.persistent().blocked(BS23_STORED);
+        DeviceSnapshot {
+            id: self.id.clone(),
+            kind: DeviceKind::Headset,
+            name: "Razer BlackShark V2 Pro (2023)".into(),
+            connected: self.dev.is_some(),
+            batteries: vec![BatteryState {
+                label: "Battery".into(),
+                percent: self.state.map(|(pct, _)| pct),
+                charging: self.state.is_some_and(|(_, c)| c),
+                present: self.state.is_some(),
+            }],
+            settings: SettingsMap::new(),
+            controls: vec![
+                stored(SettingMeta::slider(
+                    SettingKey::MicSideTone,
+                    "Mic monitoring",
+                    0.0,
+                    10.0,
+                    1.0,
+                )),
+                stored(
+                    SettingMeta::slider(SettingKey::PmShutdown, "Auto-off", 15.0, 60.0, 1.0)
+                        .unit("min"),
+                ),
+            ],
+            last_error: self.last_error.clone(),
+        }
+    }
+
+    fn set(&mut self, key: SettingKey, _value: SettingValue) -> Result<()> {
+        bail!(
+            "BlackShark V2 Pro (2023): {} is not available",
+            key.as_str()
+        )
+    }
+
+    fn tick(&mut self) -> Result<()> {
+        if self.dev.is_none() || self.last_poll.is_some_and(|t| t.elapsed() < BATTERY_POLL) {
+            return Ok(());
+        }
+        self.last_poll = Some(Instant::now());
+        match self.read_state() {
+            Ok(state) => {
+                self.state = state;
+                self.last_error = None;
+            }
+            Err(e) => {
+                debug!("BlackShark V2 Pro (2023) battery: {e}");
+                self.state = None;
+                self.last_error = Some(e.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        self.dev = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,6 +974,52 @@ mod tests {
             tx(TYPE_LINK, 8, &[SET_MODE, MODE_LOCAL]),
             padded(&[0x02, 0x80, 0x07, 0x72, 0xde, 0x50, 0x41, 0x0e, 0x08, 0x02, 0xe1, 0x00])
         );
+    }
+
+    /// Frames as PR #2862 `blackshark_v2pro_write_header` / `blackshark_set_remote`
+    /// and blackshark-control `_frame` / `_remote` build them.
+    #[test]
+    fn blackshark_2023_frames_and_replies() {
+        assert_eq!(
+            bs23_query(BS23_BATTERY),
+            padded(&[0x02, 0x80, 0x08, 0, 0, 0x50, 0x41, 0x08, 0, 0x03, 0x21])
+        );
+        assert_eq!(
+            bs23_remote(true),
+            padded(&[0x02, 0x80, 0x07, 0, 0, 0x50, 0x41, 0x0e, 0, 0x02, 0xe1, 0x01])
+        );
+        assert_eq!(bs23_remote(false)[11], 0x00);
+
+        let mut r = padded(&[0x02]);
+        r[12..16].copy_from_slice(&[BS23_BATTERY, 0x01, 0x01, 0x4b]);
+        assert_eq!(bs23_reply(&r, BS23_BATTERY), Some(&[0x4b][..]));
+        assert_eq!(bs23_reply(&r, BS23_CHARGING), None, "other command");
+        r[13] = 0x00;
+        assert_eq!(bs23_reply(&r, BS23_BATTERY), None, "not acknowledged");
+        r[13] = 0x01;
+        r[14] = 0xff;
+        assert_eq!(bs23_reply(&r, BS23_BATTERY).map(<[u8]>::len), Some(64 - 15));
+        assert_eq!(bs23_reply(&r[..15], BS23_BATTERY), None, "too short");
+
+        // Headset-stored settings are listed, never offered.
+        let a = BlackShark2023Adapter {
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: BLACKSHARK_2023_PID,
+                instance: "test".into(),
+            },
+            dev: None,
+            state: None,
+            last_poll: None,
+            last_error: None,
+        };
+        let snap = a.snapshot();
+        assert!(!snap.controls.is_empty());
+        for m in &snap.controls {
+            assert!(m.persistent && m.blocked.is_some(), "{}", m.key.as_str());
+            assert!(m.validate(&SettingValue::Int(5)).is_err());
+        }
+        assert!(!snap.batteries[0].present);
     }
 
     #[test]

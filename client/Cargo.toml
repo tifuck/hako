@@ -3,7 +3,7 @@ name = "hako"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Hako control panel (egui client for hakod)"
+description = "hako control panel (egui client for hakod)"
 
 [[bin]]
 name = "hako"

@@ -1,6 +1,6 @@
 # Contributing
 
-Hako is a Linux-only Rust workspace: a daemon (`hakod`) that owns all
+hako is a Linux-only Rust workspace: a daemon (`hakod`) that owns all
 hardware and audio I/O, and a thin egui client (`hako`). The client never
 opens HID or PipeWire; shared types and the IPC schema live in `libs/core`, so
 change them there first, then the daemon and client.
@@ -74,7 +74,7 @@ several vendors (hidraw, feature reports, usbfs) belong in `daemon/src/hid/`.
 
 ## Protocol sources and licensing
 
-Hako is MIT. Reimplement protocols from public documentation, packet
+hako is MIT. Reimplement protocols from public documentation, packet
 captures, and your own reverse engineering. **Do not copy code** from GPL
 projects (OpenRazer, Solaar, libratbag, HeadsetControl, OpenRGB); citing them
 as references for byte layouts is fine. Name your sources in the driver's

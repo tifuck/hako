@@ -31,7 +31,7 @@ pub fn fallback(nodes: &[&HidDeviceInfo]) -> Option<Fallback> {
     Some(Fallback { kind, name, open })
 }
 
-fn classify(nodes: &[&HidDeviceInfo]) -> Option<(DeviceKind, String)> {
+pub(super) fn classify(nodes: &[&HidDeviceInfo]) -> Option<(DeviceKind, String)> {
     let first = nodes.first()?;
     if IGNORED_VENDORS.contains(&first.vendor_id)
         || !nodes
@@ -161,7 +161,7 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         battery: None,
         last_poll: Instant::now(),
     };
-    a.battery = a.read_battery();
+    a.battery = kernel_battery(&a.hid_dirs);
     Ok(vec![Box::new(a)])
 }
 
@@ -174,25 +174,23 @@ pub struct GenericInput {
     last_poll: Instant,
 }
 
-impl GenericInput {
-    /// The kernel's HID battery (`power_supply/*` under any of the nodes).
-    fn read_battery(&self) -> Option<BatteryState> {
-        self.hid_dirs.iter().find_map(|d| {
-            let ps = std::fs::read_dir(d.join("power_supply"))
-                .ok()?
-                .flatten()
-                .next()?;
-            let read = |f: &str| std::fs::read_to_string(ps.path().join(f)).ok();
-            let percent = read("capacity").and_then(|s| s.trim().parse::<u8>().ok());
-            let status = read("status").unwrap_or_default();
-            Some(BatteryState {
-                label: "Battery".into(),
-                percent: percent.map(|p| p.min(100)),
-                charging: status.trim() == "Charging",
-                present: true,
-            })
+/// The kernel's HID battery (`power_supply/*` under any of the nodes).
+pub(super) fn kernel_battery(hid_dirs: &[PathBuf]) -> Option<BatteryState> {
+    hid_dirs.iter().find_map(|d| {
+        let ps = std::fs::read_dir(d.join("power_supply"))
+            .ok()?
+            .flatten()
+            .next()?;
+        let read = |f: &str| std::fs::read_to_string(ps.path().join(f)).ok();
+        let percent = read("capacity").and_then(|s| s.trim().parse::<u8>().ok());
+        let status = read("status").unwrap_or_default();
+        Some(BatteryState {
+            label: "Battery".into(),
+            percent: percent.map(|p| p.min(100)),
+            charging: status.trim() == "Charging",
+            present: true,
         })
-    }
+    })
 }
 
 impl DeviceAdapter for GenericInput {
@@ -220,7 +218,7 @@ impl DeviceAdapter for GenericInput {
     fn tick(&mut self) -> Result<()> {
         if self.last_poll.elapsed() >= BATTERY_POLL {
             self.last_poll = Instant::now();
-            self.battery = self.read_battery();
+            self.battery = kernel_battery(&self.hid_dirs);
         }
         Ok(())
     }

@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
-const VIRTUAL_NAME: &str = "Hako Remap";
+const VIRTUAL_NAME: &str = "hako remap";
 const KEY_ESC: u16 = 1;
 /// Upper bound on one poll; also the command latency.
 const IDLE_WAIT: Duration = Duration::from_millis(100);
@@ -547,7 +547,7 @@ impl Worker {
             let blocked = unreadable_nodes(slot.id.vendor_id, &slot.pids);
             if let Some(first) = blocked.first() {
                 let msg = format!(
-                    "Cannot read {} ({} input node(s)): add your user to the `input` group, or install the Hako udev rules if this device is listed.",
+                    "Cannot read {} ({} input node(s)): add your user to the `input` group, or install the hako udev rules if this device is listed.",
                     first.display(),
                     blocked.len()
                 );

@@ -152,17 +152,21 @@ pub(super) fn hero(
         if let Some(dir) = dir {
             super::arrow(&p, face.center(), dir, unit * 0.13, ink);
         } else {
-            // Long legends (PrtSc, Pause) drop a size so they stay on the cap.
-            let font = if cap.label.len() > 4 && cap.w < 1.25 {
-                sub.clone()
-            } else {
-                legend.clone()
-            };
-            p.with_clip_rect(face).text(
-                face.left_top() + vec2(unit * 0.12, unit * 0.09),
-                egui::Align2::LEFT_TOP,
-                cap.label,
-                font,
+            // Legends too wide for the cap (Home, PgUp, PrtSc) shrink to fit
+            // with the same margin on both sides.
+            let pad = unit * 0.12;
+            let room = face.width() - pad * 2.0;
+            let mut galley = p.layout_no_wrap(cap.label.into(), legend.clone(), ink);
+            if galley.size().x > room {
+                let size = (legend.size * room / galley.size().x).max(7.0);
+                galley = p.layout_no_wrap(cap.label.into(), egui::FontId::proportional(size), ink);
+            }
+            // Centred on the full-size line, so shrunk legends line up with
+            // their neighbours.
+            let line = p.fonts(|f| f.row_height(&legend));
+            p.with_clip_rect(face).galley(
+                face.left_top() + vec2(pad, unit * 0.09 + (line - galley.size().y) / 2.0),
+                galley,
                 ink,
             );
         }

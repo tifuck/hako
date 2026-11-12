@@ -56,20 +56,6 @@ const CATEGORIES: [&str; 9] = [
     "System",
 ];
 
-/// Features the daemon cannot do yet; shown disabled so nobody hunts for them.
-const SOON: [(&str, &str); 4] = [
-    (
-        "Second layer",
-        "Hypershift / G-Shift style layer held by a modifier key",
-    ),
-    ("Launch program", "Start an application or run a command"),
-    ("Type text", "Type a saved snippet"),
-    (
-        "Per-app profiles",
-        "Switch assignments with the focused window",
-    ),
-];
-
 fn items(cx: &Cx, category: usize) -> Vec<(String, Action, Color32)> {
     let keys = |codes: &[u16]| -> Vec<(String, Action, Color32)> {
         codes
@@ -277,9 +263,11 @@ pub(super) fn panel(ui: &mut Ui, cx: &mut Cx, selected: Option<EvdevKey>) -> Opt
                     if list.is_empty() {
                         widgets::hint(ui, "Nothing matches. Detect can capture any key directly.");
                     }
+                    // A wrapped row takes its height from `interact_size` when it
+                    // is created, so set it first or rows end up taller than chips.
+                    ui.spacing_mut().interact_size.y = CHIP_H;
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(6.0, CHIP_GAP);
-                        ui.spacing_mut().interact_size.y = CHIP_H;
                         for (label, action, color) in &list {
                             if chip(ui, label, *action, *color, current == Some(*action)) {
                                 picked = Some(*action);
@@ -287,37 +275,6 @@ pub(super) fn panel(ui: &mut Ui, cx: &mut Cx, selected: Option<EvdevKey>) -> Opt
                         }
                     });
                 });
-
-            ui.add_space(theme::SPACE_SM);
-            widgets::divider(ui);
-            ui.add_space(theme::SPACE_XS);
-            ui.label(theme::eyebrow("Coming soon"));
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                for (label, what) in SOON {
-                    let galley = ui.fonts(|f| {
-                        f.layout_no_wrap(
-                            label.into(),
-                            egui::FontId::proportional(12.0),
-                            pal().text_faint,
-                        )
-                    });
-                    let (rect, resp) =
-                        ui.allocate_exact_size(galley.size() + vec2(18.0, 10.0), Sense::hover());
-                    ui.painter().rect_stroke(
-                        rect,
-                        7.0,
-                        Stroke::new(1.0_f32, pal().border),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().galley(
-                        rect.center() - galley.size() / 2.0,
-                        galley,
-                        pal().text_faint,
-                    );
-                    resp.on_hover_text(format!("{what}. Not supported by the daemon yet."));
-                }
-            });
         },
     );
     ui.ctx().data_mut(|m| m.insert_temp(id, (category, search)));

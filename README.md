@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="branding/logo/hako-logo-dark.svg">
-  <img src="branding/logo/hako-logo.svg" alt="Hako" height="84">
+  <img src="branding/logo/hako-logo.svg" alt="hako" height="84">
 </picture>
 
 ### All your gaming gear in one box.
@@ -24,13 +24,13 @@ Lighting, DPI, key bindings, macros, ChatMix and line-in, without a single vendo
 
 <br>
 
-<img src="docs/screenshots/hero.png" alt="Hako key bindings page for a Razer Huntsman V2 TKL: a drawn keyboard with remapped keys highlighted and a list of five assignments" width="900">
+<img src="docs/screenshots/hero.png" alt="hako key bindings page for a Razer Huntsman V2 TKL: a drawn keyboard with remapped keys highlighted and a list of five assignments" width="900">
 
 </div>
 
 <br>
 
-**Hako** (箱, *HAH-koh*, Japanese for *box*) replaces Razer Synapse, Logitech
+**hako** (箱, *HAH-koh*, Japanese for *box*) replaces Razer Synapse, Logitech
 G HUB, Corsair iCUE, SteelSeries GG, HyperX NGENUITY and Armoury Crate with one
 small background service and one fast, native window. It is built for Linux
 from the ground up: no Wine, no web view, no account, no telemetry.
@@ -161,7 +161,7 @@ allow them for that device.
   - **Disable**: the key does nothing.
 - Drag an action from the searchable library straight onto a key.
 - Applied on your computer through the kernel's input layer, so it works with
-  **any USB or Bluetooth mouse or keyboard**, even ones Hako has no driver
+  **any USB or Bluetooth mouse or keyboard**, even ones hako has no driver
   for, and nothing is written to the device.
 
 ### Headsets with the controls you were promised
@@ -192,7 +192,7 @@ it through your headset. The signal can run through a drag-to-reorder chain:
 | **Compressor** | threshold, ratio, knee, attack, release, make-up gain |
 | **Parametric EQ** | up to 8 bands: peaking, low and high shelf, low and high pass |
 
-Hako only manages its own nodes. It remembers your default output and puts it
+hako only manages its own nodes. It remembers your default output and puts it
 back when it stops, and `hakod --reset-audio` is a one-command kill switch.
 
 ### Make it yours
@@ -208,11 +208,11 @@ Four hand-tuned themes: **Onyx** (near-black), **Graphite**, **Synthwave** and
   by the daemon.
 - **Device memory is opt-in per device.** A setting that would be stored on
   the device itself (onboard DPI, saved lighting) stays locked until you
-  confirm *Allow saving to device memory* for that device. Writes Hako isn't
+  confirm *Allow saving to device memory* for that device. Writes hako isn't
   confident about are shown, but blocked with the reason.
 - **No root service.** The daemon runs as you. udev gives your login seat
   access to the supported devices only.
-- **Private by design.** The only network request Hako makes is the update
+- **Private by design.** The only network request hako makes is the update
   check, and you can switch it off.
 
 ---
@@ -241,7 +241,7 @@ macros.
 The full list with USB IDs and status is in
 **[docs/DEVICES.md](docs/DEVICES.md)**.
 
-Hako also recognises devices that aren't in the list:
+hako also recognises devices that aren't in the list:
 
 - **Logitech HID++** mice and keyboards are detected from their protocol.
 - **QMK / VIA** keyboards get lighting control over raw HID.
@@ -270,7 +270,7 @@ double-click it, or:
 sudo apt install ./hako_*_amd64.deb
 ```
 
-That's it: launch **Hako** from your app menu. The package installs the app,
+That's it: launch **hako** from your app menu. The package installs the app,
 the device permissions (udev rules) and the background service, and starts the
 service for you. It works on Ubuntu 22.04 and newer and Debian 12 and newer.
 
@@ -293,7 +293,7 @@ openSUSE, ...). Installs for your user only.
    ./scripts/install-user.sh
    ```
 
-3. Launch **Hako** from your app menu, or run `hako`.
+3. Launch **hako** from your app menu, or run `hako`.
 
 The installer puts `hakod` and `hako` in `~/.local/bin`, adds the systemd user
 service, desktop entry and icon, installs the udev rules (it asks for `sudo`
@@ -329,7 +329,7 @@ sudo apt install pipewire-bin wireplumber alsa-utils curl lsp-plugins-ladspa
 ### Updates
 
 Release builds look for a new version a minute after the window opens, then
-every 6 hours. When one is out, a card offers **Restart and update**. Hako
+every 6 hours. When one is out, a card offers **Restart and update**. hako
 downloads the release, checks it against `SHA256SUMS`, installs it, restarts
 the daemon and reopens. A `.deb` install updates through apt, so your desktop
 asks for your password; a tarball install only asks when device permissions
@@ -392,7 +392,7 @@ journalctl --user -u hakod -f
 hakod --diagnose            # every HID device and which driver handles it
 hakod --list-devices        # the supported-device list
 hakod --udev-rules          # udev rules for every supported device
-hakod --reset-audio         # remove Hako's audio nodes, restore the default output
+hakod --reset-audio         # remove hako's audio nodes, restore the default output
 hakod --log-level debug     # run in the foreground with verbose logs
 ```
 
@@ -420,7 +420,7 @@ Device nodes should look like `crw-rw----+ root plugdev`.
 <summary><b>A device shows up but doesn't respond</b></summary>
 
 Only one program can drive a device at a time. Stop any of these for devices
-Hako manages: `openrazer-daemon`, `ratbagd` (Piper), Solaar, `ckb-next`,
+hako manages: `openrazer-daemon`, `ratbagd` (Piper), Solaar, `ckb-next`,
 OpenRGB, HeadsetControl. Then run `hakod --diagnose` and include its output in
 an issue.
 
@@ -429,7 +429,7 @@ an issue.
 <details>
 <summary><b>Remaps don't work on a mouse or keyboard without a driver</b></summary>
 
-Devices Hako has no driver for aren't in the generated udev rules, so the
+Devices hako has no driver for aren't in the generated udev rules, so the
 daemon needs read access to their `/dev/input/event*` node, for example by
 adding yourself to the `input` group. The bindings page shows the exact error.
 
@@ -482,7 +482,7 @@ MIT, see [LICENSE](LICENSE). Device protocols are reimplemented from public
 reverse-engineering work; [NOTICE](NOTICE) credits every project consulted,
 and no code from them is included.
 
-Hako is an independent project, not affiliated with or endorsed by Razer,
+hako is an independent project, not affiliated with or endorsed by Razer,
 Logitech, SteelSeries, Corsair, HyperX, ASUS, Sony or any other manufacturer.
 Product names are trademarks of their owners.
 

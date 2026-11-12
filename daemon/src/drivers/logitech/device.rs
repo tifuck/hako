@@ -22,6 +22,8 @@
 //!   update + FrameEnd, Solaar's single-colour path), since per-key paint
 //!   overrides the zone colour.
 //! - Headsets with 0x1F20 v2+ get the auto-off timer (minutes).
+//! - Mice whose 0x2202 reports a settable lift-off distance get it as a
+//!   control; it rides the volatile DPI write (fn 6), like DPI itself.
 //! - Onboard memory is never written. The store paths that exist (0x8100
 //!   profile sectors, the 0x8070 / 0x8071 store flags, the 0x8310 stored
 //!   equalizer) are shown as blocked controls with the reason; the research
@@ -127,8 +129,8 @@ pub(super) const BLOCK_PROFILES: &str =
     "onboard profile (0x8100) writes: libratbag and Solaar disagree on \
      which profile is active (libratbag #1875), and libratbag rewrites whole sectors (#1898)";
 pub(super) const BLOCK_ZONE_STORE: &str =
-    "0x8070 store flag (persistence 1) is documented, but no \
-     maintained tool stores lighting on this model";
+    "0x8070 store flag (persistence 1): libratbag writes an effect id where \
+     Solaar, OpenRGB and OpenLogi write an effect index, and no capture confirms the stored result";
 pub(super) const BLOCK_RGB_STORE: &str =
     "0x8071 store flag: OpenLogi (bit 1 = EEPROM) and OpenRGB (0x01 = persist) disagree";
 pub(super) const BLOCK_EQ_STORE: &str =
@@ -189,6 +191,8 @@ pub struct HidppAdapter {
     battery: Option<BatteryState>,
     dpis: Vec<u16>,
     lod: u8,
+    /// 0x2202 reports a settable lift-off distance.
+    lod_settable: bool,
     rates: Vec<u32>,
     zones: Vec<LedZone>,
     brightness: Option<(u16, u16)>,
@@ -239,6 +243,7 @@ impl HidppAdapter {
             battery: None,
             dpis: Vec::new(),
             lod: 2,
+            lod_settable: false,
             rates: Vec::new(),
             zones: Vec::new(),
             brightness: None,
@@ -311,6 +316,7 @@ impl HidppAdapter {
         self.sync();
         // Host-mode DPI / rate are volatile: put back what the user chose.
         let restore = [
+            (SettingKey::LiftOffDistance, self.lod_settable),
             (SettingKey::Dpi, self.feat.dpi.is_some()),
             (SettingKey::ReportRate, self.feat.rate.is_some()),
         ];
@@ -323,6 +329,7 @@ impl HidppAdapter {
             }
             let written = match key {
                 SettingKey::Dpi => self.set_dpi(v as u16),
+                SettingKey::LiftOffDistance => self.set_lod(v as u8),
                 _ => self.set_rate(v as u32).map(|()| {
                     merge_setting(&mut self.settings, key, SettingValue::Int(v));
                 }),
@@ -408,6 +415,12 @@ impl HidppAdapter {
     }
 
     fn read_caps(&mut self) {
+        if let Some((idx, true)) = self.feat.dpi {
+            // fn 1 GetSensorCapabilities(sensor 0) → flags at [6], bit 1 = LOD.
+            self.lod_settable = self
+                .call(idx, 0x01, &[0x00])
+                .is_ok_and(|r| hidpp::ext_dpi_has_lod(r[6]));
+        }
         if let Some((idx, ext)) = self.feat.dpi {
             self.dpis = if ext {
                 // fn 2 GetSensorDpiRanges(sensor 0, X, page) → 3-byte echo + list.
@@ -554,6 +567,13 @@ impl HidppAdapter {
                 }
                 if ext && r[13] <= 2 {
                     self.lod = r[13];
+                    if self.lod_settable {
+                        merge_setting(
+                            &mut self.settings,
+                            SettingKey::LiftOffDistance,
+                            SettingValue::Int(self.lod.into()),
+                        );
+                    }
                 }
             }
         }
@@ -637,6 +657,21 @@ impl HidppAdapter {
             &mut self.settings,
             SettingKey::Dpi,
             SettingValue::Int(dpi.into()),
+        );
+        Ok(())
+    }
+
+    /// 0x2202 has no LOD-only write: re-send the current DPI with the new LOD.
+    fn set_lod(&mut self, lod: u8) -> Result<()> {
+        let dpi = get_setting(&self.settings, SettingKey::Dpi)
+            .and_then(|v| v.as_int())
+            .context("current DPI unknown")? as u16;
+        let old = std::mem::replace(&mut self.lod, lod);
+        self.set_dpi(dpi).inspect_err(|_| self.lod = old)?;
+        merge_setting(
+            &mut self.settings,
+            SettingKey::LiftOffDistance,
+            SettingValue::Int(lod.into()),
         );
         Ok(())
     }
@@ -740,6 +775,17 @@ impl HidppAdapter {
                 ),
                 None => dpi_meta(DPI_FALLBACK.0, DPI_FALLBACK.1, DPI_FALLBACK.2),
             });
+        }
+        if self.lod_settable {
+            c.push(SettingMeta::dropdown(
+                LiftOffDistance,
+                "Lift-off distance",
+                vec![
+                    SettingOption::int(0, "Low"),
+                    SettingOption::int(1, "Medium"),
+                    SettingOption::int(2, "High"),
+                ],
+            ));
         }
         if self.feat.rate.is_some() && !self.rates.is_empty() {
             c.push(SettingMeta::dropdown(
@@ -870,6 +916,7 @@ impl DeviceAdapter for HidppAdapter {
         let n = value.as_int().unwrap_or(0);
         let result = match key {
             SettingKey::Dpi => self.set_dpi(n as u16),
+            SettingKey::LiftOffDistance => self.set_lod(n as u8),
             SettingKey::ReportRate => self.set_rate(n as u32),
             SettingKey::Effect
             | SettingKey::Speed

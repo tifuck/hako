@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs Hako for the current user. Works from a source checkout (builds
+# Installs hako for the current user. Works from a source checkout (builds
 # first) and from an extracted release tarball (uses its prebuilt bin/).
 # HAKO_SKIP_UDEV=1 skips the sudo step (the in-app updater sets it).
 set -euo pipefail

@@ -530,40 +530,49 @@ pub fn hs_set_power(sleep: u8, low_battery: u8, voice: u8) -> [u8; 7] {
     [0x51, 0x37, 0x00, 0x00, sleep, low_battery, voice]
 }
 
-/// Headset effect values: 1 static, 2 breathing, 4 colour cycle.
-fn hs_effect_wire(effect: Effect) -> u8 {
-    match effect {
-        Effect::Static => 1,
-        Effect::Breathing => 2,
-        Effect::Cycle => 4,
-    }
-}
+/// Headset effects by wire value (pelta-control `EFFECTS`, G-Helper
+/// `HeadsetLightingMode`).
+pub const HS_EFFECTS: [(u8, &str); 4] = [
+    (1, "static"),
+    (2, "breathing"),
+    (3, "strobing"),
+    (4, "cycle"),
+];
+/// Strobing: both sources offer it on the Pelta; only G-Helper on the Delta II.
+pub const HS_STROBE: u8 = 3;
 
 /// `51 28 00 00 <effect> <brightness 0-100> R G B`.
-pub fn hs_led(effect: Effect, brightness: u8, rgb: [u8; 3]) -> [u8; 9] {
+pub fn hs_led(effect: u8, brightness: u8, rgb: [u8; 3]) -> [u8; 9] {
     let [r, g, b] = rgb;
-    [
-        0x51,
-        0x28,
-        0x00,
-        0x00,
-        hs_effect_wire(effect),
-        brightness.min(100),
-        r,
-        g,
-        b,
-    ]
+    [0x51, 0x28, 0x00, 0x00, effect, brightness.min(100), r, g, b]
 }
 
-/// `12 03` reply; `None` for effects this driver does not offer (strobing).
-pub fn hs_parse_led(resp: &Packet) -> Option<(Effect, u8, [u8; 3])> {
-    let effect = match resp[4] {
-        1 => Effect::Static,
-        2 => Effect::Breathing,
-        4 => Effect::Cycle,
-        _ => return None,
-    };
-    Some((effect, resp[5].min(100), [resp[6], resp[7], resp[8]]))
+/// `12 03` reply: effect wire value, brightness, colour; `None` for values
+/// outside [`HS_EFFECTS`].
+pub fn hs_parse_led(resp: &Packet) -> Option<(u8, u8, [u8; 3])> {
+    HS_EFFECTS
+        .iter()
+        .any(|&(w, _)| w == resp[4])
+        .then(|| (resp[4], resp[5].min(100), [resp[6], resp[7], resp[8]]))
+}
+
+/// `41 20`: AI noise reduction on (byte 4 == 1); `41 02 00 00 <on>` sets it
+/// (pelta-control `status` / `set_noise_reduction`, G-Helper
+/// `ReadNoiseReduction` / `SetNoiseReduction`).
+pub const HS_NOISE_REDUCTION: &[u8] = &[0x41, 0x20];
+
+pub fn hs_set_noise_reduction(on: bool) -> [u8; 5] {
+    [0x41, 0x02, 0x00, 0x00, u8::from(on)]
+}
+
+/// `12 28`: voice prompt (byte 4); `41 0A 00 00 <v>` sets it (pelta-control
+/// `VOICE_PROMPT` / `set_voice_prompt`, G-Helper `SetVoicePrompt` and
+/// `AsusHeadsetSettings.voicePrompts`).
+pub const HS_VOICE_PROMPT: &[u8] = &[0x12, 0x28];
+pub const HS_VOICE_PROMPTS: [(u8, &str); 3] = [(1, "English"), (2, "Chinese"), (0, "Prompt sound")];
+
+pub fn hs_set_voice_prompt(v: u8) -> [u8; 5] {
+    [0x41, 0x0a, 0x00, 0x00, v]
 }
 
 /// `41 11 00 00 <on>` then `61 11 00 00 <level>`.
@@ -782,16 +791,35 @@ mod tests {
         );
         // pelta-control set_lighting: 51 28 00 00 eff bri R G B (G-Helper LightingPacket).
         assert_eq!(
-            hs_led(Effect::Breathing, 50, [0x80, 0x00, 0xff]),
+            hs_led(2, 50, [0x80, 0x00, 0xff]),
             [0x51, 0x28, 0x00, 0x00, 0x02, 50, 0x80, 0x00, 0xff]
         );
-        assert_eq!(hs_led(Effect::Cycle, 100, [0; 3])[4], 0x04);
         let r = unframe(0xcc, &[0xcc, 0x12, 0x03, 0, 0, 4, 50, 128, 0, 255]).unwrap();
-        assert_eq!(hs_parse_led(&r), Some((Effect::Cycle, 50, [128, 0, 255])));
+        assert_eq!(hs_parse_led(&r), Some((4, 50, [128, 0, 255])));
+        // pelta-control EFFECTS / G-Helper HeadsetLightingMode: 3 = strobing.
         let r = unframe(0xcc, &[0xcc, 0x12, 0x03, 0, 0, 3, 50]).unwrap();
+        assert_eq!(hs_parse_led(&r), Some((HS_STROBE, 50, [0; 3])));
+        let r = unframe(0xcc, &[0xcc, 0x12, 0x03, 0, 0, 5, 50]).unwrap();
         assert_eq!(hs_parse_led(&r), None);
         assert_eq!(hs_sidetone(true), [0x41, 0x11, 0x00, 0x00, 0x01]);
         assert_eq!(hs_sidetone_level(30), [0x61, 0x11, 0x00, 0x00, 20]);
+        // pelta-control put(0x41, 0x02, on) / put(0x41, 0x0A, v); G-Helper the same.
+        assert_eq!(
+            &frame(0xcc, &packet(&hs_set_noise_reduction(true)))[..6],
+            &[0xcc, 0x41, 0x02, 0x00, 0x00, 0x01]
+        );
+        assert_eq!(
+            &frame(0xcc, &packet(&hs_set_voice_prompt(2)))[..6],
+            &[0xcc, 0x41, 0x0a, 0x00, 0x00, 0x02]
+        );
+        // Both read noise reduction from `41 20` at raw byte 5.
+        assert_eq!(
+            &frame(0xcc, &packet(HS_NOISE_REDUCTION))[..3],
+            &[0xcc, 0x41, 0x20]
+        );
+        let r = unframe(0xcc, &[0xcc, 0x41, 0x20, 0, 0, 1]).unwrap();
+        assert_eq!(classify(&packet(HS_NOISE_REDUCTION), &r), Reply::Ok);
+        assert_eq!(r[4], 1);
     }
 
     #[test]

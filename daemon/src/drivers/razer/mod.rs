@@ -24,6 +24,13 @@
 //! (restore) and every change, so the keyboard keeps the last lighting across
 //! power cycles. These bytes are frozen (hardware-verified) and predate the
 //! onboard-memory opt-in; docs/onboard-writes/razer.md has the details.
+//!
+//! Report rate (HyperPolling `00/40 [00 rate]`, read `00/c0`) and game mode
+//! (game LED `03/00 [NOSTORE 08 on]`, read `03/80`), both on transaction
+//! 0x1f, as OpenRazer `razerkbd_driver.c` sends them for this PID
+//! (`razer_attr_{read,write}_{poll_rate,game_led_state}`; rates from the
+//! daemon's `POLL_RATES`). Only sent on a user change; `tick` reads them back
+//! with the brightness. Open is unchanged, so they are not re-applied there.
 
 mod device;
 mod kraken;
@@ -36,7 +43,9 @@ use anyhow::{bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
-use protocol::{check_response, make_report, Effect as KbEffectKind, BACKLIGHT_LED, VARSTORE};
+use protocol::{
+    check_response, make_report, Effect as KbEffectKind, BACKLIGHT_LED, NOSTORE, VARSTORE,
+};
 use tracing::{info, warn};
 
 const VID: u16 = 0x1532;
@@ -49,6 +58,10 @@ const REPORT_IFACE: u16 = 0x03;
 const TXN_LED: u8 = 0x1f;
 /// Transaction id for device-mode / firmware (standard) commands.
 const TXN_STD: u8 = 0xff;
+/// Transaction id OpenRazer uses for poll rate and game mode on this PID.
+const TXN_MISC: u8 = 0x1f;
+/// OpenRazer daemon `POLL_RATES` for HUNTSMAN_V2_TENKEYLESS.
+const POLL_RATES: [u32; 7] = [125, 250, 500, 1000, 2000, 4000, 8000];
 
 /// HID feature buffer = report id 0 + 90-byte Razer report.
 const FEATURE_LEN: usize = 91;
@@ -283,6 +296,27 @@ impl RazerKeyboardAdapter {
     fn persist(&self) -> Result<()> {
         hako_core::config::save_device_settings(&self.paths, VID, PID, &self.settings)
     }
+
+    /// Report rate or game mode: one command each, nothing else is resent.
+    fn write_misc(&mut self, key: SettingKey, value: &SettingValue) -> Result<()> {
+        let (class, cmd, args) = match key {
+            SettingKey::ReportRate => value
+                .as_int()
+                .and_then(|hz| protocol::set_poll2(0x00, hz as u32))
+                .context("unsupported report rate")?,
+            _ => protocol::set_game_mode(NOSTORE, value.as_bool().context("expected true/false")?),
+        };
+        self.send(TXN_MISC, class, cmd, &args)
+    }
+
+    /// Current report rate (Hz) and game mode, as the keyboard reports them.
+    fn read_misc(&mut self) -> Result<(Option<u32>, bool)> {
+        let (class, cmd, args) = protocol::get_poll2();
+        let hz = protocol::parse_poll2(&self.send_get(TXN_MISC, class, cmd, &args)?);
+        let (class, cmd, args) = protocol::get_game_mode(NOSTORE);
+        let game = self.send_get(TXN_MISC, class, cmd, &args)?[10] == 0x01;
+        Ok((hz, game))
+    }
 }
 
 fn open_transport() -> Result<(Transport, String)> {
@@ -398,9 +432,15 @@ fn controls(effect: KbEffectKind) -> Vec<SettingMeta> {
             | KbEffectKind::Reactive
             | KbEffectKind::Starlight
     );
+    let rate_opts = POLL_RATES
+        .iter()
+        .map(|&hz| SettingOption::int(i64::from(hz), &format!("{hz} Hz")))
+        .collect();
     // Canonical order: Effect -> Brightness -> Direction -> Speed -> Color.
     // Everything is always listed (profiles may set it); irrelevant ones hidden.
     vec![
+        SettingMeta::dropdown(ReportRate, "Report rate", rate_opts),
+        SettingMeta::toggle(GameMode, "Game mode"),
         SettingMeta::dropdown(Effect, "Effect", effect_opts),
         SettingMeta::slider(Brightness, "Brightness", 0.0, 100.0, 1.0).unit("%"),
         SettingMeta::dropdown(Direction, "Direction", dir_opts)
@@ -436,8 +476,12 @@ impl DeviceAdapter for RazerKeyboardAdapter {
 
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
         let before = self.settings.clone();
-        merge_setting(&mut self.settings, key, value);
-        if let Err(e) = self.apply_all() {
+        merge_setting(&mut self.settings, key, value.clone());
+        let result = match key {
+            SettingKey::ReportRate | SettingKey::GameMode => self.write_misc(key, &value),
+            _ => self.apply_all(),
+        };
+        if let Err(e) = result {
             // Not applied: keep the UI and the file on the old value.
             self.settings = before;
             self.last_error = Some(e.to_string());
@@ -463,6 +507,21 @@ impl DeviceAdapter for RazerKeyboardAdapter {
                     SettingValue::Int(br as i64),
                 );
             }
+        }
+        // Game mode also follows the keyboard's own key.
+        if let Ok((hz, game)) = self.read_misc() {
+            if let Some(hz) = hz {
+                merge_setting(
+                    &mut self.settings,
+                    SettingKey::ReportRate,
+                    SettingValue::Int(i64::from(hz)),
+                );
+            }
+            merge_setting(
+                &mut self.settings,
+                SettingKey::GameMode,
+                SettingValue::Bool(game),
+            );
         }
         Ok(())
     }
@@ -591,6 +650,42 @@ mod tests {
             kb_effect_args(KbEffectKind::Reactive, 1, 2, 3, "slow", "left"),
             vec![0x01, 0x05, 0x05, 0x00, 0x04, 0x01, 1, 2, 3]
         );
+    }
+
+    /// Report rate and game mode frames as OpenRazer sends them for 026b.
+    #[test]
+    fn huntsman_report_rate_and_game_mode_frames() {
+        let frame = |(class, cmd, args): protocol::Cmd| make_report(TXN_MISC, class, cmd, &args);
+        // 1000 Hz: 00 1f 0000 00 02 00 40 00 08
+        let r = frame(protocol::set_poll2(0x00, 1000).unwrap());
+        assert_eq!(&r[..10], &[0, 0x1f, 0, 0, 0, 0x02, 0x00, 0x40, 0x00, 0x08]);
+        assert_eq!(r[88], 0x02 ^ 0x40 ^ 0x08);
+        assert_eq!(frame(protocol::set_poll2(0x00, 250).unwrap())[9], 0x20);
+        assert_eq!(
+            frame(protocol::get_poll2())[..9],
+            [0, 0x1f, 0, 0, 0, 0x01, 0, 0xc0, 0]
+        );
+        // Game mode on: 00 1f 0000 00 03 03 00 00 08 01
+        let g = frame(protocol::set_game_mode(NOSTORE, true));
+        assert_eq!(
+            &g[..11],
+            &[0, 0x1f, 0, 0, 0, 0x03, 0x03, 0x00, 0x00, 0x08, 0x01]
+        );
+        assert_eq!(g[88], 0x09);
+        assert_eq!(
+            &frame(protocol::get_game_mode(NOSTORE))[6..11],
+            &[0x03, 0x80, 0, 0x08, 0]
+        );
+
+        let c = controls(KbEffectKind::Static);
+        let rate = c.iter().find(|m| m.key == SettingKey::ReportRate).unwrap();
+        for hz in POLL_RATES {
+            assert!(rate.validate(&SettingValue::Int(i64::from(hz))).is_ok());
+            assert!(protocol::set_poll2(0x00, hz).is_some(), "{hz}");
+        }
+        assert!(rate.validate(&SettingValue::Int(750)).is_err());
+        let game = c.iter().find(|m| m.key == SettingKey::GameMode).unwrap();
+        assert!(!game.persistent && game.blocked.is_none());
     }
 
     #[test]

@@ -23,7 +23,10 @@
 //! output report `00 31 <n> (<hid usage> <press> <release>)*n`, up to 20
 //! keys each, on the node whose report descriptor starts `06 c0 ff`. It only
 //! changes RAM and was read from firmware 4.16.8 (bcdDevice `0416`), so the
-//! control is offered on that firmware only and re-sent on open.
+//! control is offered on that firmware only and re-sent on open. Rapid tap,
+//! same source, node and gate: `00 32 <n> (<hid usage> <mode>)*n`, up to 30
+//! keys each, mode 2 ("the value the keyboard's own RAPID TAP menu sets") or
+//! 0 (off); also RAM only.
 //!
 //! Onboard-profile selection, the Apex 3 save command (OpenRGB
 //! `SteelSeriesApexTZoneController::Save`: `00 06 00 08` then `00 09`, the
@@ -177,6 +180,8 @@ const ACTUATION_KEYS: [u8; 60] = [
 ];
 /// The only firmware the actuation command was read from.
 const ACTUATION_FIRMWARE: &str = "0416";
+/// apex-analog `RAPID_TAP_MODE`.
+const RAPID_TAP_MODE: u8 = 2;
 
 /// (press, release) thresholds of the level nearest `tenths` mm.
 fn actuation_points(tenths: u8) -> (u8, u8) {
@@ -200,6 +205,21 @@ fn actuation_reports(tenths: u8) -> Vec<Vec<u8>> {
             let mut v = vec![0x00, 0x31, keys.len() as u8];
             for &hid in keys {
                 v.extend_from_slice(&[hid, press, release]);
+            }
+            pad(&v, 65)
+        })
+        .collect()
+}
+
+/// Reports turning rapid tap on or off for every key in [`ACTUATION_KEYS`].
+fn rapid_tap_reports(on: bool) -> Vec<Vec<u8>> {
+    let mode = if on { RAPID_TAP_MODE } else { 0 };
+    ACTUATION_KEYS
+        .chunks(30)
+        .map(|keys| {
+            let mut v = vec![0x00, 0x32, keys.len() as u8];
+            for &hid in keys {
+                v.extend_from_slice(&[hid, mode]);
             }
             pad(&v, 65)
         })
@@ -270,6 +290,7 @@ pub(super) fn controls(actuation: bool, save_blocked: Option<&str>) -> Vec<Setti
                 .map(|&t| SettingOption::int(t.into(), &format!("{}.{} mm", t / 10, t % 10)))
                 .collect(),
         ));
+        c.push(SettingMeta::toggle(SettingKey::RapidTap, "Rapid tap"));
     }
     if let Some(reason) = save_blocked {
         c.push(
@@ -370,8 +391,10 @@ impl KeyboardAdapter {
         if LIGHT_KEYS.iter().any(|&k| get_setting(&s, k).is_some()) {
             restore.push(SettingKey::Brightness);
         }
-        if a.actuation.is_some() && get_setting(&s, SettingKey::ActuationPoint).is_some() {
-            restore.push(SettingKey::ActuationPoint);
+        for key in [SettingKey::ActuationPoint, SettingKey::RapidTap] {
+            if a.actuation.is_some() && get_setting(&s, key).is_some() {
+                restore.push(key);
+            }
         }
         for key in restore {
             if let Err(e) = a.apply(&s, key) {
@@ -389,10 +412,17 @@ impl KeyboardAdapter {
 
     /// Put `key` from `s` on the board; lighting keys resend all lighting.
     fn apply(&mut self, s: &SettingsMap, key: SettingKey) -> Result<()> {
-        if key == SettingKey::ActuationPoint {
-            let tenths = int(s, key).unwrap_or(18).clamp(1, 40) as u8;
+        if key == SettingKey::ActuationPoint || key == SettingKey::RapidTap {
+            let reports = if key == SettingKey::RapidTap {
+                let on = get_setting(s, key)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                rapid_tap_reports(on)
+            } else {
+                actuation_reports(int(s, key).unwrap_or(18).clamp(1, 40) as u8)
+            };
             let dev = self.actuation.as_mut().context("actuation not supported")?;
-            for r in actuation_reports(tenths) {
+            for r in reports {
                 dev.write(&r)?;
                 // A command arriving straight after another can replace it.
                 std::thread::sleep(Duration::from_millis(5));
@@ -565,7 +595,17 @@ mod tests {
         );
         assert!(a.validate(&SettingValue::Int(37)).is_ok());
         assert!(a.validate(&SettingValue::Int(36)).is_err());
+        assert!(c.iter().any(|m| m.key == SettingKey::RapidTap));
         assert_eq!(controls(false, None).len(), 4);
+        // apex-analog set_mode: 32 <n> (<hid> 2)*, 30 keys per report.
+        let r = rapid_tap_reports(true);
+        assert_eq!(r.len(), 2);
+        assert!(r
+            .iter()
+            .all(|r| r.len() == 65 && r[..3] == [0x00, 0x32, 30]));
+        assert_eq!(&r[0][3..7], &[0x35, 2, 0x1e, 2]);
+        assert!(r[0][3 + 60..].iter().all(|&b| b == 0));
+        assert_eq!(&rapid_tap_reports(false)[1][3..5], &[ACTUATION_KEYS[30], 0]);
         // Apex 3 / Apex Pro 3 saves are listed, blocked.
         let apex_pro3 = KeyboardSpec {
             interface: 1,

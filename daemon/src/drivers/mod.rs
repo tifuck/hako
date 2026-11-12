@@ -5,19 +5,25 @@
 
 pub mod asus;
 pub mod audeze;
+pub mod compx;
 pub mod coolermaster;
 pub mod corsair;
+pub mod endgamegear;
 pub mod generic;
 pub mod glorious;
 pub mod hyperx;
+pub mod lamparray;
 pub mod logitech;
 pub mod msi;
+pub mod pulsar;
 pub mod qmk;
 pub mod razer;
 pub mod redragon;
 pub mod roccat;
 pub mod sony;
 pub mod steelseries;
+pub mod turtlebeach;
+pub mod wooting;
 
 use crate::hid::HidDeviceInfo;
 use anyhow::{bail, Result};
@@ -107,7 +113,12 @@ pub struct Fallback {
 pub type Probe = fn(nodes: &[&HidDeviceInfo]) -> Option<Fallback>;
 
 /// Runtime probes, most specific first; `generic` (input-only devices) last.
-const FALLBACKS: &[Probe] = &[logitech::fallback, qmk::fallback, generic::fallback];
+const FALLBACKS: &[Probe] = &[
+    logitech::fallback,
+    qmk::fallback,
+    lamparray::fallback,
+    generic::fallback,
+];
 
 /// Vendors whose hidraw nodes get access vendor-wide in the udev rules,
 /// because a probe may claim any of their PIDs.
@@ -142,7 +153,7 @@ pub fn fallback_model(nodes: &[&HidDeviceInfo]) -> Option<&'static Model> {
 }
 
 /// Every vendor's model table, in discovery order.
-const VENDORS: [(&str, &[Model]); 13] = [
+const VENDORS: [(&str, &[Model]); 18] = [
     ("Razer", razer::MODELS),
     ("Logitech", logitech::MODELS),
     ("SteelSeries", steelseries::MODELS),
@@ -156,6 +167,11 @@ const VENDORS: [(&str, &[Model]); 13] = [
     ("Cooler Master", coolermaster::MODELS),
     ("MSI", msi::MODELS),
     ("Redragon", redragon::MODELS),
+    ("Wooting", wooting::MODELS),
+    ("Turtle Beach headsets", turtlebeach::MODELS),
+    ("ATK / VXE / VGN / Lamzu (Compx)", compx::MODELS),
+    ("Pulsar", pulsar::MODELS),
+    ("Endgame Gear", endgamegear::MODELS),
 ];
 
 /// Every supported model, in discovery order.
@@ -212,7 +228,7 @@ pub fn device_list() -> String {
 pub fn diagnose() -> Result<String> {
     let nodes = crate::hid::enumerate_hidraw()?;
     let mut out = String::from(
-        "# Hako device report\n\n\
+        "# hako device report\n\n\
          Attach this to a device-support request. Descriptors come from sysfs;\n\
          no device was written to.\n\n\
          | Node | USB ID | Bus | Iface | Name | Handled by | Report IDs | Usage pages |\n\
@@ -304,6 +320,11 @@ pub fn udev_rules() -> String {
     out += &format!(
         "\n# QMK / VIA keyboards: raw HID interface (usage page 0xFF60, usage 0x61).\n\
          KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", PROGRAM=\"/bin/sh -c 'LC_ALL=C grep -qaP \\\"\\x06\\x60\\xff\\x09\\x61\\\" /sys%p/device/report_descriptor'\", {access}\n"
+    );
+    // HID LampArray (usage page 0x59, usage 0x01) in the spec's encoding.
+    out += &format!(
+        "\n# HID LampArray / Dynamic Lighting devices (usage page 0x59, usage 0x01).\n\
+         KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", PROGRAM=\"/bin/sh -c 'LC_ALL=C grep -qaP \\\"\\x05\\x59\\x09\\x01\\xa1\\x01\\\" /sys%p/device/report_descriptor'\", {access}\n"
     );
     out += &format!(
         "\n# Host-side remaps and macros inject through uinput.\n\

@@ -1,4 +1,4 @@
-Hako
+hako
 ========
 
 This project reimplements userspace protocols informed by public reverse
@@ -18,6 +18,10 @@ Protocol references (not vendored):
   layouts and device IDs
 - HyperHeadset (MIT), ngenuity-linux-cli, santeri3700 Pulsefire Dart notes
   (CC0) - HyperX headset and mouse protocols
+- hsctl (MIT) docs/COMMANDS.md - HyperX Cloud Stinger 2 Wireless ID and
+  sidetone volume
+- Eruption (GPL-3.0) roccat_kone_pro_air.rs - ROCCAT Kone Pro Air battery
+  query
 - G-Helper (GPL-3.0), rog-mouse-battery, pelta-control - ASUS ROG mouse and
   headset protocols
 - G-Helper (GPL-3.0) PeripheralsProvider, Keyboard and Headset models,
@@ -39,6 +43,9 @@ Protocol references (not vendored):
 - OpenRGB (GPL-2.0) RoccatController, HeadsetControl (GPL-3.0) roccat_elo_*,
   libratbag (MIT) driver-roccat*.c - ROCCAT / Turtle Beach mouse, keyboard
   and headset layouts and device IDs
+- halobattery-stealth700 (MIT) and HaloBattery PR #211, tb-heal (MIT),
+  tb-stealth600 (no licence; read for layouts only) - Turtle Beach Gen 3
+  transmitter RACE / CoAP status read and device IDs
 - PlasmaNGenuity (MIT), HyperX Saga Control (MIT) - HyperX Pulsefire Dart
   heartbeat and Pulsefire Saga Pro protocol
 - OpenRazer (GPL-2.0) razerkraken driver - Razer Kraken headset LED reports
@@ -49,15 +56,23 @@ Protocol references (not vendored):
   RazerController storage flags, uchroma protocol reference, razercfg
   (GPL-2.0) hw_deathadder_chroma.c - Razer storage byte and onboard profile
   slots (docs/onboard-writes/razer.md)
+- OpenRGB (GPL-2.0) RazerController (RazerDevices, RazerControllerDetect,
+  RazerController, RGBController_Razer) - Razer BlackWidow V4 Pro 75%,
+  BlackWidow V4 Low Profile TKL and Basilisk V4 Pro IDs, interfaces,
+  transaction and LED ids; Tartarus LED id
+- OpenRazer PR #2862 (GPL-2.0) razerblackshark driver, blackshark-control
+  (GPL-2.0) - Razer BlackShark V2 Pro (2023) dongle framing, battery and
+  charging reads
 - mxw (MIT), glorious-gui (MIT), glorious-i2 (MIT), glorious-i2-battery
-  (GPL-2.0), OpenRGB (GPL-2.0) SinowealthControllerDetect.cpp - Glorious
-  wireless mouse battery reports and device IDs
+  (GPL-2.0), OpenRGB (GPL-2.0) SinowealthControllerDetect.cpp, o2ctl
+  (MIT) - Glorious wireless mouse battery reports and device IDs
 - Linux hid-logitech-hidpp / hid-logitech-dj (GPL-2.0), OpenRGB (GPL-2.0),
   HeadsetControl (GPL-3.0) Centurion / G930 / Zone - Logitech device IDs,
   receiver children, keyboard lighting features and headset protocols
-- Linux-Arctis-Manager (GPL-3.0) device configs - SteelSeries headset IDs and
-  capability cross-checks
-- apex-analog (MIT) - SteelSeries Apex Pro Gen 3 actuation command
+- Linux-Arctis-Manager (GPL-3.0) device configs - SteelSeries headset IDs,
+  capability cross-checks, wired Arctis Nova Pro and Arctis 7+ mic commands
+- apex-analog (MIT) - SteelSeries Apex Pro Gen 3 actuation and rapid tap
+  commands
 - Linux-Arctis-7-Plus-ChatMix (GPL-3.0), nova7wireless-chatmix-linux,
   Arctis-Nova-7-Chatmix (MIT), Arctis Sound Manager docs - which SteelSeries
   headsets need host-side ChatMix, and their PipeWire sink names
@@ -67,6 +82,9 @@ Protocol references (not vendored):
   mouse device IDs and onboard-memory layout research (nothing is written)
 - OpenRGB (GPL-2.0) MSIVigorController, MSIClutchController - MSI Vigor GK30
   and Clutch GM11 device IDs and lighting layout research (nothing is written)
+- pulsar-mouse-linux (MIT), python-pulsar-mouse-tool (MIT), rustar, Linux
+  hid-pulsar patch (GPL-2.0, IDs only) - Pulsar device IDs, battery and
+  identity commands, onboard-memory layout research (nothing is written)
 - libratbag (MIT) src/hidpp20.c, src/driver-hidpp20.c, data/devices; Solaar
   (GPL-2.0) hidpp20.py OnboardProfiles and settings_templates.py; OpenLogi
   docs (MIT / Apache-2.0) 0x8070 / 0x8071 / 0x8310; OpenRGB (GPL-2.0)
@@ -83,10 +101,13 @@ Protocol references (not vendored):
   headset storage (research for docs/onboard-writes/audeze.md; nothing new is
   written)
 - ckb-next (GPL-2.0) bragi_proto.h / device_bragi.c / dpi_bragi.c /
-  led_bragi.c / profile_*.c, OpenLinkHub (GPL-3.0) src/devices/*,
-  HeadsetControl (GPL-3.0) corsair_virtuoso_xt.hpp - Corsair Bragi onboard
-  poll rate, angle snapping and headset brightness writes, and the per-model
-  research behind the blocked ones (docs/onboard-writes/corsair.md)
+  led_bragi.c / profile_*.c / device_mouse.c / firmware.c / usb.c,
+  OpenLinkHub (GPL-3.0) src/devices/*, HeadsetControl (GPL-3.0)
+  corsair_virtuoso_xt.hpp / corsair_void_v2w.hpp, OpenRGB (GPL-2.0)
+  CorsairPeripheralV2Devices - Corsair Bragi onboard poll rate, angle
+  snapping, headset brightness, V2 sidetone and headset sleep timer writes,
+  NXP mouse poll rate and DPI ranges, and the per-model research behind the
+  blocked ones (docs/onboard-writes/corsair.md)
 - Linux hid-roccat-koneplus / hid-roccat-common (GPL-2.0), roccat-tools
   (GPL-2.0) koneplus / konepure, Eruption (GPL-3.0) roccat_kone_xtd.rs -
   ROCCAT Kone XTD / Pure profile-settings layout, checksum and write status
@@ -104,6 +125,29 @@ Protocol references (not vendored):
 - ngenuity-linux-cli docs/protocol/universal.md and cli.py, HyperX Saga
   Control (MIT) protocol.py - HyperX universal-protocol onboard slot 1 (DPI
   table, brightness)
+- Wooting wooting-rgb-sdk (MPL-2.0) src/wooting-usb.c, src/wooting-usb.h,
+  src/wooting-rgb-sdk.c - Wooting device IDs, config interface, direct-mode
+  colour reports (v1 / v2 / v3), CRC and reset command
+- eh-fifty (MIT), HeadsetControl (GPL-3.0) logitech_astro_a50*.hpp - ASTRO
+  A50 Gen 4 / Gen 5 base-station commands; OpenMouse-Project mouse-protocol
+  (onboard-profile format of the PRO X SUPERLIGHT, research only)
+- lamzu-cfg (MIT / Apache-2.0), atk-control (MIT), DPIdeck (CC0 / MIT),
+  OpenATK (MIT) docs/PROTOCOL.md, lamzu-ctl (MIT) - Compx / ATK mouse
+  protocols, device IDs and onboard rate / DPI-stage writes
+  (docs/onboard-writes/compx.md)
+- USB-IF HUTRR84 / HID Usage Tables 1.4 section 26, Microsoft
+  ArduinoHidForWindows (MIT) LampArray reports, hid-rgb-ctl (MIT) - HID
+  LampArray (Dynamic Lighting) reports and host flow
+- vole (MIT) re/PROTOCOL.md and src/vole/protocol.h, xm2ctl (MIT)
+  PROTOCOL.md, XM2w Control (MIT) src-tauri/src/xm2w/mod.rs,
+  UnofficialEGGMouseConfig (Unlicense) device.hpp - Endgame Gear OP1w 4k /
+  XM2w 4k device IDs, configuration protocol and sensor-block write
+  (docs/onboard-writes/endgamegear.md)
+
+Included under its own licence: daemon/src/drivers/wooting/gamma.rs holds the
+gamma table from wooting-rgb-sdk src/wooting-rgb-sdk.c, Copyright 2018 Wooting
+Technologies B.V., under the Mozilla Public License 2.0
+(http://mozilla.org/MPL/2.0/). Source: https://github.com/WootingKb/wooting-rgb-sdk
 
 Linux-Arctis-Manager (GPL-3.0) application source is not copied.
 No proprietary SteelSeries GG / Razer Synapse / Logitech G HUB / Corsair iCUE /

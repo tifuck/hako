@@ -14,6 +14,7 @@
 //! - Wired devices, Bluetooth devices and headset dongles talk to device index
 //!   0xff.
 //! - `centurion`, `g930`, `zone`: headsets that are not plain HID++ 2.0.
+//! - `astro`: ASTRO A50 base stations (Gen 4 on ASTRO's own VID 9886).
 //! - [`fallback`]: any other 046d device with a HID++ long-report node gets
 //!   the generic adapter, named and typed by DEVICE_NAME.
 //!
@@ -38,6 +39,7 @@
 //!   HID++ reports when the device has them).
 //! - Protocol layouts: see `hidpp.rs`.
 
+mod astro;
 mod centurion;
 mod device;
 mod g930;
@@ -132,21 +134,29 @@ pub const MODELS: &[Model] = &[
     direct!(Mouse, "Logitech PRO X SUPERLIGHT", 0xc094),
     direct!(Mouse, "Logitech G502 X PLUS", 0xc095),
     direct!(Mouse, "Logitech G502 X", 0xc099),
+    direct!(Mouse, "Logitech G502 X LIGHTSPEED", 0xc098),
     direct!(Mouse, "Logitech G502 HERO", 0xc08b),
     direct!(Mouse, "Logitech G502 LIGHTSPEED", 0xc08d),
     direct!(Mouse, "Logitech G502 Proteus Spectrum", 0xc332),
     direct!(Mouse, "Logitech G502 Proteus Core", 0xc07d),
-    direct!(Mouse, "Logitech G203 LIGHTSYNC", 0xc092, 0xc09d),
+    direct!(Mouse, "Logitech G102/G203 LIGHTSYNC", 0xc092, 0xc09d),
     direct!(Mouse, "Logitech G203 Prodigy", 0xc084),
     direct!(Mouse, "Logitech G Pro Wireless", 0xc088),
     direct!(Mouse, "Logitech G Pro", 0xc085),
     direct!(Mouse, "Logitech G Pro HERO", 0xc08c),
     direct!(Mouse, "Logitech G703 LIGHTSPEED", 0xc087),
+    direct!(Mouse, "Logitech G703 LIGHTSPEED HERO", 0xc090),
     direct!(Mouse, "Logitech G903 LIGHTSPEED HERO", 0xc091),
+    direct!(Mouse, "Logitech G903 LIGHTSPEED", 0xc086),
+    direct!(Mouse, "Logitech G900 Chaos Spectrum", 0xc081),
     direct!(Mouse, "Logitech G403 HERO", 0xc08f),
+    direct!(Mouse, "Logitech G403 Wireless", 0xc082),
+    direct!(Mouse, "Logitech G403 Prodigy", 0xc083),
     direct!(Mouse, "Logitech G303 Daedalus Apex", 0xc080),
+    direct!(Mouse, "Logitech MX518", 0xc08e),
     // Keyboards.
     direct!(Keyboard, "Logitech G915 X", 0xc359),
+    direct!(Keyboard, "Logitech G915 X LIGHTSPEED", 0xc356),
     direct!(Keyboard, "Logitech G915", 0xc33e),
     direct!(Keyboard, "Logitech G915 TKL", 0xc343),
     direct!(Keyboard, "Logitech G815", 0xc33f),
@@ -156,6 +166,7 @@ pub const MODELS: &[Model] = &[
     direct!(Keyboard, "Logitech G512 / G513", 0xc33c),
     direct!(Keyboard, "Logitech G512", 0xc342),
     direct!(Keyboard, "Logitech G213 Prodigy", 0xc336),
+    direct!(Keyboard, "Logitech G413", 0xc33a),
     direct!(Keyboard, "Logitech G810", 0xc337),
     direct!(Keyboard, "Logitech G810", 0xc331),
     direct!(Keyboard, "Logitech G610", 0xc338),
@@ -165,7 +176,7 @@ pub const MODELS: &[Model] = &[
     // Headsets (USB dongle; the HID++ device is the headset itself).
     own!(centurion, "Logitech PRO X 2 LIGHTSPEED", 0x0af7),
     own!(centurion, "Logitech PRO X 3 LIGHTSPEED", 0x0b45),
-    own!(centurion, "Logitech G522 LIGHTSPEED", 0x0b18),
+    own!(centurion, "Logitech G522 LIGHTSPEED", 0x0b18, 0x0b19),
     direct!(Headset, "Logitech G PRO X 2", 0x0afb),
     direct!(Headset, "Logitech G PRO X 2", 0x0afc),
     direct!(Headset, "Logitech PRO X Wireless", 0x0aba),
@@ -175,6 +186,7 @@ pub const MODELS: &[Model] = &[
     direct!(Headset, "Logitech G733", 0x0afe),
     direct!(Headset, "Logitech G733", 0x0b1f),
     direct!(Headset, "Logitech G535", 0x0ac4),
+    direct!(Headset, "Logitech G533", 0x0a66),
     direct!(Headset, "Logitech G935", 0x0a87),
     direct!(Headset, "Logitech G933", 0x0a5b),
     direct!(Headset, "Logitech G635", 0x0a89),
@@ -185,13 +197,25 @@ pub const MODELS: &[Model] = &[
     own!(g930, "Logitech G930", 0x0a1f),
     own!(zone, "Logitech Zone Wired", 0x0aad),
     own!(zone, "Logitech Zone 750", 0x0ade),
+    own!(astro, "ASTRO A50 Gen 5", 0x0b1c),
+    Model {
+        vendor_id: astro::GEN4_VID,
+        product_ids: &[astro::GEN4_PID],
+        kind: DeviceKind::Headset,
+        name: "ASTRO A50 Gen 4",
+        usbfs: false,
+        multi: false,
+        open: astro::open,
+    },
 ];
 
 /// HID++ features each direct model is documented to expose, and where from.
 /// Wired-mode PIDs of wireless mice use the dump of the wireless PID that
 /// libratbag / Solaar list as the same device. HeadsetControl rows: its
 /// fixed feature indexes match the Solaar dump of a family member, or its
-/// request has the named feature's function layout.
+/// request has the named feature's function layout. OpenRGB
+/// `DetectLogitechWired` rows list 0x8070 and 0x8071: its Lightspeed
+/// controller only accepts a device that has one of the two.
 #[cfg(test)]
 const DOCUMENTED: &[(u16, &[u16], &str)] = &[
     (
@@ -215,6 +239,11 @@ const DOCUMENTED: &[(u16, &[u16], &str)] = &[
         "Solaar G502 X PLUS 4099; libratbag g502-x-plus",
     ),
     (0xc099, &[0x2201, 0x8060, 0x8100], "Solaar G502 X C099"),
+    (
+        0xc098,
+        &[0x1004, 0x2201, 0x8060, 0x8100],
+        "Solaar #2560 `solaar show` G502 X LIGHTSPEED 409F (usbid C098); kernel hid-logitech-hidpp.c C098; libratbag g502-x-wireless",
+    ),
     (
         0xc08b,
         &[0x2201, 0x8060, 0x8070, 0x8100],
@@ -266,9 +295,24 @@ const DOCUMENTED: &[(u16, &[u16], &str)] = &[
         "Solaar G703 4070; libratbag g703",
     ),
     (
+        0xc090,
+        &[0x8070, 0x8071],
+        "OpenRGB DetectLogitechWired C090 (G703 HERO); kernel hid-logitech-hidpp.c C090; libratbag g703-hero",
+    ),
+    (
         0xc091,
         &[0x1001, 0x2201, 0x8060, 0x8070, 0x8071, 0x8100],
         "Solaar G903 LIGHTSPEED 4087; libratbag g903-hero",
+    ),
+    (
+        0xc086,
+        &[0x8070, 0x8071],
+        "OpenRGB DetectLogitechWired C086 (G903); kernel hid-logitech-hidpp.c C086; libratbag g903",
+    ),
+    (
+        0xc081,
+        &[0x8070, 0x8071],
+        "OpenRGB DetectLogitechWired C081 (G900); kernel hid-logitech-hidpp.c C081; libratbag g900",
     ),
     (
         0xc08f,
@@ -276,14 +320,34 @@ const DOCUMENTED: &[(u16, &[u16], &str)] = &[
         "OpenRGB DetectLogitechMouseG403 (0x8070 setZoneEffect fn 3); libratbag g403-hero",
     ),
     (
+        0xc082,
+        &[0x8070, 0x8071],
+        "OpenRGB DetectLogitechWired C082 (G403 Wireless); kernel hid-logitech-hidpp.c C082; libratbag g403-wireless",
+    ),
+    (
+        0xc083,
+        &[0x8070, 0x8071],
+        "OpenRGB DetectLogitechWired C083 (G403 Prodigy); libratbag g403; usb.ids C083",
+    ),
+    (
         0xc080,
         &[0x8070],
         "OpenRGB DetectLogitechMouseG303 (0x8070 setZoneEffect fn 3); libratbag g303",
     ),
     (
+        0xc08e,
+        &[0x2201, 0x8060, 0x8100],
+        "Solaar #2366 config.yaml MX518 C08E (dpi = 0x2201, report_rate = 0x8060, onboard_profiles = 0x8100 settings); descriptors.py C08E; libratbag MX518",
+    ),
+    (
         0xc359,
         &[0x8081],
         "OpenRGB LogitechHIDPP20 known_kb_layout_edits C359 (0x8081 per-key branch)",
+    ),
+    (
+        0xc356,
+        &[0x1004, 0x8040, 0x8071, 0x8081],
+        "Solaar #3137 `solaar show` G915 X LS (usbid C356)",
     ),
     (
         0xc33e,
@@ -325,6 +389,11 @@ const DOCUMENTED: &[(u16, &[u16], &str)] = &[
         0xc336,
         &[0x8060, 0x8070],
         "Solaar G213 Prodigy Gaming Keyboard (USB id C336)",
+    ),
+    (
+        0xc33a,
+        &[0x8060, 0x8070],
+        "Solaar #2962 `solaar show` G413 Carbon Mechanical Gaming Keyboard C33A; libratbag g413",
     ),
     (0xc337, &[0x8070, 0x8080], "OpenRGB known_kb_8080_strips C337"),
     (0xc331, &[0x8070, 0x8080], "OpenRGB known_kb_8080_strips C331"),
@@ -368,6 +437,11 @@ const DOCUMENTED: &[(u16, &[u16], &str)] = &[
         0x0ac4,
         &[0x1f20, 0x8300],
         "Solaar G535 Wireless Gaming Headset 0AC4",
+    ),
+    (
+        0x0a66,
+        &[0x1f20],
+        "HeadsetControl logitech_g533.hpp (idx 7 fn 0 [mV BE, state] / fn 2 [minutes] = 0x1F20 layout); Solaar descriptors.py G533 0A66 HID++ 2.0",
     ),
     (
         0x0a87,
@@ -640,14 +714,19 @@ mod tests {
 
     /// PIDs served by a module with its own protocol, not the HID++ adapter.
     fn own_protocol(pid: u16) -> bool {
-        centurion::spec(pid).is_some() || g930::PIDS.contains(&pid) || zone::PIDS.contains(&pid)
+        centurion::spec(pid).is_some()
+            || g930::PIDS.contains(&pid)
+            || zone::PIDS.contains(&pid)
+            || [astro::GEN5_PID, astro::GEN4_PID].contains(&pid)
     }
 
     #[test]
     fn model_table_is_consistent() {
         let mut pids = std::collections::HashSet::new();
         for m in MODELS {
-            assert_eq!(m.vendor_id, VID);
+            // Only the ASTRO A50 Gen 4 keeps ASTRO's vendor id.
+            let gen4 = m.product_ids == [astro::GEN4_PID];
+            assert_eq!(m.vendor_id, if gen4 { astro::GEN4_VID } else { VID });
             assert!(!m.usbfs, "{} must not need usbfs", m.name);
             for &pid in m.product_ids {
                 assert!(pids.insert(pid), "{pid:04x} listed twice");
@@ -683,7 +762,7 @@ mod tests {
             assert!(!src.is_empty());
             assert!(
                 feats.iter().any(|f| USED.contains(f)),
-                "{} exposes nothing Hako uses",
+                "{} exposes nothing hako uses",
                 m.name
             );
         }
@@ -696,7 +775,10 @@ mod tests {
             .flat_map(|m| m.product_ids.iter().copied())
             .filter(|&p| own_protocol(p))
             .collect();
-        assert_eq!(own, [0x0af7, 0x0b45, 0x0b18, 0x0a1f, 0x0aad, 0x0ade]);
+        assert_eq!(
+            own,
+            [0x0af7, 0x0b45, 0x0b18, 0x0b19, 0x0a1f, 0x0aad, 0x0ade, 0x0b1c, 0x002c]
+        );
     }
 
     #[test]

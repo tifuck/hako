@@ -3,11 +3,12 @@ name = "hako-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Hako egui panels rendered from daemon snapshots"
+description = "hako egui panels rendered from daemon snapshots"
 
 [dependencies]
 hako-core = { workspace = true }
 egui = { workspace = true }
+egui_extras = { workspace = true }
 
 [dev-dependencies]
 # Offscreen wgpu rendering for the #[ignore]d snapshot tests.

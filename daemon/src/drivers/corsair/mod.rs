@@ -11,7 +11,8 @@
 //! them while the daemon runs and hands control back to the onboard
 //! firmware on shutdown or when the effect is set to "onboard". Bragi
 //! property writes persist on the device, so the Bragi poll rate, angle
-//! snapping and headset lights are onboard-memory controls (`persistent`,
+//! snapping, headset lights, V2 headset sidetone, headset sleep timer and
+//! the NXP mouse poll rate are onboard-memory controls (`persistent`,
 //! behind the owner's opt-in), offered only on the models `onboard.rs`
 //! lists, written only for a user change and read back from the device on
 //! connect; other researched onboard writes are shown blocked with the
@@ -105,12 +106,23 @@ trait Backend: Send {
     fn report_rate(&mut self) -> Option<u32> {
         None
     }
-    /// Write a Bragi property kept in onboard memory (`bragi::store`).
-    fn store(&mut self, _prop: u8, _value: u32) -> Result<()> {
+    /// Store the poll rate in onboard memory; Bragi property 0x01 here.
+    fn set_report_rate(&mut self, hz: u32) -> Result<()> {
+        let v = bragi::pollrate_value(hz)
+            .with_context(|| format!("{hz} Hz is not a Bragi poll rate"))?;
+        self.store(&[(bragi::PROP_POLLRATE, v)])
+    }
+    /// Write Bragi properties kept in onboard memory, in order
+    /// (`bragi::store`).
+    fn store(&mut self, _writes: &[(u8, u32)]) -> Result<()> {
         anyhow::bail!("no onboard settings")
     }
     /// A Bragi property's current value.
     fn stored(&mut self, _prop: u8) -> Option<u32> {
+        None
+    }
+    /// Boom mic raised, from the last battery poll.
+    fn mic_up(&self) -> Option<bool> {
         None
     }
 }
@@ -459,6 +471,31 @@ impl Peripheral {
                 );
             }
         }
+        if o.sidetone == Offer::Yes {
+            let off = self.backend.stored(bragi::PROP_SIDETONE_OFF);
+            let level = self.backend.stored(bragi::PROP_SIDETONE_LEVEL);
+            if let Some(pct) = off
+                .zip(level)
+                .and_then(|(o, l)| headset::v2_sidetone_pct(o, l))
+            {
+                merge_setting(
+                    &mut self.settings,
+                    SettingKey::MicSideTone,
+                    SettingValue::Int(pct.into()),
+                );
+            }
+        }
+        if o.sleep == Offer::Yes {
+            let on = self.backend.stored(bragi::PROP_SLEEP_ENABLED);
+            let ms = self.backend.stored(bragi::PROP_SLEEP_TIMEOUT);
+            if let Some(min) = on.zip(ms).and_then(|(e, t)| headset::sleep_minutes(e, t)) {
+                merge_setting(
+                    &mut self.settings,
+                    SettingKey::PmShutdown,
+                    SettingValue::Int(min.into()),
+                );
+            }
+        }
         if o.lights == Offer::Yes {
             if let Some(v) = self
                 .backend
@@ -532,6 +569,13 @@ impl Peripheral {
             Ok(b) => {
                 self.failures = 0;
                 self.batteries = b.into_iter().collect();
+                if let Some(up) = self.backend.mic_up() {
+                    merge_setting(
+                        &mut self.settings,
+                        SettingKey::MicMute,
+                        SettingValue::Bool(up),
+                    );
+                }
             }
             Err(e) => self.failed(e),
         }
@@ -618,13 +662,26 @@ impl Peripheral {
             };
             c.push(rate.unit("Hz"));
         }
-        if let Offer::Blocked(why) = o.sleep {
-            c.push(
+        match o.sleep {
+            // 0 switches the timer off (HeadsetControl, OpenLinkHub).
+            Offer::Yes => c.push(
+                SettingMeta::slider(
+                    PmShutdown,
+                    "Sleep timer (0 = off)",
+                    0.0,
+                    (bragi::SLEEP_MAX_MS / bragi::MINUTE_MS).into(),
+                    1.0,
+                )
+                .unit("min")
+                .persistent(),
+            ),
+            Offer::Blocked(why) => c.push(
                 SettingMeta::slider(PmShutdown, "Sleep timer", 1.0, 60.0, 1.0)
                     .unit("min")
                     .persistent()
                     .blocked(why),
-            );
+            ),
+            Offer::No => {}
         }
         let lights = || {
             SettingMeta::dropdown(
@@ -641,13 +698,15 @@ impl Peripheral {
             Offer::Blocked(why) => c.push(lights().persistent().blocked(why)),
             Offer::No => {}
         }
-        if let Offer::Blocked(why) = o.sidetone {
-            c.push(
-                SettingMeta::slider(MicSideTone, "Sidetone", 0.0, 100.0, 1.0)
-                    .unit("%")
-                    .persistent()
-                    .blocked(why),
-            );
+        let sidetone = || {
+            SettingMeta::slider(MicSideTone, "Sidetone", 0.0, 100.0, 1.0)
+                .unit("%")
+                .persistent()
+        };
+        match o.sidetone {
+            Offer::Yes => c.push(sidetone()),
+            Offer::Blocked(why) => c.push(sidetone().blocked(why)),
+            Offer::No => {}
         }
         if let Offer::Blocked(why) = o.save {
             c.push(
@@ -686,6 +745,12 @@ impl Peripheral {
                 headset::SIDETONE_MAX.into(),
                 1.0,
             ));
+            c.push(SettingMeta::readonly(
+                MicMute,
+                "Muted (mic raised)",
+                0.0,
+                1.0,
+            ));
         }
         c
     }
@@ -719,22 +784,29 @@ impl DeviceAdapter for Peripheral {
         let result = match key {
             SettingKey::ReportRate => {
                 let hz = value.as_int().unwrap_or(0) as u32;
-                match bragi::pollrate_value(hz) {
-                    Some(v) => self.backend.store(bragi::PROP_POLLRATE, v),
-                    None => Err(anyhow::anyhow!("{hz} Hz is not a Bragi poll rate")),
-                }
-                .map(|()| self.report_rate = Some(hz))
+                self.backend
+                    .set_report_rate(hz)
+                    .map(|()| self.report_rate = Some(hz))
             }
-            SettingKey::AngleSnapping if !self.caps.tuning => self.backend.store(
+            SettingKey::AngleSnapping if !self.caps.tuning => self.backend.store(&[(
                 bragi::PROP_ANGLE_SNAP,
                 u32::from(value.as_bool().unwrap_or(false)),
-            ),
+            )]),
             SettingKey::Effect if self.caps.onboard.lights == Offer::Yes => {
                 let on = value.as_str() != Some("off");
-                self.backend.store(
+                self.backend.store(&[(
                     bragi::PROP_BRIGHTNESS,
                     if on { bragi::BRIGHTNESS_MAX } else { 0 },
-                )
+                )])
+            }
+            SettingKey::MicSideTone if self.caps.onboard.sidetone == Offer::Yes => {
+                let pct = value.as_int().unwrap_or(0).clamp(0, 100) as u8;
+                self.backend
+                    .store(&headset::v2_sidetone(pct, self.caps.onboard.anc))
+            }
+            SettingKey::PmShutdown if self.caps.onboard.sleep == Offer::Yes => {
+                let min = value.as_int().unwrap_or(0).max(0) as u32;
+                self.backend.store(&headset::sleep(min))
             }
             SettingKey::Dpi if self.onboard() => Ok(()),
             SettingKey::Dpi => self.backend.dpi(value.as_int().unwrap_or(0) as u16),
@@ -825,22 +897,29 @@ mod tests {
             Some(1000)
         }
         /// Refuses 250 Hz, like a device whose read-back differs.
-        fn store(&mut self, prop: u8, value: u32) -> Result<()> {
-            if (prop, value) == (bragi::PROP_POLLRATE, 2) {
-                anyhow::bail!("reads back 4");
+        fn store(&mut self, writes: &[(u8, u32)]) -> Result<()> {
+            for &(prop, value) in writes {
+                if (prop, value) == (bragi::PROP_POLLRATE, 2) {
+                    anyhow::bail!("reads back 4");
+                }
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("store {prop:#04x} {value}"));
             }
-            self.0
-                .lock()
-                .unwrap()
-                .push(format!("store {prop:#04x} {value}"));
             Ok(())
         }
-        /// Angle snapping on, device max 1000 Hz, lights off.
+        /// Angle snapping on, device max 1000 Hz, lights off, sidetone on
+        /// at 40 %, sleep timer on at 30 minutes.
         fn stored(&mut self, prop: u8) -> Option<u32> {
             match prop {
                 bragi::PROP_ANGLE_SNAP => Some(1),
                 bragi::PROP_MAX_POLLRATE => Some(4),
                 bragi::PROP_BRIGHTNESS => Some(0),
+                bragi::PROP_SIDETONE_OFF => Some(0),
+                bragi::PROP_SIDETONE_LEVEL => Some(400),
+                bragi::PROP_SLEEP_ENABLED => Some(1),
+                bragi::PROP_SLEEP_TIMEOUT => Some(1_800_000),
                 _ => None,
             }
         }
@@ -1100,6 +1179,60 @@ mod tests {
         p.set(SettingKey::Effect, SettingValue::Text("on".into()))
             .unwrap();
         assert_eq!(*log.lock().unwrap(), ["store 0x02 1000"]);
+        let _ = std::fs::remove_dir_all(&p.paths.root);
+    }
+
+    #[test]
+    fn v2_headset_sidetone_and_sleep_are_stored() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        // Void Wireless V2 receiver.
+        let caps = Caps::opened(models::spec(0x2a08).unwrap().family, 0x2a08, false);
+        let mut p = peripheral(log.clone(), caps, "v2");
+        // Connect only reads: the device's values are shown.
+        assert!(log.lock().unwrap().is_empty());
+        assert_eq!(
+            p.settings.get("mic_side_tone"),
+            Some(&SettingValue::Int(40))
+        );
+        assert_eq!(p.settings.get("pm_shutdown"), Some(&SettingValue::Int(30)));
+        for key in [SettingKey::MicSideTone, SettingKey::PmShutdown] {
+            let c = control(&p, key);
+            assert!(c.persistent && c.blocked.is_none(), "{key:?}");
+        }
+        assert!(control(&p, SettingKey::PmShutdown)
+            .validate(&SettingValue::Int(90))
+            .is_ok());
+        p.set(SettingKey::MicSideTone, SettingValue::Int(25))
+            .unwrap();
+        p.set(SettingKey::MicSideTone, SettingValue::Int(0))
+            .unwrap();
+        p.set(SettingKey::PmShutdown, SettingValue::Int(10))
+            .unwrap();
+        p.set(SettingKey::PmShutdown, SettingValue::Int(0)).unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "store 0xd1 0",
+                "store 0x46 0",
+                "store 0x47 250",
+                "store 0x46 1",
+                "store 0x0d 1",
+                "store 0x0e 600000",
+                "store 0x0d 0"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&p.paths.root);
+    }
+
+    #[test]
+    fn nxp_mouse_rate_is_offered() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let caps = Caps::opened(models::spec(0x1b5a).unwrap().family, 0x1b5a, false);
+        let p = peripheral(log.clone(), caps, "nxp-rate");
+        let rate = control(&p, SettingKey::ReportRate);
+        assert!(rate.persistent && rate.blocked.is_none() && !rate.read_only);
+        let hz: Vec<_> = rate.options.iter().map(|o| o.value.clone()).collect();
+        assert_eq!(hz, [125, 250, 500, 1000].map(SettingValue::Int));
         let _ = std::fs::remove_dir_all(&p.paths.root);
     }
 

@@ -14,7 +14,9 @@
 //! verified on the H9 II and Buds (zoneout `SPECS.md`, OpenInzone `PROTOCOL.md`).
 //! HeadsetControl assumes 0-50 for sidetone and reads the balance as 0-90; the
 //! narrower verified ranges are used for every model, the H5 balance follows
-//! HeadsetControl (its only source).
+//! HeadsetControl (its only source). The balance is set with `22` SET `[value]`,
+//! 0 = all game, 100 = all chat (zoneout `SPECS.md` write table, OpenInzone
+//! `PROTOCOL.md` worked example); offered on the H9 II and Buds only.
 //!
 //! The headset keeps its settings itself (Sony's H9 II help guide: kept through
 //! a reset until factory initialisation), so they are written only when the
@@ -77,6 +79,7 @@ pub(super) const H9_II: Spec = Spec {
     buds: false,
     balance_max: 100,
     keys: &[
+        K::ChatMixBalance,
         K::Volume,
         K::NoiseCancelling,
         K::NoiseCancellingStartup,
@@ -103,7 +106,13 @@ pub(super) const BUDS: Spec = Spec {
     pids: &[0x0ec2],
     buds: true,
     balance_max: 100,
-    keys: &[K::Volume, K::NoiseCancelling, K::MicSideTone, K::MicMute],
+    keys: &[
+        K::ChatMixBalance,
+        K::Volume,
+        K::NoiseCancelling,
+        K::MicSideTone,
+        K::MicMute,
+    ],
 };
 
 #[cfg(test)]
@@ -197,6 +206,7 @@ fn decode(spec: &Spec, eid: u8, p: &[u8]) -> Vec<Reading> {
             vec![
                 Setting(K::ChatMixGame, SettingValue::Float(1.0 - chat)),
                 Setting(K::ChatMixChat, SettingValue::Float(chat)),
+                int(K::ChatMixBalance, *v),
             ]
         }
         (EID_VOLUME, [_, v, ..]) if *v <= VOLUME_MAX => vec![int(K::Volume, *v)],
@@ -238,6 +248,7 @@ fn set_payload(key: K, value: &SettingValue, ambient: Option<[u8; 4]>) -> Result
         // [mute, value, percent]; 0xFF = percent not given (as INZONE Hub sends).
         K::Volume => (EID_VOLUME, vec![0x00, n, 0xff]),
         K::MicSideTone => (EID_SIDETONE, vec![n, 0xff]),
+        K::ChatMixBalance => (EID_BALANCE, vec![n]),
         K::NoiseCancelling => {
             let [_, level, pct, focus] = ambient.context("ambient sound state unknown")?;
             (EID_AMBIENT, vec![n, level, pct, focus])
@@ -290,6 +301,10 @@ fn controls(spec: &Spec) -> Vec<SettingMeta> {
     ];
     for &k in spec.keys {
         c.push(match k {
+            // INZONE Hub moves it in steps of 10 (OpenInzone).
+            K::ChatMixBalance => {
+                SettingMeta::slider(k, "Game / chat balance", 0.0, 100.0, 10.0).unit("% chat")
+            }
             K::Volume => SettingMeta::slider(k, "Volume", 0.0, f64::from(VOLUME_MAX), 1.0),
             K::MicSideTone => SettingMeta::slider(k, "Sidetone", 0.0, f64::from(SIDETONE_MAX), 1.0),
             K::NoiseCancelling => SettingMeta::dropdown(
@@ -634,6 +649,18 @@ mod tests {
         let c = command(eid, SET, 3, &p);
         assert_eq!((c[1], c[9], c[13], c[14]), (0x0e, 0x23, 10, 0xff));
         assert_eq!(c[15], (3u8 + 10).wrapping_add(0xbe));
+        // OpenInzone worked example: balance 30 with transaction id 0x65.
+        let (eid, p) = set_payload(K::ChatMixBalance, &SettingValue::Int(30), None).unwrap();
+        let c = command(eid, SET, 0x65, &p);
+        assert_eq!(
+            c[..15],
+            [
+                0x02, 0x0d, 0x01, 0x00, 0xfc, 0x09, 0x96, 0xc3, 0x41, 0x22, 0x02, 0x65, 0x00, 0x1e,
+                0x41
+            ]
+        );
+        // zoneout: checksum = sequence + value + 0xbe.
+        assert_eq!(c[14], (0x65u8 + 30).wrapping_add(0xbe));
         let (eid, p) = set_payload(K::VoicePrompts, &SettingValue::Bool(true), None).unwrap();
         let c = command(eid, SET, 2, &p);
         assert_eq!(
@@ -718,9 +745,12 @@ mod tests {
             mix(&H9_II, 25),
             vec![
                 Setting(K::ChatMixGame, SettingValue::Float(0.75)),
-                Setting(K::ChatMixChat, SettingValue::Float(0.25))
+                Setting(K::ChatMixChat, SettingValue::Float(0.25)),
+                Setting(K::ChatMixBalance, SettingValue::Int(25)),
             ]
         );
+        // The H5 balance is shown, not offered.
+        assert_eq!(mix(&H5, 45).len(), 2);
         assert_eq!(
             mix(&H5, 90)[1],
             Setting(K::ChatMixChat, SettingValue::Float(1.0))

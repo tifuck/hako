@@ -28,7 +28,7 @@ pub const ONBOARD_WARNING: &str =
     "Settings marked \"Saved to device\" are written to this device's \
 onboard memory (flash / EEPROM / onboard profiles). They persist after unplugging and on other \
 computers, every change wears the memory slightly, and a faulty write could leave the device \
-misconfigured until it is reset with the maker's software. Hako only offers writes whose \
+misconfigured until it is reset with the maker's software. hako only offers writes whose \
 memory layout several independent sources confirm, and only writes when you change a setting \
 (never automatically). Continue?";
 
@@ -266,7 +266,7 @@ fn set_checked(
     if meta.persistent && !gate.allowed {
         bail!(
             "{} is saved to the {}'s onboard memory: turn on \"Allow saving to device memory\" \
-             (Device memory tab) first",
+             (Device tab) first",
             meta.label,
             snap.name
         );

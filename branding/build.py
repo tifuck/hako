@@ -21,7 +21,7 @@ GALLERY = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hako</title>
+<title>hako</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600&display=swap" rel="stylesheet">
@@ -53,7 +53,7 @@ pre code{background:none;padding:0;font-size:1em}
 </head>
 <body>
 <main>
-<h1>Hako</h1>
+<h1>hako</h1>
 <p class="note">The logo, and every ready-made version of Pip the mascot. Mascot labels are file names in <code>out/</code>: <code>pip-&lt;name&gt;.svg</code>, with a PNG beside each.</p>
 <section>
 <h2>Logo</h2>
@@ -135,10 +135,12 @@ def stack(p):
 
 def logos():
     """logo/: Pip and the wordmark with no background, cropped tight."""
-    mark, lockup = "17 19 86 88", "15 17 276 92"
+    mark, lockup, icon = "17 19 86 88", "15 17 276 92", "12 14 96 96"
     pip, word = stack(DEFAULT), part("", "wordmark")
     files = {
         "hako-mark": svg(mark, pip),
+        # App icon: Pip with the light edge on a transparent square, as in the app's top bar.
+        "hako-icon": svg(icon, part("", "outline") + "\n" + pip),
         "hako-logo": svg(lockup, pip + "\n" + word.replace("currentColor", "#1E293B")),
         "hako-logo-dark": svg(lockup, "\n".join((part("", "outline"), pip, word.replace("currentColor", "#F8FAFC")))),
         "hako-glyph": svg(mark, part("", "glyph")),

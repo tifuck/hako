@@ -198,7 +198,7 @@ pub fn parse_pairing(bolt: bool, reply: &[u8; 20]) -> Option<(u16, u8)> {
     (wpid != 0).then_some((wpid, kind))
 }
 
-/// HID++ 1.0 device kind (pairing register) → Hako kind.
+/// HID++ 1.0 device kind (pairing register) → hako kind.
 pub fn kind_from_hidpp10(kind: u8) -> DeviceKind {
     match kind {
         0x01 | 0x03 => DeviceKind::Keyboard,
@@ -208,7 +208,7 @@ pub fn kind_from_hidpp10(kind: u8) -> DeviceKind {
     }
 }
 
-/// HID++ 2.0 DEVICE_NAME fn 2 device type → Hako kind.
+/// HID++ 2.0 DEVICE_NAME fn 2 device type → hako kind.
 pub fn kind_from_hidpp20(kind: u8) -> DeviceKind {
     match kind {
         0x00 | 0x02 => DeviceKind::Keyboard,
@@ -340,6 +340,12 @@ pub fn dpi_slider(dpis: &[u16]) -> Option<(u16, u16, u16)> {
     let gaps = || dpis.windows(2).map(|w| w[1].saturating_sub(w[0]));
     let step = gaps().min().unwrap_or(1).max(1);
     (dpis.len() > 16 || gaps().all(|g| g == step)).then_some((min, max, step))
+}
+
+/// 0x2202 fn 1 GetSensorCapabilities flags (params\[2\]): bit 1 = lift-off
+/// distance settable, 0 low / 1 medium / 2 high (Solaar ExtendedAdjustableDpi).
+pub fn ext_dpi_has_lod(flags: u8) -> bool {
+    flags & 0x02 != 0
 }
 
 /// Extended report-rate index → Hz (Solaar ExtendedReportRate).
@@ -598,6 +604,15 @@ mod tests {
         assert_eq!(dpi_slider(&v), Some((100, 2000, 50)));
         // A step with nothing before it is malformed: stop.
         assert!(parse_dpi_list(&[0xe0, 0x32, 0x0f, 0xa0]).is_empty());
+        // 0x2202 caps: bit 0 = separate Y, bit 1 = LOD.
+        assert!(ext_dpi_has_lod(0x02) && ext_dpi_has_lod(0x03));
+        assert!(!ext_dpi_has_lod(0x01));
+        // SetSensorDpi fn 6: [sensor, X BE, Y BE, LOD].
+        let p = long_request(DIRECT, 0x09, 0x06, &[0x00, 0x03, 0x20, 0x03, 0x20, 0x01]);
+        assert_eq!(
+            &p[..10],
+            &[0x11, 0xff, 0x09, 0x6a, 0x00, 0x03, 0x20, 0x03, 0x20, 0x01]
+        );
     }
 
     #[test]

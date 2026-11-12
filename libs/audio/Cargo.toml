@@ -3,7 +3,7 @@ name = "hako-audio"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Hako PipeWire ChatMix and line-in (AUX) routing"
+description = "hako PipeWire ChatMix and line-in (AUX) routing"
 
 [dependencies]
 hako-core = { workspace = true }

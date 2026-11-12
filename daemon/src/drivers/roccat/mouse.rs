@@ -10,14 +10,20 @@
 //! and has no documented switch back, so it keeps the host color until it is
 //! power-cycled.
 //!
+//! Kone Pro Air battery (read-only, single source: Eruption
+//! `roccat_kone_pro_air.rs` `update_device_status`): output report `90 0a`
+//! (64 bytes) on the same node as the lighting (dongle interface 2, cable
+//! interface 1, as OpenRGB); the reply `90 0a ..` carries the percentage at
+//! byte 10.
+//!
 //! Onboard memory: the lighting profile writes (OpenRGB `SetMode`, report 6
 //! with a checksum; Kone XP's 0xAE-byte block also holds DPI and report rate)
 //! have no second source and are blocked placeholders. The Kone AIMO has no
 //! documented save at all (OpenRGB `@save :x:`).
 
 use super::{
-    open_iface, save_blocked, wait_ready, Adapter, Lights, Spec, ONBOARD_STATIC, OPENRGB_ONLY,
-    ROCCAT, STICKY_STATIC,
+    open_iface, read_until, save_blocked, wait_ready, Adapter, Lights, Spec, ONBOARD_STATIC,
+    OPENRGB_ONLY, ROCCAT, STICKY_STATIC,
 };
 use crate::drivers::{DriverCtx, Opened};
 use crate::hid::HidrawDevice;
@@ -155,6 +161,22 @@ fn pro_air_frame([r, g, b]: [u8; 3]) -> [u8; 16] {
     ]
 }
 
+/// Kone Pro Air battery query: report id 0, then `90 0a`.
+fn battery_query() -> [u8; 65] {
+    let mut p = [0u8; 65];
+    p[1..3].copy_from_slice(&[0x90, 0x0a]);
+    p
+}
+
+/// Percentage from a `90 0a` reply (byte 10); `None` for other reports or
+/// readings above 100.
+fn parse_battery(r: &[u8]) -> Option<u8> {
+    match r {
+        [0x90, 0x0a, ..] => r.get(10).copied().filter(|&p| p <= 100),
+        _ => None,
+    }
+}
+
 /// Blocked onboard-memory placeholders for `f`.
 fn memory_controls(f: Family) -> Vec<SettingMeta> {
     use SettingKey::*;
@@ -249,6 +271,18 @@ impl Lights for Mouse {
             let _ = self.dev.set_feature(&mut switch(false));
         }
     }
+
+    fn battery_label(&self) -> Option<&'static str> {
+        (self.family == Family::ProAir).then_some("Mouse")
+    }
+
+    fn battery(&mut self) -> Option<u8> {
+        self.dev.write(&battery_query()).ok()?;
+        let r = read_until(&mut self.dev, Duration::from_millis(200), |r| {
+            r.starts_with(&[0x90, 0x0a])
+        })?;
+        parse_battery(&r)
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +297,23 @@ mod tests {
             assert!(!c.is_empty());
             assert!(c.iter().all(|m| m.persistent && m.blocked.is_some()));
         }
+    }
+
+    #[test]
+    fn pro_air_battery() {
+        let q = battery_query();
+        assert_eq!(q[..4], [0x00, 0x90, 0x0a, 0x00]);
+        assert!(q[3..].iter().all(|&b| b == 0));
+        let mut r = [0u8; 64];
+        r[..2].copy_from_slice(&[0x90, 0x0a]);
+        r[10] = 73;
+        assert_eq!(parse_battery(&r), Some(73));
+        r[10] = 0xff;
+        assert_eq!(parse_battery(&r), None);
+        // The `90 70` signal reply is not a battery reading.
+        r[1] = 0x70;
+        r[10] = 50;
+        assert_eq!(parse_battery(&r), None);
     }
 
     #[test]

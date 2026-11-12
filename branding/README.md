@@ -1,6 +1,6 @@
 # Branding
 
-The app is called **Hako** ("HAH-koh", Japanese for box) and Pip the penguin
+The app is called **hako** ("HAH-koh", Japanese for box) and Pip the penguin
 is its mascot, logo and icon. This folder holds Pip as separate layers, a
 script that stacks them into finished images, and everything needed to redraw
 the whole set from nothing.
@@ -44,11 +44,12 @@ Needs Python 3.11+ and nothing else. PNG export uses Chrome or Chromium if insta
 
 ## Logo
 
-All four are flat SVG on a transparent background, cropped tight.
+All five are flat SVG on a transparent background, cropped tight.
 
 | File | Use |
 |---|---|
 | `logo/hako-mark.svg` | Pip alone, full colour. Light surfaces. |
+| `logo/hako-icon.svg` | Pip with a light edge on a square canvas: the app icon. Any surface. |
 | `logo/hako-logo.svg` | Pip and the wordmark in navy. Light surfaces. |
 | `logo/hako-logo-dark.svg` | Same with a light edge around Pip and a light wordmark. Dark or coloured surfaces. |
 | `logo/hako-glyph.svg` | One colour, drawn in `currentColor`: inline it and it takes the surrounding text colour; as a plain image it is black. |
@@ -58,12 +59,12 @@ or an icon with a background (`out/pip-icon.svg`).
 
 ## In the app
 
-- **Top bar:** `widgets::pip` in `libs/ui/src/widgets.rs` draws Pip with the
-  painter on a tile filled with the theme's accent colour, so it follows the
-  theme. It repeats the base geometry from `parts/`; change both together.
-- **App icon:** `client/assets/icon.png` is the yellow icon, because a file
-  cannot follow the theme. Regenerate it with
-  `./build.py icon -o /tmp/icon.svg --png 256 && cp /tmp/icon.png ../client/assets/icon.png`.
+- **Top bar:** `libs/ui/src/brand.rs` stacks the same `parts/` layers as
+  `logo/hako-logo-dark.svg` at compile time and draws them with resvg, so
+  editing a part changes the app too.
+- **App icon:** `client/assets/icon.png` is `logo/hako-icon.svg` (Pip with the
+  light edge, transparent background) at 256 px. Regenerate it with
+  `./build.py && python3 -c "import build, pathlib; build.png(pathlib.Path('logo/hako-icon.svg'), 256)" && mv logo/hako-icon.png ../client/assets/icon.png`.
 
 ## Add an event
 

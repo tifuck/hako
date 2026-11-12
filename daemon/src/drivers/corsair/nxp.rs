@@ -1,23 +1,31 @@
 //! Legacy "NXP" protocol (K70 RGB MK.2, K95 Platinum, M65 RGB Elite, ...).
 //!
 //! 64-byte unnumbered reports on the vendor collection (usage page 0xFFC2,
-//! interface 1). `07` writes get no reply, so this side is write-only.
+//! interface 1). `07` writes get no reply; the only read is the `0E 01`
+//! identification feature report, whose byte 16 is the poll interval in ms.
+//! Mice take `07 0A 00 00 <1|2|4|8 ms>` to change the poll rate (ckb-next
+//! `device_mouse.c` `cmd_pollrate`, OpenLinkHub `m65rgbelite.go`
+//! `cmdSetPollingRate`); the mouse re-enumerates to apply it.
 //! Sources: ckb-next `src/daemon/nxp_proto.h`, `led_keyboard.c`,
-//! `led_mouse.c`, `dpi.c`, `device_keyboard.c`, `structures.h` (lift range);
+//! `led_mouse.c`, `dpi.c`, `device_keyboard.c`, `device_mouse.c`,
+//! `firmware.c` (`getfwversion`), `structures.h` (lift range);
 //! corsair-protocol docs
 //! (github.com/ckb-next/corsair-protocol, host-to-device/07/*); OpenRGB
 //! `Controllers/CorsairPeripheralController`.
 
 use super::Backend;
 use crate::hid::HidrawDevice;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::time::Duration;
 
 pub const USAGE_PAGE: u16 = 0xffc2;
 pub const IFACE: u32 = 1;
 
 const CMD_SET: u8 = 0x07;
+const CMD_GET: u8 = 0x0e;
 const CMD_WRITE_BULK: u8 = 0x7f;
+const FIELD_IDENT: u8 = 0x01;
+const FIELD_POLLRATE: u8 = 0x0a;
 const FIELD_SPECIAL: u8 = 0x04;
 const FIELD_LIGHTING: u8 = 0x05;
 const FIELD_MOUSE: u8 = 0x13;
@@ -139,6 +147,32 @@ pub fn snap(on: bool) -> Packet {
     packet(&[CMD_SET, FIELD_MOUSE, MOUSE_SNAP, 0, u8::from(on), 0x05])
 }
 
+/// `0E 01`: identification (firmware, ids, poll interval).
+pub fn ident_request() -> Packet {
+    packet(&[CMD_GET, FIELD_IDENT])
+}
+
+/// Poll rate (Hz) from an identification reply; None for anything else,
+/// including an interval other than 1, 2, 4 or 8 ms.
+pub fn ident_rate(r: &[u8]) -> Option<u32> {
+    if r.len() <= 16 || r[0] != CMD_GET || r[1] != FIELD_IDENT {
+        return None;
+    }
+    matches!(r[16], 1 | 2 | 4 | 8).then(|| 1000 / u32::from(r[16]))
+}
+
+/// `07 0A 00 00 <ms>` for 125, 250, 500 or 1000 Hz.
+pub fn pollrate(hz: u32) -> Option<Packet> {
+    let ms = match hz {
+        125 => 8,
+        250 => 4,
+        500 => 2,
+        1000 => 1,
+        _ => return None,
+    };
+    Some(packet(&[CMD_SET, FIELD_POLLRATE, 0, 0, ms]))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Leds {
     Keyboard,
@@ -211,6 +245,33 @@ impl Backend for Nxp {
     fn angle_snap(&mut self, on: bool) -> Result<()> {
         self.send(&snap(on))
     }
+
+    /// Mice only: keyboards are left as they were.
+    fn report_rate(&mut self) -> Option<u32> {
+        if !matches!(self.leds, Leds::Mouse(_)) {
+            return None;
+        }
+        let mut buf = [0u8; 65];
+        buf[1..].copy_from_slice(&ident_request());
+        self.dev.set_feature(&mut buf).ok()?;
+        let mut buf = [0u8; 65];
+        self.dev.get_feature(&mut buf).ok()?;
+        ident_rate(&buf[1..])
+    }
+
+    /// Read the current rate first (no write when it already matches); the
+    /// write cannot be read back: the mouse re-enumerates with the new rate
+    /// (ckb-next) and discovery reopens it.
+    fn set_report_rate(&mut self, hz: u32) -> Result<()> {
+        let p = pollrate(hz).with_context(|| format!("{hz} Hz is not an NXP poll rate"))?;
+        let now = self
+            .report_rate()
+            .context("read the poll rate before writing")?;
+        if now == hz {
+            return Ok(());
+        }
+        self.send(&p)
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +332,29 @@ mod tests {
             [0x07, 0x13, 0xd1, 0x00, 0x00, 0x40, 0x06, 0x40, 0x06, 0x00]
         );
         assert_eq!(select[..6], [0x07, 0x13, 0x02, 0x00, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn pollrate_packets() {
+        // ckb-next cmd_pollrate / OpenLinkHub cmdWrite + cmdSetPollingRate.
+        assert_eq!(
+            pollrate(1000).unwrap()[..6],
+            [0x07, 0x0a, 0x00, 0x00, 0x01, 0x00]
+        );
+        assert_eq!(pollrate(125).unwrap()[4], 8);
+        assert_eq!(pollrate(250).unwrap()[4], 4);
+        assert!(pollrate(2000).is_none());
+        assert_eq!(ident_request()[..3], [0x0e, 0x01, 0x00]);
+        // getfwversion: in_pkt[16] is the interval in ms.
+        let mut r = [0u8; 64];
+        r[..2].copy_from_slice(&[0x0e, 0x01]);
+        r[16] = 2;
+        assert_eq!(ident_rate(&r), Some(500));
+        r[16] = 3;
+        assert_eq!(ident_rate(&r), None);
+        r[16] = 1;
+        r[1] = 0x00;
+        assert_eq!(ident_rate(&r), None);
     }
 
     #[test]

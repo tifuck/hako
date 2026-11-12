@@ -14,9 +14,14 @@
 //!   both; both slots are read and checked first and slot 1 is read back after.
 //!   Lift-off and lighting presets are not saved: the sources disagree on the
 //!   lift-off slot and the preset save is untested (docs/onboard-writes/hyperx.md).
+//!   DPI stages 1-5 and the active stage are fields of the same live table
+//!   (`[5]` enabled-stage mask, `[6]` active stage, 0-based; universal.md
+//!   §3.3); changing them only writes slot 0.
 //! - Dart: OpenRGB `HyperXPulsefireDartController` layout, `d2 <led> <mode> 08
 //!   RGB RGB <brightness> <speed>`; `d0` polling rate and the `51` heartbeat
-//!   (battery) from the santeri3700 notes and PlasmaNGenuity. Volatile until a
+//!   (battery) from the santeri3700 notes and PlasmaNGenuity; DPI stages
+//!   `d3 02 <stage> 02 <DPI/50 u16 LE>` and active stage `d3 00 00 01 <stage>`
+//!   from the same notes and their `ngenuity_initialization_2` capture. Volatile until a
 //!   `de ff` save, which only one line of reverse engineering documents: shown
 //!   as a blocked placeholder, never sent.
 //!
@@ -107,6 +112,26 @@ const SAVED: [u8; 2] = [0x01, 0x00];
 /// DPI codes of 200..=26000 DPI (DPI / 50 - 1).
 const DPI_CODES: std::ops::RangeInclusive<u16> = 3..=519;
 
+const STAGES: [SettingKey; 5] = [
+    SettingKey::DpiStage1,
+    SettingKey::DpiStage2,
+    SettingKey::DpiStage3,
+    SettingKey::DpiStage4,
+    SettingKey::DpiStage5,
+];
+
+/// Every setting held in the `32 01` DPI table.
+const TABLE_KEYS: [SettingKey; 8] = [
+    SettingKey::Dpi,
+    SettingKey::ReportRate,
+    SettingKey::DpiStageActive,
+    SettingKey::DpiStage1,
+    SettingKey::DpiStage2,
+    SettingKey::DpiStage3,
+    SettingKey::DpiStage4,
+    SettingKey::DpiStage5,
+];
+
 /// UniversalPollingRate codes.
 const RATE_CODES: [(i64, u8); 7] = [
     (125, 0x40),
@@ -143,31 +168,83 @@ fn parse_dpi(r: &[u8]) -> Option<(i64, Option<i64>)> {
     Some(((i64::from(code) + 1) * 50, hz))
 }
 
-/// Live `32 01` table rebuilt from a `33 02` reply: stages, mask and colors
-/// kept, the active stage's DPI and/or the rate replaced.
-fn dpi_write(r: &[u8], dpi: Option<i64>, hz: Option<i64>) -> Option<Vec<u8>> {
-    table_write(r, LIVE, dpi, hz)
+/// `33 02`: enabled-stage mask, active stage (0-based) and the DPI of
+/// stages 1-5 (`None` when disabled).
+fn parse_stages(r: &[u8]) -> Option<(u8, u8, [Option<i64>; 5])> {
+    let [0x33, 0x02, _, mask, active, ..] = r else {
+        return None;
+    };
+    let mut stages = [None; 5];
+    for i in (0..STAGES.len()).filter(|&i| mask & (1 << i) != 0) {
+        let at = 5 + 5 * i;
+        let code = u16::from_le_bytes(r.get(at..at + 2)?.try_into().ok()?);
+        stages[i] = Some((i64::from(code) + 1) * 50);
+    }
+    Some((*mask, *active, stages))
+}
+
+/// What a table write changes; `None` keeps the mouse's value.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct TableEdit {
+    /// DPI of stages 1-5.
+    stages: [Option<i64>; 5],
+    /// 0-based; must be enabled in the mask.
+    active: Option<u8>,
+    /// DPI of the (new) active stage, applied after `stages`.
+    dpi: Option<i64>,
+    hz: Option<i64>,
+}
+
+/// Live `32 01` table rebuilt from a `33 02` reply: mask and colors kept,
+/// the edited fields replaced.
+fn dpi_write(r: &[u8], edit: &TableEdit) -> Option<Vec<u8>> {
+    table_write(r, LIVE, edit)
 }
 
 /// [`dpi_write`] into profile `slot`.
-fn table_write(r: &[u8], slot: [u8; 2], dpi: Option<i64>, hz: Option<i64>) -> Option<Vec<u8>> {
+fn table_write(r: &[u8], slot: [u8; 2], edit: &TableEdit) -> Option<Vec<u8>> {
     let [0x33, 0x02, rate, mask, active, ..] = r else {
         return None;
     };
+    if edit.active.is_some_and(|a| a >= 8 || mask & (1 << a) == 0) {
+        return None;
+    }
+    let active = edit.active.unwrap_or(*active);
     let mut p = uni(0x32, 0x01, &slot);
-    p[4] = hz
+    p[4] = edit
+        .hz
         .and_then(|hz| RATE_CODES.iter().find(|(h, _)| *h == hz))
         .map_or(*rate, |(_, c)| *c);
     p[5] = *mask;
-    p[6] = *active;
+    p[6] = active;
     // Eleven 5-byte stage slots.
     p[7..62].copy_from_slice(r.get(5..60)?);
-    if let Some(dpi) = dpi {
-        let at = 7 + 5 * usize::from(*active);
+    let stages = (0..).zip(edit.stages).filter_map(|(i, d)| Some((i, d?)));
+    for (i, dpi) in stages.chain(edit.dpi.map(|d| (usize::from(active), d))) {
+        let at = 7 + 5 * i;
         let code = u16::try_from(dpi / 50 - 1).ok()?;
         p.get_mut(at..at + 2)?.copy_from_slice(&code.to_le_bytes());
     }
     Some(p)
+}
+
+/// Keep `dpi` equal to the active stage's DPI after `key` changed.
+fn link_dpi(s: &mut SettingsMap, key: SettingKey) {
+    use SettingKey::*;
+    let Some(&stage) = get_setting(s, DpiStageActive)
+        .and_then(|v| v.as_int())
+        .and_then(|n| STAGES.get(usize::try_from(n - 1).ok()?))
+    else {
+        return;
+    };
+    let (from, to) = match key {
+        Dpi => (Dpi, stage),
+        k if k == stage || k == DpiStageActive => (stage, Dpi),
+        _ => return,
+    };
+    if let Some(v) = get_setting(s, from).cloned() {
+        merge_setting(s, to, v);
+    }
 }
 
 /// A `33 02` reply that is a plausible DPI table: known rate code, the active
@@ -203,7 +280,7 @@ fn store_table(q: &mut Query) -> Result<()> {
     check_table(&live).context("live DPI table")?;
     let saved = q(&uni(0x32, 0x02, &[1]))?.context("no onboard DPI table")?;
     check_table(&saved).context("onboard DPI table")?;
-    let w = table_write(&live, SAVED, None, None).context("bad DPI table")?;
+    let w = table_write(&live, SAVED, &TableEdit::default()).context("bad DPI table")?;
     q(&w)?;
     let back = q(&uni(0x32, 0x02, &[1]))?.context("onboard DPI table not read back")?;
     if back.get(2..60) != w.get(4..62) {
@@ -309,13 +386,42 @@ const UNI_EFFECTS: [(&str, &str); 4] = [
     ("spectrum", "Spectrum"),
 ];
 
+/// Stage sliders (stages outside `mask` hidden) and the active-stage choice
+/// among the enabled ones; nothing for an empty mask.
+fn stage_controls(mask: u8, max_dpi: f64) -> Vec<SettingMeta> {
+    let on: Vec<i64> = (1..=STAGES.len() as i64)
+        .filter(|n| mask & (1 << (n - 1)) != 0)
+        .collect();
+    if on.is_empty() {
+        return Vec::new();
+    }
+    let mut c: Vec<_> = STAGES
+        .iter()
+        .zip(1..)
+        .map(|(&key, n)| {
+            SettingMeta::slider(key, &format!("DPI stage {n}"), 200.0, max_dpi, 50.0)
+                .unit("dpi")
+                .hidden(!on.contains(&n))
+        })
+        .collect();
+    c.push(SettingMeta::dropdown(
+        SettingKey::DpiStageActive,
+        "Active DPI stage",
+        on.iter()
+            .map(|&n| SettingOption::int(n, &n.to_string()))
+            .collect(),
+    ));
+    c
+}
+
 /// `rates`: how many [`RATE_CODES`] to offer; `presets`: lighting effects
-/// besides brightness.
-fn universal_controls(effect: &str, rates: usize, presets: bool) -> Vec<SettingMeta> {
+/// besides brightness; `mask`: the enabled DPI stages last read.
+fn universal_controls(effect: &str, rates: usize, presets: bool, mask: u8) -> Vec<SettingMeta> {
     use SettingKey::*;
     // Haste 2 Wireless and Saga Pro: 200-26000 DPI in steps of 50.
-    let mut c = vec![
-        SettingMeta::slider(Dpi, "DPI", 200.0, 26000.0, 50.0).unit("dpi"),
+    let mut c = vec![SettingMeta::slider(Dpi, "DPI", 200.0, 26000.0, 50.0).unit("dpi")];
+    c.extend(stage_controls(mask, 26000.0));
+    c.extend([
         SettingMeta::dropdown(
             ReportRate,
             "Report rate",
@@ -329,7 +435,7 @@ fn universal_controls(effect: &str, rates: usize, presets: bool) -> Vec<SettingM
             "Lift-off",
             vec![SettingOption::int(1, "1 mm"), SettingOption::int(2, "2 mm")],
         ),
-    ];
+    ]);
     if presets {
         c.extend(lighting_controls(
             &UNI_EFFECTS,
@@ -375,6 +481,8 @@ struct UniversalMouse {
     battery: BatteryState,
     online: bool,
     sync: bool,
+    /// Enabled DPI stages from the last table read (0 = not read yet).
+    mask: u8,
     last_poll: Option<Instant>,
     failures: u8,
     last_error: Option<String>,
@@ -420,6 +528,7 @@ impl UniversalMouse {
             },
             online: cabled,
             sync: true,
+            mask: 0,
             last_poll: None,
             failures: 0,
             last_error: None,
@@ -450,11 +559,19 @@ impl UniversalMouse {
                 self.battery.present = online;
             }
             // DPI button: fb 08 <stage> <code u16 LE>.
-            [0xfb, 0x08, _, lo, hi, ..] => merge_setting(
-                &mut self.settings,
-                SettingKey::Dpi,
-                SettingValue::Int((i64::from(u16::from_le_bytes([*lo, *hi])) + 1) * 50),
-            ),
+            [0xfb, 0x08, stage, lo, hi, ..] => {
+                let dpi = SettingValue::Int((i64::from(u16::from_le_bytes([*lo, *hi])) + 1) * 50);
+                let s = &mut self.settings;
+                merge_setting(s, SettingKey::Dpi, dpi.clone());
+                if let Some(&key) = STAGES.get(usize::from(*stage)) {
+                    merge_setting(s, key, dpi);
+                    merge_setting(
+                        s,
+                        SettingKey::DpiStageActive,
+                        SettingValue::Int(i64::from(*stage) + 1),
+                    );
+                }
+            }
             // [3]: 0 not charging, 1 charging, 2 full, 3 error, ff unknown.
             [0x51, 0x02, level, status, ..] if *level <= 100 => {
                 self.battery.present = true;
@@ -469,15 +586,18 @@ impl UniversalMouse {
         use SettingKey::*;
         let s = &self.settings;
         let packet = match key {
-            Dpi | ReportRate => {
-                let (dpi, hz) = (
-                    get_setting(s, Dpi).and_then(|v| v.as_int()),
-                    get_setting(s, ReportRate).and_then(|v| v.as_int()),
-                );
+            k if TABLE_KEYS.contains(&k) => {
+                let get = |k| get_setting(s, k).and_then(|v| v.as_int());
+                let edit = TableEdit {
+                    stages: STAGES.map(get),
+                    active: get(DpiStageActive).and_then(|n| u8::try_from(n - 1).ok()),
+                    dpi: get(Dpi),
+                    hz: get(ReportRate),
+                };
                 let reply = self
                     .query(&uni(0x32, 0x02, &[0]))?
                     .context("no DPI table from the mouse")?;
-                dpi_write(&reply, dpi, hz).context("bad DPI table")?
+                dpi_write(&reply, &edit).context("bad DPI table")?
             }
             LiftOffDistance => {
                 let mm = int(s, LiftOffDistance, 1);
@@ -520,7 +640,7 @@ impl UniversalMouse {
         let has = |k: SettingKey| get_setting(&self.user, k).is_some();
         let lighting = self.presets && [Effect, Speed, ColorR, ColorG, ColorB].into_iter().any(has);
         let pending: Vec<_> = [
-            (Dpi, has(Dpi) || has(ReportRate)),
+            (Dpi, TABLE_KEYS.into_iter().any(has)),
             (LiftOffDistance, has(LiftOffDistance)),
             (Brightness, has(Brightness)),
             (Effect, lighting),
@@ -546,6 +666,17 @@ impl UniversalMouse {
                 merge_setting(s, Dpi, SettingValue::Int(dpi));
                 if let Some(hz) = hz {
                     merge_setting(s, ReportRate, SettingValue::Int(hz));
+                }
+            }
+            if let Some((mask, active, stages)) = parse_stages(&r) {
+                self.mask = mask;
+                for (key, dpi) in STAGES.into_iter().zip(stages) {
+                    if let Some(dpi) = dpi {
+                        merge_setting(s, key, SettingValue::Int(dpi));
+                    }
+                }
+                if usize::from(active) < STAGES.len() {
+                    merge_setting(s, DpiStageActive, SettingValue::Int(i64::from(active) + 1));
                 }
             }
             if let Some(mm) = parse_lift(&r) {
@@ -601,6 +732,9 @@ impl DeviceAdapter for UniversalMouse {
                 text(&self.settings, SettingKey::Effect, ""),
                 self.rates,
                 self.presets,
+                // All five until the table is read (e.g. a profile applied to a
+                // sleeping mouse); `table_write` refuses a disabled active stage.
+                if self.mask == 0 { 0x1f } else { self.mask },
             ),
             last_error: self.last_error.clone(),
         }
@@ -615,8 +749,14 @@ impl DeviceAdapter for UniversalMouse {
             }
             self.store(None)?;
         }
-        merge_setting(&mut self.user, key, value.clone());
-        merge_setting(&mut self.settings, key, value);
+        for s in [&mut self.user, &mut self.settings] {
+            // Chosen stages imply the DPI; a stale one would land in the active stage.
+            if key == SettingKey::DpiStageActive || STAGES.contains(&key) {
+                s.remove(SettingKey::Dpi.as_str());
+            }
+            merge_setting(s, key, value.clone());
+            link_dpi(s, key);
+        }
         hako_core::config::save_device_settings(
             &self.paths,
             self.spec.vid,
@@ -717,6 +857,17 @@ fn dart_rate(hz: i64) -> Option<[u8; 65]> {
     Some(dart_cmd(&[0xd0, 0x00, 0x00, 0x01, code as u8]))
 }
 
+/// `d3 02 <stage 0-4> 02 <DPI / 50, u16 LE>`.
+fn dart_stage(stage: u8, dpi: i64) -> [u8; 65] {
+    let [lo, hi] = ((dpi / 50).clamp(1, 0xffff) as u16).to_le_bytes();
+    dart_cmd(&[0xd3, 0x02, stage, 0x02, lo, hi])
+}
+
+/// `d3 00 00 01 <stage 0-4>`: select the active stage.
+fn dart_active(stage: u8) -> [u8; 65] {
+    dart_cmd(&[0xd3, 0x00, 0x00, 0x01, stage])
+}
+
 /// Heartbeat reply `51 00 00 03 <battery %> <1 = charging> ..`.
 fn parse_heartbeat(r: &[u8]) -> Option<(u8, bool)> {
     match r {
@@ -738,14 +889,17 @@ const DART_SAVE_BLOCKED: &str = "only one reverse-engineering source documents t
      and what its second byte selects is unknown";
 
 fn dart_controls(effect: &str) -> Vec<SettingMeta> {
-    let mut c = vec![SettingMeta::dropdown(
+    // Five stages up to 16000 DPI (santeri3700); the enabled-stage mask
+    // (`d3 01`) cannot be read back, so it is left as the mouse has it.
+    let mut c = stage_controls(0x1f, 16000.0);
+    c.push(SettingMeta::dropdown(
         SettingKey::ReportRate,
         "Report rate",
         DART_RATES
             .iter()
             .map(|&hz| SettingOption::int(hz, &format!("{hz} Hz")))
             .collect(),
-    )];
+    ));
     c.extend(lighting_controls(
         &DART_EFFECTS,
         effect,
@@ -797,7 +951,12 @@ impl DartMouse {
             paths,
         };
         // Everything is volatile: restore the saved choices on every connect.
-        for key in [SettingKey::ReportRate, SettingKey::Effect] {
+        let keys = STAGES.into_iter().chain([
+            SettingKey::DpiStageActive,
+            SettingKey::ReportRate,
+            SettingKey::Effect,
+        ]);
+        for key in keys {
             if get_setting(&a.settings, key).is_some() {
                 if let Err(e) = a.apply(key) {
                     warn!("{} restore {}: {e}", spec.name, key.as_str());
@@ -810,9 +969,18 @@ impl DartMouse {
 
     fn apply(&mut self, key: SettingKey) -> Result<()> {
         let s = &self.settings;
-        if key == SettingKey::ReportRate {
+        let single = if key == SettingKey::ReportRate {
             let hz = int(s, SettingKey::ReportRate, 1000);
-            let p = dart_rate(hz).with_context(|| format!("unsupported rate {hz}"))?;
+            Some(dart_rate(hz).with_context(|| format!("unsupported rate {hz}"))?)
+        } else if key == SettingKey::DpiStageActive {
+            Some(dart_active((int(s, key, 1) - 1).clamp(0, 4) as u8))
+        } else {
+            STAGES
+                .iter()
+                .position(|&k| k == key)
+                .map(|i| dart_stage(i as u8, int(s, key, 800)))
+        };
+        if let Some(p) = single {
             return self.dev.as_mut().context("not connected")?.write(&p);
         }
         let packets = dart_packets(
@@ -902,7 +1070,12 @@ mod tests {
     fn dpi_table_read_and_rewrite() {
         let reply = pad(&TABLE, 64);
         assert_eq!(parse_dpi(&reply), Some((1600, Some(1000))));
-        let w = dpi_write(&reply, Some(3600), Some(250)).unwrap();
+        let edit = TableEdit {
+            dpi: Some(3600),
+            hz: Some(250),
+            ..TableEdit::default()
+        };
+        let w = dpi_write(&reply, &edit).unwrap();
         assert_eq!(w[..7], [0x32, 0x01, 0x00, 0x00, 0x20, 0x1f, 0x02]);
         // Stage 2 = 3600 / 50 - 1 = 0x47; the others and every color kept.
         let mut stages = TABLE[5..20].to_vec();
@@ -911,7 +1084,76 @@ mod tests {
         assert_eq!(w[22..32], TABLE[20..30]);
         assert_eq!(w.len(), 64);
         // Unchanged rewrite reproduces the table.
-        assert_eq!(dpi_write(&reply, None, None).unwrap()[4..32], reply[2..30]);
+        assert_eq!(
+            dpi_write(&reply, &TableEdit::default()).unwrap()[4..32],
+            reply[2..30]
+        );
+    }
+
+    #[test]
+    fn dpi_stages_read_and_rewrite() {
+        let reply = pad(&TABLE, 64);
+        // Mask 1f, active stage index 2: 400, 800, 1600, 3200, 6400 DPI.
+        let (mask, active, stages) = parse_stages(&reply).unwrap();
+        assert_eq!((mask, active), (0x1f, 2));
+        assert_eq!(stages, [400, 800, 1600, 3200, 6400].map(Some));
+        // Stage 4 to 1000 DPI (code 19) and stage 1 active; the rest kept.
+        let mut edit = TableEdit {
+            active: Some(0),
+            ..TableEdit::default()
+        };
+        edit.stages[3] = Some(1000);
+        let w = dpi_write(&reply, &edit).unwrap();
+        assert_eq!(w[..7], [0x32, 0x01, 0x00, 0x00, 0x08, 0x1f, 0x00]);
+        assert_eq!(w[22..24], [19, 0]);
+        assert_eq!(w[7..22], TABLE[5..20]);
+        assert_eq!(w[24..32], TABLE[22..30]);
+        // `dpi` lands in the new active stage, after the stage edits.
+        edit.dpi = Some(900);
+        assert_eq!(dpi_write(&reply, &edit).unwrap()[7..9], [17, 0]);
+        // A stage outside the mask cannot become active.
+        let mut two = reply.clone();
+        two[3] = 0x03;
+        assert_eq!(
+            parse_stages(&two).unwrap().2,
+            [Some(400), Some(800), None, None, None]
+        );
+        let to_third = TableEdit {
+            active: Some(2),
+            ..TableEdit::default()
+        };
+        assert!(dpi_write(&two, &to_third).is_none());
+        let c = stage_controls(0x03, 26000.0);
+        let pick = c
+            .iter()
+            .find(|m| m.key == SettingKey::DpiStageActive)
+            .unwrap();
+        assert!(pick.validate(&SettingValue::Int(2)).is_ok());
+        assert!(pick.validate(&SettingValue::Int(3)).is_err());
+        assert!(
+            c.iter()
+                .find(|m| m.key == SettingKey::DpiStage3)
+                .unwrap()
+                .hidden
+        );
+        assert!(stage_controls(0, 26000.0).is_empty());
+    }
+
+    #[test]
+    fn dpi_follows_the_active_stage() {
+        let int = SettingValue::Int;
+        let mut s = SettingsMap::new();
+        merge_setting(&mut s, SettingKey::DpiStage2, int(800));
+        merge_setting(&mut s, SettingKey::DpiStage3, int(1600));
+        merge_setting(&mut s, SettingKey::DpiStageActive, int(3));
+        link_dpi(&mut s, SettingKey::DpiStageActive);
+        assert_eq!(get_setting(&s, SettingKey::Dpi), Some(&int(1600)));
+        merge_setting(&mut s, SettingKey::Dpi, int(2000));
+        link_dpi(&mut s, SettingKey::Dpi);
+        assert_eq!(get_setting(&s, SettingKey::DpiStage3), Some(&int(2000)));
+        merge_setting(&mut s, SettingKey::DpiStage2, int(500));
+        link_dpi(&mut s, SettingKey::DpiStage2);
+        assert_eq!(get_setting(&s, SettingKey::Dpi), Some(&int(2000)));
     }
 
     #[test]
@@ -1045,7 +1287,7 @@ mod tests {
     #[test]
     fn save_controls() {
         for presets in [true, false] {
-            let c = universal_controls("static", 4, presets);
+            let c = universal_controls("static", 4, presets, 0x1f);
             let save = c
                 .iter()
                 .find(|c| c.key == SettingKey::SaveToDevice)
@@ -1082,9 +1324,9 @@ mod tests {
 
     #[test]
     fn every_model_has_controls() {
-        assert!(!universal_controls("static", 4, true).is_empty());
+        assert!(!universal_controls("static", 4, true, 0).is_empty());
         for (e, _) in UNI_EFFECTS {
-            assert!(universal_controls(e, 4, true)
+            assert!(universal_controls(e, 4, true, 0)
                 .iter()
                 .find(|c| c.key == SettingKey::Effect)
                 .unwrap()
@@ -1097,7 +1339,7 @@ mod tests {
             assert_eq!(color.hidden, e == "spectrum");
         }
         // Saga Pro: brightness only; cable capped at 1000 Hz.
-        let saga = universal_controls("", 6, false);
+        let saga = universal_controls("", 6, false, 0x0f);
         assert!(saga.iter().all(|c| !matches!(
             c.key,
             SettingKey::Effect | SettingKey::ColorR | SettingKey::Speed
@@ -1132,6 +1374,32 @@ mod tests {
         let c = dart_controls("static");
         let rate = c.iter().find(|c| c.key == SettingKey::ReportRate).unwrap();
         assert!(rate.validate(&SettingValue::Int(500)).is_ok());
+    }
+
+    #[test]
+    fn dart_dpi_stages_match_capture() {
+        // santeri3700 ngenuity_initialization_2: stage 1 = 800, stage 2 = 1000 DPI,
+        // then stage 1 selected.
+        assert_eq!(
+            dart_stage(0, 800)[..7],
+            [0x00, 0xd3, 0x02, 0x00, 0x02, 0x10, 0x00]
+        );
+        assert_eq!(
+            dart_stage(1, 1000)[1..7],
+            [0xd3, 0x02, 0x01, 0x02, 0x14, 0x00]
+        );
+        // Notes: 16000 DPI = 0x0140 -> 40 01.
+        assert_eq!(dart_stage(4, 16000)[5..7], [0x40, 0x01]);
+        assert_eq!(dart_active(0)[..6], [0x00, 0xd3, 0x00, 0x00, 0x01, 0x00]);
+        let c = dart_controls("static");
+        let stage = c.iter().find(|m| m.key == SettingKey::DpiStage5).unwrap();
+        assert!(stage.validate(&SettingValue::Int(16000)).is_ok());
+        assert!(stage.validate(&SettingValue::Int(16050)).is_err());
+        let active = c
+            .iter()
+            .find(|m| m.key == SettingKey::DpiStageActive)
+            .unwrap();
+        assert!(active.validate(&SettingValue::Int(5)).is_ok());
     }
 
     /// Read-only probe: connection, battery and the live DPI table.

@@ -8,7 +8,7 @@ use crate::widgets;
 use crate::UiCommand;
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, Ui};
 use hako_core::catalog::{ControlKind, SettingKey, SettingMeta, SettingValue};
-use hako_core::device::DeviceSnapshot;
+use hako_core::device::{DeviceKind, DeviceSnapshot};
 
 /// Render `metas` as rows separated by hairlines.
 pub fn rows(ui: &mut Ui, d: &DeviceSnapshot, metas: &[&SettingMeta], out: &mut Vec<UiCommand>) {
@@ -65,7 +65,7 @@ pub fn note(d: &DeviceSnapshot, meta: &SettingMeta) -> Option<String> {
         if onboard_allowed(d) {
             "Saved to device memory".into()
         } else {
-            "Saved to device memory — allow it in the Device memory tab".into()
+            "Saved to device memory — allow it in the Device tab".into()
         }
     })
 }
@@ -119,7 +119,11 @@ fn fmt_value(meta: &SettingMeta, v: f32) -> String {
     match meta.unit.as_deref() {
         Some("%") => format!("{shown}%"),
         Some(u) => format!("{shown} {u}"),
-        None => shown,
+        // A small unitless scale (mic level 1–10) reads as a position on it.
+        None => match meta.max {
+            Some(max) if is_int(meta) && max <= 20.0 => format!("{shown} / {max}"),
+            _ => shown,
+        },
     }
 }
 
@@ -138,14 +142,14 @@ pub fn snap_dpi(v: f32, min: f32, max: f32, step: f32) -> f32 {
 }
 
 /// Slider that keeps a local draft while dragging and commits on release.
-/// Returns the value currently shown.
+/// Returns the value currently shown and the slider's response.
 fn slider(
     ui: &mut Ui,
     d: &DeviceSnapshot,
     meta: &SettingMeta,
     width: f32,
     out: &mut Vec<UiCommand>,
-) -> f32 {
+) -> (f32, egui::Response) {
     let key = meta.key;
     let min = meta.min.unwrap_or(0.0) as f32;
     let max = meta.max.unwrap_or(100.0) as f32;
@@ -170,8 +174,7 @@ fn slider(
             s = s.step_by(1.0);
         }
     }
-    ui.spacing_mut().slider_width = width;
-    let resp = ui.add(s);
+    let resp = widgets::slider(ui, s, width);
     if dpi {
         v = snap_dpi(v, min, max, meta.step.unwrap_or(1.0) as f32);
     }
@@ -190,18 +193,44 @@ fn slider(
     if !resp.dragged() && (v - server).abs() < if int { 0.51 } else { 0.02 } {
         ui.ctx().data_mut(|m| m.remove_temp::<f32>(id));
     }
-    v
+    widgets::knob(ui, &resp, widgets::fraction(v, min, max, dpi));
+    (v, resp)
+}
+
+/// Label, slider and value on one line, for a card header (right-to-left).
+pub fn inline_slider(
+    ui: &mut Ui,
+    d: &DeviceSnapshot,
+    meta: &SettingMeta,
+    out: &mut Vec<UiCommand>,
+) {
+    let resp = ui.add_enabled_ui(writable(d, meta), |ui| {
+        let (vr, _) = ui.allocate_exact_size(vec2(44.0, 20.0), Sense::hover());
+        let (v, _) = slider(ui, d, meta, 160.0, out);
+        ui.painter().text(
+            vr.right_center(),
+            egui::Align2::RIGHT_CENTER,
+            fmt_value(meta, v),
+            egui::TextStyle::Body.resolve(ui.style()),
+            pal().text,
+        );
+        ui.add_space(theme::SPACE_XS);
+        ui.label(egui::RichText::new(&meta.label).color(pal().text_muted));
+    });
+    if let Some(n) = note(d, meta) {
+        resp.response.on_hover_text(n);
+    }
 }
 
 fn slider_row(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec<UiCommand>) {
     widgets::row(ui, &meta.label, note(d, meta).as_deref(), |ui| {
         let (vr, _) = ui.allocate_exact_size(vec2(theme::VALUE_W, 20.0), Sense::hover());
-        let v = slider(ui, d, meta, theme::SLIDER_W, out);
+        let (v, _) = slider(ui, d, meta, theme::SLIDER_W, out);
         ui.painter().text(
             vr.right_center(),
             egui::Align2::RIGHT_CENTER,
             fmt_value(meta, v),
-            egui::FontId::monospace(12.5),
+            egui::TextStyle::Body.resolve(ui.style()),
             pal().text,
         );
     });
@@ -370,18 +399,55 @@ fn color_row(
     widgets::row(ui, "Color", note(d, meta).as_deref(), |ui| {
         ui.label(
             egui::RichText::new(format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]))
-                .monospace()
                 .color(pal().text_muted),
         );
-        // Custom picker: commit on popup close / pointer release.
-        let resp = ui.color_edit_button_srgb(&mut rgb);
-        if resp.changed() {
-            ui.ctx().data_mut(|m| m.insert_temp(draft_id, rgb));
+        ui.add_space(theme::SPACE_XS);
+        // Custom colour: a hue ring around the current colour, picker in a popup.
+        // Commits on pointer release.
+        let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+        let custom = !SWATCHES.contains(&rgb);
+        let p = ui.painter();
+        let n = 36;
+        for i in 0..n {
+            let a = |k: usize| k as f32 / n as f32 * std::f32::consts::TAU;
+            let at = |k| r.center() + vec2(a(k).cos(), a(k).sin()) * 8.5;
+            p.line_segment(
+                [at(i), at(i + 1)],
+                Stroke::new(3.0_f32, hue(i as f32 / n as f32)),
+            );
         }
+        p.circle_filled(r.center(), 5.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+        if custom {
+            p.circle_stroke(r.center(), 11.0, Stroke::new(1.5_f32, pal().text));
+        }
+        let popup = egui::Id::new(("color_popup", d.id.key()));
+        let resp = resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Custom color");
+        if resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup));
+        }
+        egui::popup::popup_below_widget(
+            ui,
+            popup,
+            &resp,
+            egui::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                let mut c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                if egui::color_picker::color_picker_color32(
+                    ui,
+                    &mut c,
+                    egui::color_picker::Alpha::Opaque,
+                ) {
+                    rgb = [c.r(), c.g(), c.b()];
+                    ui.ctx().data_mut(|m| m.insert_temp(draft_id, rgb));
+                }
+            },
+        );
         if ui.input(|i| !i.pointer.any_down()) && rgb != [server.r(), server.g(), server.b()] {
             commit = Some(rgb);
         }
-        ui.add_space(theme::SPACE_SM);
+        ui.add_space(theme::SPACE_XS);
         for sw in SWATCHES.iter().rev() {
             let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
             let col = Color32::from_rgb(sw[0], sw[1], sw[2]);
@@ -474,7 +540,14 @@ pub fn effect_tiles(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &m
                 );
                 let preview =
                     Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 16.0, 44.0));
-                paint_effect(&p, preview, opt.value.as_str().unwrap_or(""), color, time);
+                paint_effect(
+                    &p,
+                    preview,
+                    opt.value.as_str().unwrap_or(""),
+                    color,
+                    time,
+                    d.kind == DeviceKind::Keyboard,
+                );
                 p.text(
                     pos2(rect.left() + 12.0, rect.bottom() - 16.0),
                     egui::Align2::LEFT_CENTER,
@@ -521,146 +594,255 @@ fn gradient(p: &egui::Painter, r: Rect, n: usize, color_at: impl Fn(f32) -> Colo
     p.add(mesh);
 }
 
-/// Small looping animation that hints at what each effect looks like.
-pub fn paint_effect(p: &egui::Painter, r: Rect, effect: &str, color: Color32, t: f32) {
+/// Small looping animation that hints at what each effect looks like. On a
+/// keyboard it lights a grid of keycaps, elsewhere a single glow.
+pub fn paint_effect(p: &egui::Painter, r: Rect, effect: &str, color: Color32, t: f32, keys: bool) {
     let p = &p.with_clip_rect(r);
     p.rect_filled(r, 6.0, Color32::from_rgb(8, 9, 11));
-    let inner = r.shrink(1.0);
-    match effect {
-        "static" => {
-            p.rect_filled(inner, 5.0, color);
-        }
-        "spectrum" | "cycle" => {
-            p.rect_filled(inner, 5.0, hue(t * 0.12));
-        }
-        "wave" => gradient(p, inner, 24, |x| hue(x * 0.9 - t * 0.25)),
-        "breathing" | "breathe" | "pulse" => {
-            let a = 0.15 + 0.85 * (0.5 - 0.5 * (t * 2.2).cos());
-            p.rect_filled(inner, 5.0, color.gamma_multiply(a));
-        }
-        "reactive" | "starlight" => {
-            // Deterministic pseudo-random "keys" that flash and fade.
-            let cols = 14;
-            let rows = 3;
-            let cw = inner.width() / cols as f32;
-            let ch = inner.height() / rows as f32;
-            let speed = if effect == "reactive" { 1.6 } else { 0.9 };
-            for i in 0..cols * rows {
-                let seed =
-                    ((i as u32).wrapping_mul(2654435761) >> 7) as f32 / (u32::MAX >> 7) as f32;
-                let phase = (t * speed + seed * 7.0).fract();
-                let a = (1.0 - phase * 4.0).max(0.0);
-                if a > 0.0 {
-                    let x = inner.left() + (i % cols) as f32 * cw;
-                    let y = inner.top() + (i / cols) as f32 * ch;
-                    let cell = Rect::from_min_size(pos2(x, y), vec2(cw, ch)).shrink(1.5);
-                    p.rect_filled(cell, 1.5, color.gamma_multiply(a));
-                }
+    let unlit = Color32::from_rgb(26, 28, 34);
+    // Colour of a key at column position `x` (0..1) with a per-key `seed`.
+    let light = |x: f32, seed: f32| -> Option<Color32> {
+        Some(match effect {
+            "static" => color,
+            "spectrum" | "cycle" => hue(t * 0.12),
+            "wave" => hue(x * 0.9 - t * 0.25),
+            "breathing" | "breathe" | "pulse" => {
+                color.gamma_multiply(0.12 + 0.88 * (0.5 - 0.5 * (t * 2.2).cos()))
+            }
+            "reactive" => {
+                // Keys "pressed" at random, then fading out.
+                let phase = (t * 0.55 + seed * 5.0).fract();
+                unlit.lerp_to_gamma(color, (1.0 - phase * 3.0).max(0.0))
+            }
+            "starlight" => {
+                let phase = (t * 0.4 + seed * 7.0).fract();
+                let a = if phase < 0.35 {
+                    (phase / 0.35 * std::f32::consts::PI).sin()
+                } else {
+                    0.0
+                };
+                unlit.lerp_to_gamma(color, a)
+            }
+            _ => return None,
+        })
+    };
+    if !keys {
+        let inner = r.shrink(1.0);
+        match (effect, light(0.5, 0.0)) {
+            ("wave", _) => gradient(p, inner, 24, |x| hue(x * 0.9 - t * 0.25)),
+            ("reactive" | "starlight", _) | (_, None) => {
+                p.text(
+                    inner.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Off",
+                    egui::FontId::proportional(11.0),
+                    theme::pal().text_faint,
+                );
+            }
+            (_, Some(c)) => {
+                p.rect_filled(inner, 5.0, c);
             }
         }
-        _ => {
-            p.text(
-                inner.center(),
-                egui::Align2::CENTER_CENTER,
-                "Off",
-                egui::FontId::proportional(11.0),
-                theme::pal().text_faint,
-            );
-        }
+        return;
+    }
+    // Square caps: as many columns as the width allows at four rows.
+    let rows = 4;
+    let inner = r.shrink(5.0);
+    let ch = inner.height() / rows as f32;
+    let cols = ((inner.width() / ch).round() as usize).max(4);
+    let cw = inner.width() / cols as f32;
+    for i in 0..cols * rows {
+        let (col, row) = (i % cols, i / cols);
+        let seed = ((i as u32).wrapping_mul(2654435761) >> 8) as f32 / (u32::MAX >> 8) as f32;
+        let x = (col as f32 + 0.5) / cols as f32;
+        let key = Rect::from_min_size(
+            pos2(
+                inner.left() + col as f32 * cw,
+                inner.top() + row as f32 * ch,
+            ),
+            vec2(cw, ch),
+        )
+        .shrink(1.2);
+        p.rect_filled(key, 2.0, light(x, seed).unwrap_or(unlit));
     }
 }
 
 // ── Headset: ChatMix ─────────────────────────────────────────────
 
-/// Two level meters driven by the base-station dial.
+/// Where the base-station dial sits between game and chat (read-only).
 pub fn chatmix(ui: &mut Ui, d: &DeviceSnapshot) {
-    let game = num(d, SettingKey::ChatMixGame).unwrap_or(1.0) as f32;
-    let chat = num(d, SettingKey::ChatMixChat).unwrap_or(1.0) as f32;
-    for (label, sink, v) in [("Game", "Hako_Game", game), ("Chat", "Hako_Chat", chat)] {
-        widgets::row(ui, label, Some(sink), |ui| {
-            let (vr, _) = ui.allocate_exact_size(vec2(theme::VALUE_W, 20.0), Sense::hover());
-            ui.painter().text(
-                vr.right_center(),
-                egui::Align2::RIGHT_CENTER,
-                format!("{:.0}%", v * 100.0),
-                egui::FontId::monospace(12.5),
-                pal().text,
-            );
-            let (r, resp) = ui.allocate_exact_size(vec2(theme::SLIDER_W, 6.0), Sense::hover());
-            let shown = ui
-                .ctx()
-                .animate_value_with_time(resp.id, v.clamp(0.0, 1.0), 0.25);
-            ui.painter().rect_filled(r, 4.0, pal().surface_hi);
-            let mut fill = r;
-            fill.set_width(r.width() * shown);
-            ui.painter().rect_filled(fill, 4.0, pal().accent);
-        });
-        if label == "Game" {
-            widgets::divider(ui);
-        }
+    let game = num(d, SettingKey::ChatMixGame)
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0) as f32;
+    let chat = num(d, SettingKey::ChatMixChat)
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0) as f32;
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 66.0), Sense::hover());
+    let pos = ui
+        .ctx()
+        .animate_value_with_time(resp.id, (1.0 + chat - game) / 2.0, 0.25);
+    let p = ui.painter();
+    let body = egui::FontId::proportional(13.5);
+    let small = egui::FontId::proportional(11.5);
+    for (left_side, name, sink, v) in [
+        (true, "Game", "Hako_Game", game),
+        (false, "Chat", "Hako_Chat", chat),
+    ] {
+        // Name on the outside, level towards the middle.
+        let pct = format!("{:.0}%", v * 100.0);
+        let name_g = p.layout_no_wrap(name.into(), body.clone(), pal().text);
+        let pct_g = p.layout_no_wrap(pct, body.clone(), pal().text_muted);
+        let gap = 8.0;
+        let total = name_g.size().x + gap + pct_g.size().x;
+        let y = rect.top() + 8.0 - name_g.size().y / 2.0;
+        let (name_x, pct_x) = if left_side {
+            (rect.left(), rect.left() + name_g.size().x + gap)
+        } else {
+            (rect.right() - name_g.size().x, rect.right() - total)
+        };
+        p.galley(pos2(name_x, y), name_g, pal().text);
+        p.galley(pos2(pct_x, y), pct_g, pal().text_muted);
+        p.text(
+            pos2(
+                if left_side { rect.left() } else { rect.right() },
+                rect.bottom() - 8.0,
+            ),
+            if left_side {
+                egui::Align2::LEFT_CENTER
+            } else {
+                egui::Align2::RIGHT_CENTER
+            },
+            sink,
+            small.clone(),
+            pal().text_faint,
+        );
     }
+    let track = Rect::from_center_size(
+        pos2(rect.center().x, rect.top() + 33.0),
+        vec2(rect.width(), 6.0),
+    );
+    p.rect_filled(track, 3.0, pal().surface_hover);
+    let x = egui::lerp(track.x_range(), pos);
+    let mid = track.center().x;
+    let fill = Rect::from_x_y_ranges(mid.min(x)..=mid.max(x), track.y_range());
+    p.rect_filled(fill, 3.0, pal().accent);
+    p.rect_filled(
+        Rect::from_center_size(pos2(mid, track.center().y), vec2(2.0, 14.0)),
+        1.0,
+        pal().border_hi,
+    );
+    p.circle(
+        pos2(
+            x.clamp(track.left() + 8.0, track.right() - 8.0),
+            track.center().y,
+        ),
+        8.0,
+        Color32::WHITE,
+        Stroke::new(1.0_f32, pal().border_hi),
+    );
 }
 
 // ── Mouse: DPI ───────────────────────────────────────────────────
 
-const DPI_PRESETS: [i64; 6] = [400, 800, 1200, 1600, 3200, 6400];
+/// Reference marks under the DPI track (those inside the device's range).
+const DPI_MARKS: [i64; 7] = [400, 800, 1600, 3200, 6400, 12800, 25600];
 
-/// Large DPI readout, slider, and preset chips.
+/// DPI readout you can drag or type into, a log-scale slider, and
+/// clickable reference marks along it.
 pub fn dpi(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec<UiCommand>) {
-    let server = num(d, meta.key).unwrap_or(1600.0);
-    let live = ui
-        .ctx()
-        .data(|m| m.get_temp::<f32>(draft_id(d, meta.key)))
-        .map(|v| v as f64)
-        .unwrap_or(server);
+    let key = meta.key;
+    let id = draft_id(d, key);
+    let min = meta.min.unwrap_or(100.0) as f32;
+    let max = meta.max.unwrap_or(32000.0) as f32;
+    let step = meta.step.unwrap_or(1.0).max(1.0) as f32;
+    let server = num(d, key).unwrap_or(1600.0) as f32;
+    let live = ui.ctx().data(|m| m.get_temp::<f32>(id)).unwrap_or(server);
+    let commit = |ui: &Ui, out: &mut Vec<UiCommand>, v: f32| {
+        ui.ctx().data_mut(|m| m.insert_temp(id, v));
+        set(out, d, key, SettingValue::Int(v.round() as i64));
+    };
+
     ui.horizontal(|ui| {
-        let shown = ui.ctx().animate_value_with_time(
-            egui::Id::new(("dpi_shown", d.id.key())),
-            live as f32,
-            0.2,
-        );
-        ui.label(
-            egui::RichText::new(format!("{}", shown.round() as i64))
-                .size(40.0)
-                .color(pal().text),
-        );
-        ui.vertical(|ui| {
-            ui.add_space(20.0);
-            ui.label(egui::RichText::new("DPI").color(pal().text_muted));
-        });
-    });
-    ui.add_space(theme::SPACE_XS);
-    slider(ui, d, meta, (ui.available_width() - 8.0).max(200.0), out);
-    ui.add_space(theme::SPACE_SM);
-    ui.horizontal_wrapped(|ui| {
-        for preset in DPI_PRESETS {
-            let active = (live as i64) == preset;
-            let text = egui::RichText::new(preset.to_string()).color(if active {
-                pal().text
+        let mut v = live;
+        let resp = ui
+            .scope(|ui| {
+                ui.style_mut()
+                    .text_styles
+                    .insert(egui::TextStyle::Button, egui::FontId::proportional(40.0));
+                // No side padding, so the digits line up with the card's edge.
+                ui.spacing_mut().button_padding = vec2(0.0, 0.0);
+                let w = &mut ui.visuals_mut().widgets;
+                w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                w.inactive.bg_stroke = Stroke::NONE;
+                w.hovered.weak_bg_fill = pal().surface_hi;
+                ui.add(
+                    egui::DragValue::new(&mut v)
+                        .range(min..=max)
+                        .speed(step.max(10.0))
+                        .max_decimals(0)
+                        .update_while_editing(false),
+                )
+            })
+            .inner
+            .on_hover_text("Drag sideways, or click to type an exact value");
+        let snapped = ((v / step).round() * step).clamp(min, max);
+        if resp.changed() {
+            if resp.dragged() {
+                ui.ctx().data_mut(|m| m.insert_temp(id, snapped));
             } else {
-                pal().text_muted
-            });
-            let btn = egui::Button::new(text)
-                .fill(if active {
-                    pal().surface_hi
-                } else {
-                    theme::pal().bg
-                })
-                .stroke(Stroke::new(
-                    1.0_f32,
-                    if active { pal().accent } else { pal().border },
-                ))
-                .corner_radius(14.0);
-            if ui
-                .add(btn)
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-                && !active
-            {
-                ui.ctx()
-                    .data_mut(|m| m.insert_temp(draft_id(d, meta.key), preset as f32));
-                set(out, d, meta.key, SettingValue::Int(preset));
+                commit(ui, out, snapped);
             }
         }
+        if resp.drag_stopped() {
+            commit(ui, out, snapped);
+        }
+        ui.label(
+            egui::RichText::new("DPI")
+                .size(15.0)
+                .color(pal().text_muted),
+        );
     });
+    ui.add_space(theme::SPACE_XS);
+    let width = ui.available_width();
+    let (v, resp) = slider(ui, d, meta, width, out);
+    let span = widgets::track(&resp);
+    let (row, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
+    let font = egui::FontId::proportional(12.0);
+    for mark in DPI_MARKS
+        .into_iter()
+        .filter(|m| (min..=max).contains(&(*m as f32)))
+    {
+        let x = egui::lerp(span, widgets::fraction(mark as f32, min, max, true));
+        let galley = ui
+            .painter()
+            .layout_no_wrap(mark.to_string(), font.clone(), pal().text);
+        let hit = Rect::from_center_size(
+            pos2(x, row.center().y + 2.0),
+            galley.size() + vec2(12.0, 10.0),
+        );
+        let r = ui
+            .interact(hit, id.with(mark), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let current = v.round() as i64 == mark;
+        let color = if current {
+            pal().accent
+        } else if r.hovered() {
+            pal().text
+        } else {
+            pal().text_faint
+        };
+        ui.painter().rect_filled(
+            Rect::from_center_size(pos2(x, row.top() + 2.0), vec2(1.0, 4.0)),
+            0.0,
+            pal().border_hi,
+        );
+        ui.painter().galley(
+            pos2(x - galley.size().x / 2.0, row.top() + 7.0),
+            galley,
+            color,
+        );
+        if r.clicked() && !current {
+            commit(ui, out, mark as f32);
+        }
+    }
 }

@@ -307,13 +307,33 @@ pub(super) fn hero(
                 tint,
             );
         }
-        let text = p.with_clip_rect(card.shrink2(vec2(10.0, 0.0)));
-        text.text(
-            card.left_center() + vec2(14.0, -8.0),
-            egui::Align2::LEFT_CENTER,
-            name(key).map_or_else(|| key_name(key), str::to_string),
-            egui::FontId::proportional(13.0),
+        // Text that does not fit ends in "…"; the full line is in the tooltip.
+        let room = card.width() - 24.0;
+        let line = |text: String, size: f32, color: Color32, y: f32| {
+            let mut job = egui::text::LayoutJob::simple_singleline(
+                text,
+                egui::FontId::proportional(size),
+                color,
+            );
+            job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+            let galley = p.fonts(|f| f.layout_job(job));
+            let cut = galley.elided;
+            p.galley(
+                pos2(
+                    card.left() + 14.0,
+                    card.center().y + y - galley.size().y / 2.0,
+                ),
+                galley,
+                color,
+            );
+            cut
+        };
+        let title = name(key).map_or_else(|| key_name(key), str::to_string);
+        let title_cut = line(
+            title.clone(),
+            13.0,
             if locked { pal().text_muted } else { pal().text },
+            -8.0,
         );
         let (summary, color): (String, Color32) = if locked {
             ("Primary click · locked".into(), pal().text_faint)
@@ -327,13 +347,12 @@ pub(super) fn hero(
                 },
             )
         };
-        text.text(
-            card.left_center() + vec2(14.0, 9.0),
-            egui::Align2::LEFT_CENTER,
-            summary,
-            egui::FontId::proportional(11.0),
-            color,
-        );
+        let summary_cut = line(summary.clone(), 11.0, color, 9.0);
+        let cresp = if title_cut || summary_cut {
+            cresp.on_hover_text(format!("{title}\n{summary}"))
+        } else {
+            cresp
+        };
 
         if locked {
             cresp.on_hover_text("Left click stays fixed so a bad binding can never lock you out");

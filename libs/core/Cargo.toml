@@ -3,7 +3,7 @@ name = "hako-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Hako shared types: settings catalog, IPC messages, config"
+description = "hako shared types: settings catalog, IPC messages, config"
 
 [dependencies]
 serde = { workspace = true }

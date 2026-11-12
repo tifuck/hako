@@ -248,6 +248,66 @@ fn voice_prompts_auto_off_and_eq() {
 }
 
 #[test]
+fn sidetone_volume_and_mic_attached() {
+    // hsctl COMMANDS.md: `06 ff bb 23 VOLUME` set, `06 ff bb 0b 0a` = volume 10.
+    assert_eq!(
+        set_packets(
+            Cloud2Hp,
+            SettingKey::MicSideToneVolume,
+            &SettingValue::Int(10)
+        )
+        .unwrap(),
+        vec![pad(&[0x06, 0xff, 0xbb, 0x23, 10], 52)]
+    );
+    assert_eq!(
+        parse(Cloud2Hp, &[0x06, 0xff, 0xbb, 0x0b, 0x0a, 0, 0, 0]),
+        vec![Event::SideToneVolume(10)]
+    );
+    assert!(queries(Cloud2Hp).contains(&packet(Cloud2Hp, 0x0b, 0)));
+    // HyperHeadset get_mic_connected: status byte 1 = attached.
+    assert_eq!(
+        parse(Cloud2Hp, &[0x06, 0xff, 0xbb, 0x08, 1, 0, 0, 0]),
+        vec![Event::MicAttached(true)]
+    );
+    assert_eq!(
+        parse(Alpha, &[0x21, 0xbb, 0x08, 0]),
+        vec![Event::MicAttached(false)]
+    );
+    assert_eq!(
+        parse(Cloud2Core, &[0x66, 0x07, 1, 0, 0]),
+        vec![Event::MicAttached(true)]
+    );
+    assert!(parse(Cloud3, &[0x66, 0x8c, 1, 0, 0]).is_empty());
+    assert!(set_packets(Cloud3, SettingKey::MicSideToneVolume, &SettingValue::Int(1)).is_err());
+}
+
+#[test]
+fn stinger_2_is_its_own_model_and_keeps_old_settings() {
+    assert!(!CLOUD_II_HP.pids.contains(&0x0d93));
+    assert_eq!(CLOUD_STINGER_2.pids, &[0x0d93]);
+    assert_eq!(CLOUD_STINGER_2.family, Cloud2Hp);
+    let root = std::env::temp_dir().join(format!("hako-stinger-{}", std::process::id()));
+    let paths = ConfigPaths {
+        root: root.clone(),
+        config_toml: root.join("config.toml"),
+        devices_dir: root.join("devices"),
+        profiles_dir: root.join("profiles"),
+        remaps_dir: root.join("remaps"),
+    };
+    let mut old = SettingsMap::new();
+    merge_setting(&mut old, SettingKey::PmShutdown, SettingValue::Int(20));
+    hako_core::config::save_device_settings(&paths, HP, 0x0696, &old).unwrap();
+    assert_eq!(load_settings(&CLOUD_STINGER_2, &paths).unwrap(), old);
+    // Its own file wins once written.
+    let mut own = SettingsMap::new();
+    merge_setting(&mut own, SettingKey::PmShutdown, SettingValue::Int(5));
+    hako_core::config::save_device_settings(&paths, HP, 0x0d93, &own).unwrap();
+    assert_eq!(load_settings(&CLOUD_STINGER_2, &paths).unwrap(), own);
+    assert_eq!(load_settings(&CLOUD_II_HP, &paths).unwrap(), old);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn sidetone_value_per_family() {
     assert_eq!(sidetone_value(Alpha, Some(true), Some(64)), Some(64));
     assert_eq!(sidetone_value(Alpha, Some(false), Some(64)), Some(0));

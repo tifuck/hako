@@ -419,13 +419,16 @@ fn param(
                 widgets::info(ui, help);
             },
         );
-        ui.spacing_mut().slider_width = (ui.available_width() - 90.0).clamp(120.0, 420.0);
-        let resp = ui.add(
+        let (min, max) = (*range.start(), *range.end());
+        let resp = widgets::slider(
+            ui,
             egui::Slider::new(v, range)
                 .show_value(false)
                 .logarithmic(log)
                 .clamping(egui::SliderClamping::Always),
+            (ui.available_width() - 90.0).clamp(120.0, 420.0),
         );
+        widgets::knob(ui, &resp, widgets::fraction(*v, min, max, log));
         commit = resp.drag_stopped() || (resp.changed() && !resp.dragged());
         let text = if unit == "Hz" && *v < 10.0 {
             "Off".to_string()
@@ -436,7 +439,7 @@ fn param(
         } else {
             format!("{v:.1} {unit}")
         };
-        ui.label(egui::RichText::new(text).monospace().color(pal().text));
+        ui.label(widgets::value_text(text));
     });
     commit
 }

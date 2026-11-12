@@ -6,9 +6,9 @@
 //! `22 F1 04 00 <cmd> <sub> <value>`, zero padded to 20 bytes.
 //! - Sidetone: cmd 0x04, sub 0x3D, value 0..=10.
 //! - Voice prompts: cmd 0x05, sub 0x3D, value 0 / 1.
+//! - Rotate-to-mute: cmd 0x05, sub 0x6D, value 0 / 1.
 //!
 //! Write-only: the UI shows the last values set, re-applied on open.
-//! Rotate-to-mute (cmd 0x05, sub 0x6D) has no setting key yet.
 
 use super::device::VID;
 use crate::drivers::{DeviceAdapter, DriverCtx, Opened};
@@ -28,6 +28,7 @@ fn report(key: SettingKey, value: u8) -> Option<[u8; 20]> {
     let (cmd, sub) = match key {
         SettingKey::MicSideTone => (0x04, 0x3d),
         SettingKey::VoicePrompts => (0x05, 0x3d),
+        SettingKey::MicRotateToMute => (0x05, 0x6d),
         _ => return None,
     };
     let mut r = [0u8; 20];
@@ -68,7 +69,11 @@ pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         settings,
         last_error: None,
     };
-    for key in [SettingKey::MicSideTone, SettingKey::VoicePrompts] {
+    for key in [
+        SettingKey::MicSideTone,
+        SettingKey::VoicePrompts,
+        SettingKey::MicRotateToMute,
+    ] {
         if let Some(v) = get_setting(&a.settings, key).and_then(wire_value) {
             if let Err(e) = a.write(key, v) {
                 warn!("{}: restore {}: {e}", a.name, key.as_str());
@@ -119,6 +124,7 @@ impl DeviceAdapter for Zone {
                     1.0,
                 ),
                 SettingMeta::toggle(SettingKey::VoicePrompts, "Voice prompts"),
+                SettingMeta::toggle(SettingKey::MicRotateToMute, "Rotate to mute"),
             ],
             last_error: self.last_error.clone(),
         }
@@ -162,6 +168,8 @@ mod tests {
         assert!(r[7..].iter().all(|&b| b == 0));
         let r = report(SettingKey::VoicePrompts, 1).unwrap();
         assert_eq!(&r[..7], &[0x22, 0xf1, 0x04, 0x00, 0x05, 0x3d, 1]);
+        let r = report(SettingKey::MicRotateToMute, 0).unwrap();
+        assert_eq!(&r[..7], &[0x22, 0xf1, 0x04, 0x00, 0x05, 0x6d, 0]);
         assert!(report(SettingKey::Dpi, 1).is_none());
         assert_eq!(wire_value(&SettingValue::Bool(true)), Some(1));
         assert_eq!(wire_value(&SettingValue::Int(10)), Some(10));

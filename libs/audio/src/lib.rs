@@ -20,7 +20,7 @@ pub const CHATMIX_CHAT: &str = "Hako_Chat";
 
 const LSP_LADSPA: &str = "/usr/lib/ladspa/lsp-plugins-ladspa.so";
 const AUX_DSP_SINK: &str = "Hako_AUX_DSP";
-const AUX_DSP_DESC: &str = "Hako AUX Processing";
+const AUX_DSP_DESC: &str = "hako AUX Processing";
 /// LSP's UI default. Unset, PipeWire falls back to the LADSPA minimum (0 ms),
 /// which makes the gate/compressor detector follow raw peaks and chatter.
 const SIDECHAIN_REACTIVITY_MS: f32 = 10.0;
@@ -452,8 +452,8 @@ fn ensure_chatmix_locked(state: &mut AudioState, sink_regexes: &[&str]) -> Resul
     let arctis = found?;
 
     cleanup_chatmix_children(&mut state.chatmix);
-    let mut game = spawn_loopback(CHATMIX_GAME, "Hako Game", &arctis)?;
-    let mut chat = match spawn_loopback(CHATMIX_CHAT, "Hako Chat", &arctis) {
+    let mut game = spawn_loopback(CHATMIX_GAME, "hako Game", &arctis)?;
+    let mut chat = match spawn_loopback(CHATMIX_CHAT, "hako Chat", &arctis) {
         Ok(child) => child,
         Err(error) => {
             let _ = stop_child(&mut game);
@@ -724,14 +724,23 @@ fn release_default(defaults: &mut DefaultState, owner: DefaultOwner) -> Result<(
     Ok(())
 }
 
+/// `pw-loopback` capture / playback properties. Values are quoted: an
+/// unquoted space (`node.description=hako Game`) is a syntax error and
+/// pw-loopback exits 255.
+fn loopback_props(name: &str, description: &str, playback_target: &str) -> (String, String) {
+    (
+        format!(
+            "media.class=Audio/Sink node.name=\"{}\" node.description=\"{}\" audio.position=[FL FR]",
+            pw_escape(name),
+            pw_escape(description)
+        ),
+        format!("node.target=\"{}\"", pw_escape(playback_target)),
+    )
+}
+
 fn spawn_loopback(name: &str, description: &str, playback_target: &str) -> Result<Child> {
     kill_loopback_orphan(name);
-    let capture_props = format!(
-        "media.class=Audio/Sink node.name={} node.description={} audio.position=[FL FR]",
-        pw_escape(name),
-        pw_escape(description)
-    );
-    let playback_props = format!("node.target={}", pw_escape(playback_target));
+    let (capture_props, playback_props) = loopback_props(name, description, playback_target);
     Command::new("pw-loopback")
         .args(["-n", name, "-i", &capture_props, "-o", &playback_props])
         .stdin(Stdio::null())
@@ -1522,6 +1531,17 @@ mod tests {
     #[test]
     fn config_string_escaping() {
         assert_eq!(pw_escape("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
+    }
+
+    #[test]
+    fn loopback_props_quote_values_with_spaces() {
+        let (capture, playback) = loopback_props("Hako_Game", "hako Game", "alsa_output.x");
+        assert!(
+            capture.contains("node.description=\"hako Game\""),
+            "{capture}"
+        );
+        assert!(capture.contains("node.name=\"Hako_Game\""), "{capture}");
+        assert_eq!(playback, "node.target=\"alsa_output.x\"");
     }
 
     #[test]

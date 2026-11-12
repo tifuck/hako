@@ -6,6 +6,15 @@
 //! zero-padded only where the profile sets `packet_length` (Rival 106 / 110 /
 //! 300S: 32 bytes). In 2.4 GHz mode (Aerox / Prime Wireless dongles) the opcode gets
 //! bit 6 set and the dongle answers each command with a 64-byte report.
+//! The Rival 310 / 500 / 600 / 700 / 710 and Sensei 310 / TEN colors are
+//! feature reports (rivalcfg `rgbgradient` / `rgbgradientv2` handlers, one
+//! static color per LED, laid out as in rivalcfg's handler tests).
+//!
+//! DPI stages: mice whose sensitivity command takes a preset list
+//! (rivalcfg `multidpi_range`, `multidpi_range_choice[_xy]`, up to 5
+//! presets) get the five stage sliders; once one is set the whole list is
+//! sent and the DPI slider edits the active stage. Sleep timer: rivalcfg
+//! `sleep_timer` (Aerox / Prime Wireless `29`, Rival 650 `2b 01 01 00 00 00`).
 //!
 //! Values are volatile and re-sent on (re)connect. Every mouse also has a
 //! rivalcfg `save_command` (`09`, `11 00`, `59`, ...) that writes the current
@@ -131,8 +140,13 @@ pub enum Dpi {
         len: u8,
     },
     /// rivalcfg `multidpi_range` 50..=18000 to 1..=0x168:
-    /// `cmd, count, selected, code_lo, code_hi`.
-    Step50 { cmd: &'static [u8], first: u8 },
+    /// `cmd, count, selected, (code_lo, code_hi)*`; `flags`: the count is a
+    /// bit mask (`count_mode: flag`).
+    Step50 {
+        cmd: &'static [u8],
+        first: u8,
+        flags: bool,
+    },
     /// One command per preset: `head, preset, code, tail`, sent for presets
     /// 1 and 2 so either is active.
     Preset {
@@ -160,6 +174,11 @@ pub const RANGE_12000: Codes = Codes::Linear {
 };
 
 impl Dpi {
+    /// One command takes a list of up to 5 presets.
+    fn stages(self) -> bool {
+        !matches!(self, Self::Preset { .. })
+    }
+
     /// (min, max, step) of a slider; `None` for a fixed list of choices.
     fn range(self) -> Option<(u32, u32, u32)> {
         let sensor = |s: Sensor| {
@@ -176,6 +195,33 @@ impl Dpi {
             },
         }
     }
+}
+
+/// rivalcfg `sleep_timer`: `cmd` + minutes (`min`..=20) times `unit`,
+/// little-endian over `len` bytes.
+#[derive(Debug, Clone, Copy)]
+pub struct Sleep {
+    pub cmd: &'static [u8],
+    pub min: u8,
+    pub unit: u32,
+    pub len: usize,
+}
+
+/// rivalcfg `rgbgradient` header layouts.
+#[derive(Debug, Clone, Copy)]
+pub enum Gradient {
+    /// `len` bytes: the LED id at each of `led_at`, the duration (2 bytes,
+    /// little-endian) at `duration_at`, the repeat flag at `repeat_at`, the
+    /// color count at `count_at`.
+    V1 {
+        len: usize,
+        led_at: &'static [usize],
+        duration_at: usize,
+        repeat_at: usize,
+        count_at: usize,
+    },
+    /// `rgbgradientv2` (Rival 500 / 700 / 710).
+    V2,
 }
 
 /// Polling-rate command; codes are 1000/500/250/125 Hz = 1/2/3/4, or
@@ -207,6 +253,12 @@ pub enum Zones {
     },
     /// One command per LED: `prefix r g b` (Rival 300 logo / wheel).
     List(&'static [&'static [u8]]),
+    /// One feature report per LED `0..leds`: `cmd` + a one-color gradient.
+    Gradient {
+        cmd: &'static [u8],
+        leds: u8,
+        header: &'static Gradient,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,6 +314,7 @@ pub struct MouseSpec {
     pub rate: Option<Rate>,
     pub light: Light,
     pub battery: Option<Battery>,
+    pub sleep: Option<Sleep>,
     /// rivalcfg `packet_length`: zero-pad every payload to this (0 = none).
     pub packet_len: usize,
     pub save: MouseSave,
@@ -278,7 +331,10 @@ pub enum MouseSave {
 
 // ── Protocol: payloads (without the report id) ──────────────────────────────
 
-fn dpi_payloads(dpi: Dpi, value: u32) -> Vec<Vec<u8>> {
+/// The sensitivity command for presets `dpis` (1 to 5), `active` selected
+/// (0-based). Per-preset mice take `dpis[active]` only.
+fn dpi_payloads(dpi: Dpi, dpis: &[u32], active: usize) -> Vec<Vec<u8>> {
+    let (n, sel) = (dpis.len() as u8, active as u8);
     match dpi {
         Dpi::Table {
             cmd,
@@ -286,19 +342,24 @@ fn dpi_payloads(dpi: Dpi, value: u32) -> Vec<Vec<u8>> {
             first,
             len,
         } => {
-            let code = u32::from(sensor.code(value));
-            let mut p = [cmd, &[1, first]].concat();
-            p.extend_from_slice(&code.to_le_bytes()[..usize::from(len)]);
+            let mut p = [cmd, &[n, first + sel]].concat();
+            for &d in dpis {
+                let code = u32::from(sensor.code(d));
+                p.extend_from_slice(&code.to_le_bytes()[..usize::from(len)]);
+            }
             vec![p]
         }
-        Dpi::Step50 { cmd, first } => {
-            let [lo, hi, ..] = ((value.clamp(50, 18000) + 25) / 50)
-                .clamp(1, 0x168)
-                .to_le_bytes();
-            vec![[cmd, &[1, first, lo, hi]].concat()]
+        Dpi::Step50 { cmd, first, flags } => {
+            let count = if flags { (1u8 << n) - 1 } else { n };
+            let mut p = [cmd, &[count, first + sel]].concat();
+            for &d in dpis {
+                let code = ((d.clamp(50, 18000) + 25) / 50).clamp(1, 0x168) as u16;
+                p.extend_from_slice(&code.to_le_bytes());
+            }
+            vec![p]
         }
         Dpi::Preset { head, tail, codes } => (1..=2u8)
-            .map(|preset| [head, &[preset, codes.code(value)], tail].concat())
+            .map(|preset| [head, &[preset, codes.code(dpis[active])], tail].concat())
             .collect(),
         Dpi::Xy {
             cmd,
@@ -306,15 +367,69 @@ fn dpi_payloads(dpi: Dpi, value: u32) -> Vec<Vec<u8>> {
             first,
             pad_to,
         } => {
-            let code = sensor.code(value);
-            let gap = usize::from(pad_to.saturating_sub(1));
-            let mut p = [cmd, &[1, first, code]].concat();
-            p.resize(p.len() + gap, 0);
-            p.push(code);
-            p.resize(p.len() + gap, 0);
+            let codes: Vec<u8> = dpis.iter().map(|&d| sensor.code(d)).collect();
+            let mut p = [cmd, &[n, first + sel]].concat();
+            if pad_to == 0 {
+                // "xyxy"
+                p.extend(codes.iter().flat_map(|&c| [c, c]));
+            } else {
+                // "xxyy", each axis padded to `pad_to` presets.
+                for _ in 0..2 {
+                    let start = p.len();
+                    p.extend_from_slice(&codes);
+                    p.resize(start + usize::from(pad_to), 0);
+                }
+            }
             vec![p]
         }
     }
+}
+
+fn sleep_payload(sleep: Sleep, minutes: u8) -> Vec<u8> {
+    let v = u32::from(minutes.clamp(sleep.min, 20)) * sleep.unit;
+    [sleep.cmd, &v.to_le_bytes()[..sleep.len]].concat()
+}
+
+/// rivalcfg's default gradient duration (ms), also sent for one color.
+const GRADIENT_MS: u16 = 1000;
+
+/// A one-color `rgbgradient` / `rgbgradientv2` frame for LED `led`.
+fn gradient_payload(cmd: &[u8], header: &Gradient, led: u8, [r, g, b]: [u8; 3]) -> Vec<u8> {
+    let mut p = cmd.to_vec();
+    match *header {
+        Gradient::V1 {
+            len,
+            led_at,
+            duration_at,
+            repeat_at,
+            count_at,
+        } => {
+            let mut h = vec![0u8; len];
+            for &at in led_at {
+                h[at] = led;
+            }
+            h[duration_at..duration_at + 2].copy_from_slice(&GRADIENT_MS.to_le_bytes());
+            // A single color repeats; one color stop at position 0.
+            h[repeat_at] = 0x01;
+            h[count_at] = 0x01;
+            p.extend(h);
+            p.extend_from_slice(&[r, g, b, r, g, b, 0x00]);
+        }
+        Gradient::V2 => {
+            let mut h = vec![led, 0x1d, 0x01, 0x02, 0x31, 0x51, 0xff, 0xc8, 0x00];
+            h.resize(139, 0);
+            // Start color as (low nibble << 4, high nibble) pairs.
+            for c in [r, g, b] {
+                h.extend_from_slice(&[(c & 0x0f) << 4, c >> 4]);
+            }
+            // Suffix, focal point 1500 / 650, color stops - 1 = 0, duration.
+            h.extend_from_slice(&[0xff, 0x00, 0xdc, 0x05, 0x8a, 0x02]);
+            h.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]);
+            h.extend_from_slice(&GRADIENT_MS.to_le_bytes());
+            p.extend(h);
+        }
+    }
+    p
 }
 
 fn rate_payload(rate: Rate, hz: u32) -> Vec<u8> {
@@ -348,6 +463,9 @@ fn color_payloads(zones: Zones, [r, g, b]: [u8; 3], brightness: u8) -> Vec<Vec<u
         Zones::List(prefixes) => prefixes
             .iter()
             .map(|prefix| [prefix, &[r, g, b][..]].concat())
+            .collect(),
+        Zones::Gradient { cmd, leds, header } => (0..leds)
+            .map(|led| gradient_payload(cmd, header, led, [r, g, b]))
             .collect(),
     }
 }
@@ -427,6 +545,61 @@ const LIGHT_KEYS: [SettingKey; 5] = [
     SettingKey::ColorB,
 ];
 
+const STAGE_KEYS: [SettingKey; 5] = [
+    SettingKey::DpiStage1,
+    SettingKey::DpiStage2,
+    SettingKey::DpiStage3,
+    SettingKey::DpiStage4,
+    SettingKey::DpiStage5,
+];
+/// Stages the first stage change starts from.
+const DEFAULT_STAGES: [u32; 5] = [400, 800, 1600, 3200, 6400];
+
+fn is_dpi_key(key: SettingKey) -> bool {
+    key == SettingKey::Dpi || key == SettingKey::DpiStageActive || STAGE_KEYS.contains(&key)
+}
+
+/// (DPI per stage, active stage 0-based) once any stage is stored, or with
+/// `force`; unset stages take the defaults.
+fn stage_list(dpi: Dpi, s: &SettingsMap, force: bool) -> Option<(Vec<u32>, usize)> {
+    let (min, max, _) = dpi.range().filter(|_| dpi.stages())?;
+    let stored = STAGE_KEYS
+        .iter()
+        .chain([&SettingKey::DpiStageActive])
+        .any(|&k| get_setting(s, k).is_some());
+    if !(stored || force) {
+        return None;
+    }
+    let dpis = STAGE_KEYS
+        .iter()
+        .zip(DEFAULT_STAGES)
+        .map(|(&k, d)| int(s, k).map_or(d, |v| v.max(0) as u32).clamp(min, max))
+        .collect();
+    let active = int(s, SettingKey::DpiStageActive).map_or(0, |v| v.clamp(1, 5) as usize - 1);
+    Some((dpis, active))
+}
+
+/// Once a stage is set the mouse takes the whole list: store it in full,
+/// with the DPI slider editing (and showing) the active stage. A new list
+/// starts its active stage at the current DPI.
+fn link_stages(dpi: Dpi, s: &mut SettingsMap, key: SettingKey) {
+    use SettingKey as K;
+    let staged = is_dpi_key(key) && key != K::Dpi;
+    let Some((mut dpis, active)) = stage_list(dpi, s, staged).filter(|_| is_dpi_key(key)) else {
+        return;
+    };
+    if key == K::Dpi || get_setting(s, STAGE_KEYS[active]).is_none() {
+        if let Some(v) = int(s, K::Dpi) {
+            dpis[active] = v.max(0) as u32;
+        }
+    }
+    for (&k, &v) in STAGE_KEYS.iter().zip(&dpis) {
+        merge_setting(s, k, SettingValue::Int(v.into()));
+    }
+    merge_setting(s, K::DpiStageActive, SettingValue::Int(active as i64 + 1));
+    merge_setting(s, K::Dpi, SettingValue::Int(dpis[active].into()));
+}
+
 // ── Controls ────────────────────────────────────────────────────────────────
 
 fn rainbow_on(spec: &MouseSpec, settings: &SettingsMap) -> bool {
@@ -468,6 +641,27 @@ fn setting_controls(spec: &MouseSpec, settings: &SettingsMap) -> Vec<SettingMeta
         _ => unreachable!("only choice tables have no range"),
     };
     let mut c = vec![dpi];
+    if let (true, Some((min, max, step))) = (spec.dpi.stages(), spec.dpi.range()) {
+        for (i, &key) in STAGE_KEYS.iter().enumerate() {
+            let label = format!("DPI stage {}", i + 1);
+            c.push(
+                SettingMeta::slider(key, &label, min.into(), max.into(), step.into()).unit("dpi"),
+            );
+        }
+        c.push(SettingMeta::dropdown(
+            K::DpiStageActive,
+            "Active DPI stage",
+            (1..=5)
+                .map(|i| SettingOption::int(i, &i.to_string()))
+                .collect(),
+        ));
+    }
+    if let Some(sleep) = spec.sleep {
+        c.push(
+            SettingMeta::slider(K::PmShutdown, "Sleep after", sleep.min.into(), 20.0, 1.0)
+                .unit("min"),
+        );
+    }
     if spec.rate.is_some() {
         let options = [125, 250, 500, 1000]
             .map(|hz| SettingOption::int(hz, &format!("{hz} Hz")))
@@ -591,16 +785,20 @@ impl MouseAdapter {
         };
         // Only what the user set before: never overwrite onboard defaults.
         let stored = |k: &SettingKey| get_setting(&a.settings, *k).is_some();
-        let mut restore: Vec<_> = [SettingKey::Dpi, SettingKey::ReportRate]
-            .into_iter()
-            .filter(stored)
-            .collect();
+        let mut restore: Vec<_> = [
+            SettingKey::Dpi,
+            SettingKey::ReportRate,
+            SettingKey::PmShutdown,
+        ]
+        .into_iter()
+        .filter(stored)
+        .collect();
         if LIGHT_KEYS.iter().any(stored) {
             restore.push(SettingKey::Effect);
         }
         for key in restore {
             let payloads = a.payloads(&a.settings, key);
-            if let Err(e) = a.write_all(&payloads) {
+            if let Err(e) = a.write_all(&payloads, a.feature(key)) {
                 warn!("{name} restore {}: {e}", key.as_str());
                 a.last_error = Some(e.to_string());
             }
@@ -620,9 +818,16 @@ impl MouseAdapter {
         use SettingKey as K;
         let spec = self.spec;
         match key {
-            K::Dpi => int(s, K::Dpi).map_or(vec![], |v| dpi_payloads(spec.dpi, v as u32)),
+            k if is_dpi_key(k) => match stage_list(spec.dpi, s, false) {
+                Some((dpis, active)) => dpi_payloads(spec.dpi, &dpis, active),
+                None => int(s, K::Dpi).map_or(vec![], |v| dpi_payloads(spec.dpi, &[v as u32], 0)),
+            },
             K::ReportRate => match (spec.rate, int(s, K::ReportRate)) {
                 (Some(rate), Some(hz)) => vec![rate_payload(rate, hz as u32)],
+                _ => vec![],
+            },
+            K::PmShutdown => match (spec.sleep, int(s, K::PmShutdown)) {
+                (Some(sleep), Some(min)) => vec![sleep_payload(sleep, min.clamp(0, 20) as u8)],
                 _ => vec![],
             },
             k if LIGHT_KEYS.contains(&k) => {
@@ -648,11 +853,18 @@ impl MouseAdapter {
         }
     }
 
-    fn write_all(&mut self, payloads: &[Vec<u8>]) -> Result<()> {
+    /// `key` goes out as feature reports (gradient colors).
+    fn feature(&self, key: SettingKey) -> bool {
+        LIGHT_KEYS.contains(&key) && matches!(self.spec.light.zones, Zones::Gradient { .. })
+    }
+
+    fn write_all(&mut self, payloads: &[Vec<u8>], feature: bool) -> Result<()> {
         let (wireless, len) = (self.wireless, self.spec.packet_len);
         let dev = self.dev.as_mut().context("no device")?;
         for p in payloads {
-            if wireless {
+            if feature {
+                dev.set_feature(&mut frame(p, false, len))?;
+            } else if wireless {
                 // The dongle answers every command; take the answer off the queue.
                 request(dev, &frame(p, true, len), |_| true, REPLY_TIMEOUT)?;
             } else {
@@ -729,14 +941,16 @@ impl DeviceAdapter for MouseAdapter {
         if key == SettingKey::SaveToDevice {
             // Switching on stores the current state once; off writes nothing.
             if value.as_bool() == Some(true) {
-                self.write_all(&[save.clone().context("this mouse has no save command")?])?;
+                let cmd = save.clone().context("this mouse has no save command")?;
+                self.write_all(&[cmd], false)?;
             }
         } else {
+            link_stages(self.spec.dpi, &mut proposed, key);
             let payloads = self.payloads(&proposed, key);
             if payloads.is_empty() {
                 bail!("unsupported setting {}", key.as_str());
             }
-            self.write_all(&payloads)?;
+            self.write_all(&payloads, self.feature(key))?;
         }
         hako_core::config::save_device_settings(&self.paths, VID, self.id.product_id, &proposed)?;
         self.settings = proposed;
@@ -746,7 +960,7 @@ impl DeviceAdapter for MouseAdapter {
             .unwrap_or(false);
         if key != SettingKey::SaveToDevice && saving {
             if let Some(cmd) = save {
-                self.write_all(&[cmd])?;
+                self.write_all(&[cmd], false)?;
             }
         }
         Ok(())
@@ -779,16 +993,16 @@ mod tests {
     fn dpi_payloads_match_rivalcfg() {
         // Rival 3 `--sensitivity 800`: 0B 00 01 01 12.
         assert_eq!(
-            dpi_payloads(CORE, 800),
+            dpi_payloads(CORE, &[800], 0),
             vec![vec![0x0b, 0x00, 0x01, 0x01, 0x12]]
         );
         // Rounded to the nearest 100 and clamped to the sensor range.
         assert_eq!(
-            dpi_payloads(CORE, 1649),
+            dpi_payloads(CORE, &[1649], 0),
             vec![vec![0x0b, 0x00, 0x01, 0x01, 0x24]]
         );
-        assert_eq!(dpi_payloads(CORE, 50)[0][4], 0x04);
-        assert_eq!(dpi_payloads(CORE, 9000)[0][4], 0xc5);
+        assert_eq!(dpi_payloads(CORE, &[50], 0)[0][4], 0x04);
+        assert_eq!(dpi_payloads(CORE, &[9000], 0)[0][4], 0xc5);
         // Aerox 3 Wireless 18000: 2D 01 00 D6; Rival 3 Wireless 1600 (2-byte code).
         let air = |cmd, first, len| Dpi::Table {
             cmd,
@@ -797,32 +1011,30 @@ mod tests {
             len,
         };
         assert_eq!(
-            dpi_payloads(air(&[0x2d], 0, 1), 18000),
+            dpi_payloads(air(&[0x2d], 0, 1), &[18000], 0),
             vec![vec![0x2d, 0x01, 0x00, 0xd6]]
         );
         assert_eq!(
-            dpi_payloads(air(&[0x20], 1, 2), 1600),
+            dpi_payloads(air(&[0x20], 1, 2), &[1600], 0),
             vec![vec![0x20, 0x01, 0x01, 0x12, 0x00]]
         );
         // Prime 18000 = 0x168 little-endian; Sensei TEN 800 = 16.
+        let prime = Dpi::Step50 {
+            cmd: &[0x61],
+            first: 0,
+            flags: false,
+        };
+        let sensei_ten = Dpi::Step50 {
+            cmd: &[0x55, 0x00],
+            first: 1,
+            flags: true,
+        };
         assert_eq!(
-            dpi_payloads(
-                Dpi::Step50 {
-                    cmd: &[0x61],
-                    first: 0
-                },
-                18000
-            ),
+            dpi_payloads(prime, &[18000], 0),
             vec![vec![0x61, 0x01, 0x00, 0x68, 0x01]]
         );
         assert_eq!(
-            dpi_payloads(
-                Dpi::Step50 {
-                    cmd: &[0x55, 0x00],
-                    first: 1
-                },
-                800
-            ),
+            dpi_payloads(sensei_ten, &[800], 0),
             vec![vec![0x55, 0x00, 0x01, 0x01, 0x10, 0x00]]
         );
         // Rival 600: 03 00 <preset> <(dpi-100)/100> 00 42, presets 1 and 2.
@@ -832,7 +1044,7 @@ mod tests {
             codes: RANGE_12000,
         };
         assert_eq!(
-            dpi_payloads(rival600, 12000),
+            dpi_payloads(rival600, &[12000], 0),
             vec![
                 vec![0x03, 0x00, 0x01, 0x77, 0x00, 0x42],
                 vec![0x03, 0x00, 0x02, 0x77, 0x00, 0x42]
@@ -843,7 +1055,174 @@ mod tests {
             tail: &[],
             codes: RANGE_12000,
         };
-        assert_eq!(dpi_payloads(rival650, 100)[0], vec![0x15, 0x01, 0x00]);
+        assert_eq!(dpi_payloads(rival650, &[100], 0)[0], vec![0x15, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn stage_lists_match_rivalcfg() {
+        // Aerox 3 Wireless spec capture `--sensitivity 200,400,800,1600,18000`.
+        let air = Dpi::Table {
+            cmd: &[0x2d],
+            sensor: Sensor::TrueMoveAir,
+            first: 0,
+            len: 1,
+        };
+        assert_eq!(
+            dpi_payloads(air, &[200, 400, 800, 1600, 18000], 0),
+            vec![vec![0x2d, 0x05, 0x00, 0x02, 0x04, 0x09, 0x12, 0xd6]]
+        );
+        assert_eq!(
+            dpi_payloads(air, &[200, 400], 1)[0][..3],
+            [0x2d, 0x02, 0x01]
+        );
+        // multidpi_range "flag" count: 2 presets = 0b11; "number" = 2.
+        let step = |flags| Dpi::Step50 {
+            cmd: &[0x55, 0x00],
+            first: 1,
+            flags,
+        };
+        assert_eq!(
+            dpi_payloads(step(true), &[50, 100], 1),
+            vec![vec![0x55, 0x00, 0b11, 0x02, 0x01, 0x00, 0x02, 0x00]]
+        );
+        assert_eq!(dpi_payloads(step(false), &[50, 100], 0)[0][2], 2);
+        assert_eq!(dpi_payloads(step(true), &[50; 5], 0)[0][2], 0b1_1111);
+        // xxyy pads each axis to 5 presets; xyxy interleaves.
+        let xy = |pad_to| Dpi::Xy {
+            cmd: &[0x2c],
+            sensor: Sensor::TrueMoveAir,
+            first: 1,
+            pad_to,
+        };
+        assert_eq!(
+            dpi_payloads(xy(5), &[100, 200], 1),
+            vec![vec![0x2c, 2, 2, 0x00, 0x02, 0, 0, 0, 0x00, 0x02, 0, 0, 0]]
+        );
+        assert_eq!(
+            dpi_payloads(xy(0), &[100, 200], 0),
+            vec![vec![0x2c, 2, 1, 0x00, 0x00, 0x02, 0x02]]
+        );
+    }
+
+    #[test]
+    fn stages_and_dpi_stay_linked() {
+        use SettingKey as K;
+        let air = Dpi::Table {
+            cmd: &[0x2d],
+            sensor: Sensor::TrueMoveAir,
+            first: 0,
+            len: 1,
+        };
+        // No stage set: the DPI slider sends one preset.
+        let mut s = SettingsMap::new();
+        merge_setting(&mut s, K::Dpi, SettingValue::Int(800));
+        link_stages(air, &mut s, K::Dpi);
+        assert!(stage_list(air, &s, false).is_none());
+        // Setting a stage stores the whole list and shows the active stage.
+        merge_setting(&mut s, K::DpiStage2, SettingValue::Int(1200));
+        link_stages(air, &mut s, K::DpiStage2);
+        assert_eq!(
+            stage_list(air, &s, false),
+            Some((vec![800, 1200, 1600, 3200, 6400], 0))
+        );
+        assert_eq!(int(&s, K::Dpi), Some(800));
+        merge_setting(&mut s, K::DpiStageActive, SettingValue::Int(2));
+        link_stages(air, &mut s, K::DpiStageActive);
+        assert_eq!(int(&s, K::Dpi), Some(1200));
+        // The DPI slider then edits the active stage.
+        merge_setting(&mut s, K::Dpi, SettingValue::Int(2000));
+        link_stages(air, &mut s, K::Dpi);
+        assert_eq!(int(&s, K::DpiStage2), Some(2000));
+        // Per-preset mice have no stages.
+        let preset = Dpi::Preset {
+            head: &[0x03],
+            tail: &[],
+            codes: RANGE_12000,
+        };
+        assert!(stage_list(preset, &s, true).is_none());
+    }
+
+    #[test]
+    fn sleep_and_gradient_payloads_match_rivalcfg() {
+        // Aerox 3 Wireless spec capture: 29 + ms (3 bytes LE).
+        let aerox = Sleep {
+            cmd: &[0x29],
+            min: 0,
+            unit: 60_000,
+            len: 3,
+        };
+        assert_eq!(sleep_payload(aerox, 0), vec![0x29, 0x00, 0x00, 0x00]);
+        assert_eq!(sleep_payload(aerox, 5), vec![0x29, 0xe0, 0x93, 0x04]);
+        assert_eq!(sleep_payload(aerox, 20), vec![0x29, 0x80, 0x4f, 0x12]);
+        // Rival 650 spec capture: 2b 01 01 00 00 00 + seconds (2 bytes LE).
+        let rival650 = Sleep {
+            cmd: &[0x2b, 0x01, 0x01, 0x00, 0x00, 0x00],
+            min: 1,
+            unit: 60,
+            len: 2,
+        };
+        assert_eq!(
+            sleep_payload(rival650, 5),
+            vec![0x2b, 0x01, 0x01, 0x00, 0x00, 0x00, 0x2c, 0x01]
+        );
+        assert_eq!(sleep_payload(rival650, 0)[6..], [0x3c, 0x00]);
+
+        // rivalcfg test_rgbgradient.py: LED 2, #ff2200.
+        const V1: Gradient = Gradient::V1 {
+            len: 26,
+            led_at: &[0],
+            duration_at: 1,
+            repeat_at: 17,
+            count_at: 25,
+        };
+        let mut want = vec![0x5b, 0x00, 0x02, 0xe8, 0x03];
+        want.resize(2 + 17, 0);
+        want.push(0x01);
+        want.resize(2 + 25, 0);
+        want.extend_from_slice(&[0x01, 0xff, 0x22, 0x00, 0xff, 0x22, 0x00, 0x00]);
+        assert_eq!(
+            gradient_payload(&[0x5b, 0x00], &V1, 2, [0xff, 0x22, 0x00]),
+            want
+        );
+        // Rival 600 header: LED id twice (0 and 5), duration at 6.
+        const RIVAL600: Gradient = Gradient::V1 {
+            len: 28,
+            led_at: &[0, 5],
+            duration_at: 6,
+            repeat_at: 22,
+            count_at: 27,
+        };
+        let p = gradient_payload(&[0x05, 0x00], &RIVAL600, 7, [1, 2, 3]);
+        assert_eq!(p.len(), 2 + 28 + 7);
+        assert_eq!(
+            (p[2], p[7], &p[8..10], p[24], p[29]),
+            (7, 7, &[0xe8, 0x03][..], 1, 1)
+        );
+        // rivalcfg test_rgbgradientv2.py: LED 2, #ff2200, 161 bytes.
+        let p = gradient_payload(&[0x05, 0x00], &Gradient::V2, 2, [0xff, 0x22, 0x00]);
+        assert_eq!(p.len(), 2 + 161);
+        let p = &p[2..];
+        assert_eq!(
+            &p[..9],
+            &[0x02, 0x1d, 0x01, 0x02, 0x31, 0x51, 0xff, 0xc8, 0x00]
+        );
+        assert!(p[9..139].iter().all(|&b| b == 0));
+        assert_eq!(
+            &p[139..],
+            &[
+                0xf0, 0x0f, 0x20, 0x02, 0x00, 0x00, 0xff, 0x00, 0xdc, 0x05, 0x8a, 0x02, 0x00, 0x00,
+                0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xe8, 0x03
+            ]
+        );
+        // One report per LED.
+        let zones = Zones::Gradient {
+            cmd: &[0x05, 0x00],
+            leds: 8,
+            header: &RIVAL600,
+        };
+        let c = color_payloads(zones, [1, 2, 3], 0);
+        assert_eq!(c.len(), 8);
+        assert_eq!(c[3][2], 3);
     }
 
     #[test]
@@ -941,7 +1320,7 @@ mod tests {
         // Rival 110 (pmw3326.py): 800 -> 0x12, 500 -> 0x0b, 5100 -> 0x76, 7200 -> 0xa7.
         let pmw = preset(Codes::Sensor(Sensor::Pmw3326));
         assert_eq!(
-            dpi_payloads(pmw, 800),
+            dpi_payloads(pmw, &[800], 0),
             vec![vec![0x03, 0x01, 0x12], vec![0x03, 0x02, 0x12]]
         );
         for (dpi, code) in [
@@ -951,7 +1330,7 @@ mod tests {
             (7200, 0xa7),
             (9000, 0xa7),
         ] {
-            assert_eq!(dpi_payloads(pmw, dpi)[0][2], code, "{dpi}");
+            assert_eq!(dpi_payloads(pmw, &[dpi], 0)[0][2], code, "{dpi}");
         }
         // Rival 300: 50..=6500 / 50 -> 0x01..=0x82; Sensei RAW 90..=5670 / 90 -> 0x01..=0x3f.
         let linear = |min, max, step| {
@@ -963,19 +1342,19 @@ mod tests {
             })
         };
         assert_eq!(
-            dpi_payloads(linear(50, 6500, 50), 800)[0],
+            dpi_payloads(linear(50, 6500, 50), &[800], 0)[0],
             vec![0x03, 0x01, 0x10]
         );
         assert_eq!(
-            dpi_payloads(linear(50, 6500, 50), 6500)[1],
+            dpi_payloads(linear(50, 6500, 50), &[6500], 0)[1],
             vec![0x03, 0x02, 0x82]
         );
-        assert_eq!(dpi_payloads(linear(90, 5670, 90), 1620)[0][2], 0x12);
-        assert_eq!(dpi_payloads(linear(90, 5670, 90), 5670)[0][2], 0x3f);
+        assert_eq!(dpi_payloads(linear(90, 5670, 90), &[1620], 0)[0][2], 0x12);
+        assert_eq!(dpi_payloads(linear(90, 5670, 90), &[5670], 0)[0][2], 0x3f);
         // Rival 100 choices: 1000 -> 0x06, 4000 -> 0x01.
         let choice = preset(Codes::Choice(&[(1000, 0x06), (1250, 0x05), (4000, 0x01)]));
-        assert_eq!(dpi_payloads(choice, 1000)[0], vec![0x03, 0x01, 0x06]);
-        assert_eq!(dpi_payloads(choice, 4000)[1], vec![0x03, 0x02, 0x01]);
+        assert_eq!(dpi_payloads(choice, &[1000], 0)[0], vec![0x03, 0x01, 0x06]);
+        assert_eq!(dpi_payloads(choice, &[4000], 0)[1], vec![0x03, 0x02, 0x01]);
         // Rival 3 Gen 2 (xyxy): 34 01 00 x y; Rival 3 Wireless Gen 2 (xxyy, 5 presets).
         let xy = |cmd, sensor, first, pad_to| Dpi::Xy {
             cmd,
@@ -984,11 +1363,11 @@ mod tests {
             pad_to,
         };
         assert_eq!(
-            dpi_payloads(xy(&[0x34], Sensor::TrueMoveCore, 0, 0), 800),
+            dpi_payloads(xy(&[0x34], Sensor::TrueMoveCore, 0, 0), &[800], 0),
             vec![vec![0x34, 0x01, 0x00, 0x12, 0x12]]
         );
         assert_eq!(
-            dpi_payloads(xy(&[0x2c], Sensor::TrueMoveAir, 1, 5), 1600),
+            dpi_payloads(xy(&[0x2c], Sensor::TrueMoveAir, 1, 5), &[1600], 0),
             vec![vec![0x2c, 0x01, 0x01, 0x12, 0, 0, 0, 0, 0x12, 0, 0, 0, 0]]
         );
         // Rival 300 logo + wheel colors; Kana v2 two LEDs at "medium".
@@ -1026,6 +1405,7 @@ mod tests {
                 steady: &[],
             },
             battery: None,
+            sleep: None,
             packet_len: 0,
             save: MouseSave::Blocked("x"),
         };
@@ -1078,10 +1458,12 @@ mod tests {
             dpi: Dpi::Step50 {
                 cmd: &[0x61],
                 first: 0,
+                flags: false,
             },
             rate: None,
             light: Light::NONE,
             battery: None,
+            sleep: None,
             packet_len: 0,
             save,
         };

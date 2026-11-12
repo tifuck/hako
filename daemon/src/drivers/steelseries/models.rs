@@ -6,13 +6,16 @@
 //! protocol as their siblings there), mice from rivalcfg
 //! `rivalcfg/devices/*.py`, keyboards from OpenRGB `SteelSeriesDevices.h` /
 //! `SteelSeriesControllerDetect.cpp`. The USB interface of each model is the
-//! one those projects open.
+//! one those projects open. Arctis Nova Pro Wireless X (white) `225d` and the
+//! wired Arctis Nova Pro `12cb` / `12fa` / `12cd` from Linux-Arctis-Manager
+//! `nova_pro_wireless.yaml` / `nova_pro_wired.yaml` (`225d`, `12cb`, `12cd`
+//! also listed by linux-hardware.org).
 
 use super::headset::{self, ChatMix, Family, HeadsetSpec, Save};
 use super::keyboard::{self, Gen, KbProto, KeyboardSpec, APEX9_LEN, APEX_LEN};
 use super::mouse::{
-    self, Battery, Brightness, Codes, Dpi, Light, MouseSave, MouseSpec, Rate, Sensor, Zones,
-    RANGE_12000,
+    self, Battery, Brightness, Codes, Dpi, Gradient, Light, MouseSave, MouseSpec, Rate, Sensor,
+    Sleep, Zones, RANGE_12000,
 };
 use super::{nova_pro, VID};
 use crate::drivers::{DriverCtx, Model, Opened};
@@ -33,7 +36,7 @@ macro_rules! models {
                 vendor_id: VID,
                 product_ids: &[0x12e5],
                 kind: DeviceKind::Headset,
-                name: "Arctis Nova Pro Wireless",
+                name: "Arctis Nova Pro Wireless X",
                 usbfs: false,
                 multi: false,
                 open: nova_pro::open,
@@ -43,6 +46,15 @@ macro_rules! models {
                 product_ids: &[0x12e0],
                 kind: DeviceKind::Headset,
                 name: "Arctis Nova Pro Wireless",
+                usbfs: false,
+                multi: false,
+                open: nova_pro::open,
+            },
+            Model {
+                vendor_id: VID,
+                product_ids: &[0x225d],
+                kind: DeviceKind::Headset,
+                name: "Arctis Nova Pro Wireless X (White)",
                 usbfs: false,
                 multi: false,
                 open: nova_pro::open,
@@ -142,6 +154,8 @@ const ARCTIS7_PLUS: HeadsetSpec = HeadsetSpec {
     family: Family::Arctis7Plus,
     chatmix: ChatMix::Host(SINKS_ARCTIS7_PLUS),
     sidetone: Some(3),
+    mic_volume: Some(7),
+    mic_led: true,
     eq: Some(&headset::EQ_ARCTIS7_PLUS),
     save: Save::Nova,
     ..ARCTIS7
@@ -218,6 +232,21 @@ const NOVA3: HeadsetSpec = HeadsetSpec {
         "sources disagree: HeadsetControl sends 06 09 as a feature report, Linux-Arctis-Manager as an output report",
     ),
 };
+/// Wired GameDAC: volatile mic level and sidetone only.
+const NOVA_PRO_WIRED: HeadsetSpec = HeadsetSpec {
+    interface: 4,
+    family: Family::NovaProWired,
+    battery: false,
+    chatmix: ChatMix::None,
+    sidetone: Some(3),
+    mic_volume: Some(10),
+    mic_led: false,
+    auto_off: &[],
+    eq: None,
+    volume_limiter: false,
+    bt_call: false,
+    save: Save::Blocked("only Linux-Arctis-Manager sends 06 09 to the wired GameDAC"),
+};
 const GAMEBUDS: HeadsetSpec = HeadsetSpec {
     interface: 3,
     family: Family::GameBuds,
@@ -276,6 +305,7 @@ const RIVAL3: MouseSpec = MouseSpec {
         steady: &[&[0x06, 0x00, 0x04]],
     },
     battery: None,
+    sleep: None,
     packet_len: 0,
     save: MouseSave::Command(&[0x09, 0x00]),
 };
@@ -335,6 +365,13 @@ const AEROX_WIRELESS: MouseSpec = MouseSpec {
         steady: &[],
     },
     battery: Some(Battery::Aerox),
+    // `29` + milliseconds, 0 = never.
+    sleep: Some(Sleep {
+        cmd: &[0x29],
+        min: 0,
+        unit: 60_000,
+        len: 3,
+    }),
     ..AEROX5
 };
 const PRIME_WIRELESS: MouseSpec = MouseSpec {
@@ -371,6 +408,7 @@ const PRIME: MouseSpec = MouseSpec {
     dpi: Dpi::Step50 {
         cmd: &[0x61],
         first: 0,
+        flags: false,
     },
     rate: Some(Rate {
         cmd: &[0x5d],
@@ -386,6 +424,7 @@ const PRIME: MouseSpec = MouseSpec {
         steady: &[],
     },
     battery: None,
+    sleep: None,
     packet_len: 0,
     save: ONLY_RIVALCFG,
 };
@@ -394,6 +433,7 @@ const PRIME_MINI: MouseSpec = MouseSpec {
     dpi: Dpi::Step50 {
         cmd: &[0x2d],
         first: 0,
+        flags: false,
     },
     rate: Some(RATE_1),
     light: Light {
@@ -408,16 +448,53 @@ const PRIME_MINI: MouseSpec = MouseSpec {
     save: SAVE_11,
     ..PRIME
 };
+/// Static color on every LED of a rivalcfg `rgbgradient` / `rgbgradientv2` mouse.
+const fn gradient(cmd: &'static [u8], leds: u8, header: &'static Gradient) -> Light {
+    Light {
+        zones: Zones::Gradient { cmd, leds, header },
+        brightness: Brightness::None,
+        rainbow: None,
+        steady: &[],
+    }
+}
+/// Rival 310 / Sensei 310 / Sensei TEN: `5b 00`, logo and wheel.
+const LIGHT_310: Light = gradient(
+    &[0x5b, 0x00],
+    2,
+    &Gradient::V1 {
+        len: 26,
+        led_at: &[0],
+        duration_at: 1,
+        repeat_at: 17,
+        count_at: 25,
+    },
+);
+/// Rival 600: `05 00`, wheel, logo and six strip LEDs.
+const LIGHT_600: Light = gradient(
+    &[0x05, 0x00],
+    8,
+    &Gradient::V1 {
+        len: 28,
+        led_at: &[0, 5],
+        duration_at: 6,
+        repeat_at: 22,
+        count_at: 27,
+    },
+);
+/// Rival 500 / 700 / 710: `05 00`, logo and wheel.
+const LIGHT_700: Light = gradient(&[0x05, 0x00], 2, &Gradient::V2);
+
 const SENSEI_TEN: MouseSpec = MouseSpec {
     dpi: Dpi::Step50 {
         cmd: &[0x55, 0x00],
         first: 1,
+        flags: true,
     },
     rate: Some(Rate {
         cmd: &[0x54, 0x00],
         zero_based: false,
     }),
-    light: Light::NONE,
+    light: LIGHT_310,
     save: ONLY_RIVALCFG_OPENRGB_X,
     ..PRIME
 };
@@ -440,8 +517,13 @@ const RIVAL600: MouseSpec = MouseSpec {
         cmd: &[0x04, 0x00],
         zero_based: false,
     }),
+    light: LIGHT_600,
     save: MouseSave::Command(&[0x09, 0x00]),
     ..SENSEI_TEN
+};
+const RIVAL700: MouseSpec = MouseSpec {
+    light: LIGHT_700,
+    ..RIVAL600
 };
 const RIVAL650: MouseSpec = MouseSpec {
     dpi: Dpi::Preset {
@@ -453,7 +535,15 @@ const RIVAL650: MouseSpec = MouseSpec {
         cmd: &[0x17],
         zero_based: false,
     }),
+    light: Light::NONE,
     battery: Some(Battery::Rival),
+    // Seconds, 1-20 minutes.
+    sleep: Some(Sleep {
+        cmd: &[0x2b, 0x01, 0x01, 0x00, 0x00, 0x00],
+        min: 1,
+        unit: 60,
+        len: 2,
+    }),
     save: MouseSave::Command(&[0x09]),
     ..SENSEI_TEN
 };
@@ -516,6 +606,7 @@ const RIVAL95: MouseSpec = MouseSpec {
     }),
     light: Light::NONE,
     battery: None,
+    sleep: None,
     packet_len: 0,
     save: ONLY_RIVALCFG,
 };
@@ -655,6 +746,8 @@ models! {
     Headset "Arctis Nova 3P Wireless" [0x2269] H(NOVA3P);
     Headset "Arctis Nova 3X Wireless" [0x226d] H(NOVA3P);
     Headset "Arctis Nova 3" [0x12ec] H(NOVA3);
+    Headset "Arctis Nova Pro" [0x12cb, 0x12fa] H(NOVA_PRO_WIRED);
+    Headset "Arctis Nova Pro for Xbox" [0x12cd] H(NOVA_PRO_WIRED);
     Headset "Arctis GameBuds" [0x230a] H(GAMEBUDS);
     Headset "Arctis GameBuds X" [0x2317] H(GAMEBUDS);
     Headset "Arctis 7+" [0x220e] H(ARCTIS7_PLUS);
@@ -687,9 +780,9 @@ models! {
     Mouse "Sensei 310" [0x1722] M(RIVAL310);
     Mouse "Rival 600" [0x1724, 0x172e] M(RIVAL600);
     Mouse "Rival 650 Wireless" [0x172b, 0x1726] M(RIVAL650);
-    Mouse "Rival 700" [0x1700] M(MouseSpec { save: ONLY_RIVALCFG_OPENRGB_X, ..RIVAL600 });
-    Mouse "Rival 710" [0x1730] M(MouseSpec { save: ONLY_RIVALCFG_OPENRGB_X, ..RIVAL600 });
-    Mouse "Rival 500" [0x170e] M(MouseSpec { save: ONLY_RIVALCFG, ..RIVAL600 });
+    Mouse "Rival 700" [0x1700] M(MouseSpec { save: ONLY_RIVALCFG_OPENRGB_X, ..RIVAL700 });
+    Mouse "Rival 710" [0x1730] M(MouseSpec { save: ONLY_RIVALCFG_OPENRGB_X, ..RIVAL700 });
+    Mouse "Rival 500" [0x170e] M(MouseSpec { save: ONLY_RIVALCFG, ..RIVAL700 });
     Mouse "Rival 110" [0x1729] M(RIVAL110);
     Mouse "Rival 106" [0x1816] M(RIVAL110);
     Mouse "Rival 300S" [0x1810] M(RIVAL110);
@@ -775,13 +868,21 @@ mod tests {
     use super::*;
     use hako_core::catalog::SettingValue;
 
+    /// The Nova Pro Wireless entries (`nova_pro.rs`) that open `MODELS`.
+    const NOVA_PRO: usize = 3;
+
     #[test]
     fn nova_pro_wireless_entries_are_unchanged() {
-        for (m, pid) in MODELS.iter().zip([0x12e5, 0x12e0]) {
+        let names = [
+            (0x12e5, "Arctis Nova Pro Wireless X"),
+            (0x12e0, "Arctis Nova Pro Wireless"),
+            (0x225d, "Arctis Nova Pro Wireless X (White)"),
+        ];
+        for (m, (pid, name)) in MODELS[..NOVA_PRO].iter().zip(names) {
             assert_eq!(m.vendor_id, 0x1038);
             assert_eq!(m.product_ids, &[pid]);
             assert_eq!(m.kind, DeviceKind::Headset);
-            assert_eq!(m.name, "Arctis Nova Pro Wireless");
+            assert_eq!(m.name, name);
             assert!(!m.usbfs);
         }
     }
@@ -798,7 +899,7 @@ mod tests {
 
     #[test]
     fn every_control_accepts_its_own_values() {
-        for (m, (_, spec)) in MODELS[2..].iter().zip(SPECS) {
+        for (m, (_, spec)) in MODELS[NOVA_PRO..].iter().zip(SPECS) {
             let controls = match spec {
                 Spec::Headset(s) => headset::controls(s),
                 Spec::Mouse(s) => mouse::controls(s, &Default::default()),
@@ -845,7 +946,7 @@ mod tests {
     #[test]
     fn save_to_device_only_where_researched() {
         use hako_core::catalog::SettingKey;
-        let offered: Vec<_> = MODELS[2..]
+        let offered: Vec<_> = MODELS[NOVA_PRO..]
             .iter()
             .zip(SPECS)
             .filter(|(_, (_, spec))| {
@@ -887,14 +988,14 @@ mod tests {
             ]
         );
         // The Nova Pro Wireless entries are untouched.
-        assert!(MODELS[..2]
+        assert!(MODELS[..NOVA_PRO]
             .iter()
-            .all(|m| m.name == "Arctis Nova Pro Wireless"));
+            .all(|m| m.name.starts_with("Arctis Nova Pro Wireless")));
     }
 
     #[test]
     fn host_chatmix_targets_the_headsets_own_sink() {
-        for (m, (_, spec)) in MODELS[2..].iter().zip(SPECS) {
+        for (m, (_, spec)) in MODELS[NOVA_PRO..].iter().zip(SPECS) {
             let Spec::Headset(s) = spec else { continue };
             if let ChatMix::Host(sinks) = s.chatmix {
                 assert_eq!(sinks.len(), 2, "{}", m.name);
@@ -908,9 +1009,9 @@ mod tests {
 
     #[test]
     fn every_model_has_a_matching_spec() {
-        assert_eq!(MODELS.len(), SPECS.len() + 2);
+        assert_eq!(MODELS.len(), SPECS.len() + NOVA_PRO);
         let mut seen = std::collections::HashSet::new();
-        for (m, (pids, spec)) in MODELS[2..].iter().zip(SPECS) {
+        for (m, (pids, spec)) in MODELS[NOVA_PRO..].iter().zip(SPECS) {
             assert_eq!(m.product_ids, *pids, "{}", m.name);
             for pid in m.product_ids {
                 assert!(seen.insert(pid), "{pid:04x} listed twice");

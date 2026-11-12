@@ -242,7 +242,7 @@ fn renders_every_device_tab_without_panicking() {
 }
 
 /// Onboard-memory controls: disabled until allowed, blocked always, the
-/// Device memory tab renders, and the opt-in only sends after confirmation.
+/// Device tab renders, and the opt-in only sends after confirmation.
 #[test]
 fn onboard_memory_gate_renders_and_needs_confirmation() {
     use SettingKey::*;
@@ -267,9 +267,7 @@ fn onboard_memory_gate_renders_and_needs_confirmation() {
     let dpi = d.controls[0].clone();
     let blocked = d.controls[1].clone();
     assert!(!controls::writable(&d, &dpi));
-    assert!(controls::note(&d, &dpi)
-        .unwrap()
-        .contains("Device memory tab"));
+    assert!(controls::note(&d, &dpi).unwrap().contains("Device tab"));
     assert!(!controls::writable(&d, &blocked));
     d.settings
         .insert(OnboardWrites.as_str().into(), SettingValue::Bool(true));
@@ -281,7 +279,7 @@ fn onboard_memory_gate_renders_and_needs_confirmation() {
     let mut state = sample_state();
     state.devices = vec![d.clone()];
     let ctx = egui::Context::default();
-    assert!(tabs_for(&d).contains(&Tab::Group(SettingGroup::Memory)));
+    assert_eq!(tabs_for(&d).last(), Some(&Tab::Device));
     for tab in 0..tabs_for(&d).len() {
         let mut app = HakoAppUi {
             state: Some(state.clone()),
@@ -305,6 +303,20 @@ fn onboard_memory_gate_renders_and_needs_confirmation() {
             "tab {tab} emitted {out:?}"
         );
     }
+}
+
+#[test]
+fn tabs_follow_the_device_kind_and_end_with_device() {
+    use Tab::*;
+    let st = sample_state();
+    let tabs = |k| tabs_for(st.devices.iter().find(|d| d.kind == k).unwrap());
+    assert_eq!(tabs(DeviceKind::Keyboard), [Lighting, Bindings, Device]);
+    assert_eq!(
+        tabs(DeviceKind::Mouse),
+        [Performance, Bindings, Lighting, Device]
+    );
+    // Microphone folds into Audio, power into Device.
+    assert_eq!(tabs(DeviceKind::Headset), [Audio, LineIn, Device]);
 }
 
 #[test]
@@ -443,7 +455,11 @@ fn bind_state(kind: DeviceKind, name: &str, remaps: DeviceRemaps) -> (HubState, 
 fn bind_app(ctx: &egui::Context, st: &HubState, id: &DeviceId, selected: u16) -> HakoAppUi {
     let d = st.devices.iter().find(|d| &d.id == id).unwrap();
     ctx.data_mut(|m| {
-        m.insert_temp(egui::Id::new(("tab", id.key())), tabs_for(d).len() - 1);
+        let bindings = tabs_for(d)
+            .iter()
+            .position(|t| *t == Tab::Bindings)
+            .unwrap();
+        m.insert_temp(egui::Id::new(("tab", id.key())), bindings);
         m.insert_temp(egui::Id::new(("bind_selected", id.key())), selected);
     });
     HakoAppUi {

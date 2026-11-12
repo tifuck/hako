@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "hakod", version, about = "Hako device daemon")]
+#[command(name = "hakod", version, about = "hako device daemon")]
 struct Cli {
     /// Reset PipeWire ChatMix/AUX graph and exit (uses running daemon if available)
     #[arg(long)]

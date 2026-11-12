@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 #[derive(Parser, Debug)]
-#[command(name = "hako", version, about = "Hako control panel")]
+#[command(name = "hako", version, about = "hako control panel")]
 struct Cli {
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -209,7 +209,7 @@ fn main() -> Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 780.0])
         .with_min_inner_size([900.0, 600.0])
-        .with_title("Hako")
+        .with_title("hako")
         // app_id / WM_CLASS: lets the compositor match hako.desktop for its icon.
         .with_app_id("hako");
 
@@ -223,7 +223,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native("Hako", native, Box::new(|_cc| Ok(Box::new(app))))
+    eframe::run_native("hako", native, Box::new(|_cc| Ok(Box::new(app))))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }
@@ -407,7 +407,7 @@ impl App {
         self.rt.spawn_blocking(move || {
             let msg = match update::install(&rel) {
                 Ok(warn) => format!(
-                    "Updated, but couldn't restart ({}). Reopen Hako.",
+                    "Updated, but couldn't restart ({}). Reopen hako.",
                     update::restart(&bin, warn)
                 ),
                 Err(e) => format!("Update failed: {e:#}"),

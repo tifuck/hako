@@ -13,8 +13,14 @@
 //! - OpenRazer daemon, `daemon/openrazer_daemon/hardware/{keyboards,mouse}.py`:
 //!   supported effects per model (`METHODS`), `DPI_MAX`, `POLL_RATES`,
 //!   `WAVE_DIRS`.
+//! - OpenRGB `Controllers/RazerController` (<https://gitlab.com/CalcProgrammer1/OpenRGB>,
+//!   GPL; master 4e7aa49): `RazerDevices.{h,cpp}` (PID, transaction id, LED
+//!   id), `RazerControllerDetect.cpp` (the interface it opens), and the
+//!   effects `RazerController.cpp` / `RGBController_Razer.cpp` offer without
+//!   asking the firmware (off, static, spectrum, breathing unless excluded,
+//!   wave per PID). Only for models OpenRazer does not support; marked below.
 //!
-//! Every row below is taken from those two sources; the comment above a row
+//! Every row below is taken from those sources; the comment above a row
 //! notes where a model deviates from the defaults of its section.
 
 use super::protocol::{
@@ -257,6 +263,11 @@ const BASILISK_V3_BOOT: &str =
     "a Basilisk V3 stopped enumerating at boot with a stored effect (OpenRazer #1767)";
 const OTHER_FX_COMMANDS: &str =
     "OpenRazer drives part of this model's lighting with other commands; not confirmed";
+const LED_ID_DIFFERS: &str =
+    "OpenRazer stores this model's effects on another LED id than OpenRGB uses; not confirmed";
+const NOT_IN_OPENRAZER: &str = "only OpenRGB supports this model, which never stores lighting";
+/// Effects OpenRGB offers a keyboard without asking its firmware.
+const OPENRGB_KBD_FX: u8 = OFF | STATIC | SPECTRUM | WAVE | BREATH;
 
 const fn link(txn: u8, iface: u8) -> Link {
     Link {
@@ -445,6 +456,50 @@ pub const SPECS: &[Spec] = &[
     kbd("Razer Huntsman V3 Pro Mini", &[0x02b0], 0x1f, 3, ALL_FX)
         .wave(Wave::ZeroBased)
         .volatile_lighting(ACTIVE_PROFILE),
+    // OpenRazer reads the active onboard profile (05/84) before each lighting
+    // write on this model (`razer_get_active_varstore`).
+    kbd("Razer Huntsman V3 Pro 8KHz", &[0x02cf], 0x1f, 3, ALL_FX).volatile_lighting(ACTIVE_PROFILE),
+    // Keypads. Brightness on LED 0 in OpenRazer; OpenRGB drives effects there
+    // too (OpenRazer: backlight LED). Tartarus Pro: no game mode, and
+    // OpenRazer skips the device-mode command, which resets it.
+    Spec::base(
+        "Razer Tartarus V2",
+        DeviceKind::Keyboard,
+        &[0x022b],
+        link(0x1f, 1),
+    )
+    .lit(&[ZERO_LED], ALL_FX)
+    .game(0xff)
+    .volatile_lighting(LED_ID_DIFFERS),
+    Spec::base(
+        "Razer Tartarus Pro",
+        DeviceKind::Keyboard,
+        &[0x0244],
+        link(0x1f, 2),
+    )
+    .lit(&[ZERO_LED], ALL_FX)
+    .volatile_lighting(LED_ID_DIFFERS),
+    // OpenRGB only: lighting, on the interface OpenRGB opens per PID.
+    Spec::base(
+        "Razer BlackWidow V4 Pro 75%",
+        DeviceKind::Keyboard,
+        &[0x02b3, 0x02b4],
+        link(0x1f, 3),
+    )
+    .lit(&[BACKLIGHT_LED], OPENRGB_KBD_FX)
+    .alt(0x02b4, link(0x1f, 2))
+    .wait(5)
+    .volatile_lighting(NOT_IN_OPENRAZER),
+    Spec::base(
+        "Razer BlackWidow V4 Low Profile Tenkeyless",
+        DeviceKind::Keyboard,
+        &[0x02d4, 0x02d2],
+        link(0x1f, 3),
+    )
+    .lit(&[BACKLIGHT_LED], OPENRGB_KBD_FX)
+    .alt(0x02d2, link(0x9f, 2))
+    .wait(5)
+    .volatile_lighting(NOT_IN_OPENRAZER),
     kbd("Razer Ornata V2", &[0x025d], 0x1f, 2, ALL_FX),
     kbd(
         "Razer Ornata V3",
@@ -762,6 +817,17 @@ pub const SPECS: &[Spec] = &[
     .battery(Rechargeable)
     .idle()
     .wait(31),
+    // OpenRGB only: whole-matrix lighting (no breathing), interface 3.
+    mouse(
+        "Razer Basilisk V4 Pro",
+        &[0x00e2, 0x00e3],
+        0x1f,
+        0,
+        Poll::None,
+    )
+    .iface(3)
+    .lit(&[ZERO_LED], MATRIX_FX)
+    .volatile_lighting(NOT_IN_OPENRAZER),
     mouse(
         "Razer Basilisk X HyperSpeed",
         &[0x0083],
@@ -1055,9 +1121,8 @@ mod tests {
             assert!(s.dpi_max == 0 || s.dpi_max >= 100, "{}", s.name);
             assert!(!s.stages || s.dpi_max > 0, "{}: stages without DPI", s.name);
             assert!(s.wait_ms > 0 && s.wait_ms <= 400, "{}", s.name);
-            assert_eq!(
-                s.kind == DeviceKind::Keyboard,
-                s.game_txn.is_some(),
+            assert!(
+                s.game_txn.is_none() || s.kind == DeviceKind::Keyboard,
                 "{}",
                 s.name
             );
@@ -1197,6 +1262,38 @@ mod tests {
             assert!(held(pid), "{pid:04x}");
         }
         assert!(!held(0x0084) && !held(0x0287));
+    }
+
+    /// Rows from OpenRazer (02cf, Tartarus) and OpenRGB (the rest): link per
+    /// PID, LED, effects, and lighting never stored.
+    #[test]
+    fn keypad_and_openrgb_rows() {
+        let row = |pid: u16| {
+            let s = spec_for(pid).unwrap();
+            let l = s.link_for(pid);
+            (l.txn, l.fx_txn, l.iface, s.leds, s.game_txn)
+        };
+        assert_eq!(
+            row(0x02cf),
+            (0x1f, 0x1f, 3, &[BACKLIGHT_LED][..], Some(0xff))
+        );
+        assert_eq!(row(0x022b), (0x1f, 0x1f, 1, &[ZERO_LED][..], Some(0xff)));
+        assert_eq!(row(0x0244), (0x1f, 0x1f, 2, &[ZERO_LED][..], None));
+        assert_eq!(row(0x02b3), (0x1f, 0x1f, 3, &[BACKLIGHT_LED][..], None));
+        assert_eq!(row(0x02b4), (0x1f, 0x1f, 2, &[BACKLIGHT_LED][..], None));
+        assert_eq!(row(0x02d4), (0x1f, 0x1f, 3, &[BACKLIGHT_LED][..], None));
+        assert_eq!(row(0x02d2), (0x9f, 0x9f, 2, &[BACKLIGHT_LED][..], None));
+        assert_eq!(row(0x00e3), (0x1f, 0x1f, 3, &[ZERO_LED][..], None));
+        let v4 = spec_for(0x00e2).unwrap();
+        assert!(!v4.has_effect(Effect::Breathing) && v4.has_effect(Effect::Wave));
+        assert_eq!((v4.dpi_max, v4.link.poll), (0, Poll::None));
+        assert!(!spec_for(0x02b3).unwrap().has_effect(Effect::Reactive));
+        for pid in [0x02cf, 0x022b, 0x0244, 0x02b3, 0x02d4, 0x00e2] {
+            assert!(
+                spec_for(pid).unwrap().volatile_lighting.is_some(),
+                "{pid:04x}"
+            );
+        }
     }
 
     #[test]

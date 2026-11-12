@@ -1,5 +1,5 @@
 [Unit]
-Description=Hako device daemon
+Description=hako device daemon
 After=pipewire.service pipewire-pulse.service
 Wants=pipewire.service
 

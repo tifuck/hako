@@ -1,20 +1,25 @@
 //! ASUS ROG wireless headsets on the report-0xCC protocol: ROG Pelta, ROG
-//! Delta II. Battery, charging, lighting, sidetone and sleep timer.
+//! Delta II. Battery, charging, lighting, sidetone and sleep timer; on the
+//! Pelta also strobing, AI noise reduction and the voice prompt language.
 //!
 //! Protocol: github.com/OthrineTM/pelta-control `pelta/device.py` and README
 //! (Pelta, reverse engineered from ASUS `AacAudioHal_x64.dll`: interface 3)
 //! and G-Helper `app/Peripherals/Headset/AsusHeadset.cs`, `Models/Pelta.cs`,
 //! `Models/DeltaII.cs` (usage page 0xFF00, same commands). Both agree on the
 //! `12 07` power reply, `51 37` power write, `51 28` lighting and the
-//! `41 11` / `61 11` sidetone writes.
+//! `41 11` / `61 11` sidetone writes. For the Pelta they also agree on effect
+//! 3 (strobing), `41 20` / `41 02` noise reduction and `12 28` / `41 0A` voice
+//! prompt (1 English, 2 Chinese, 0 prompt sound). Neither says whether the
+//! headset keeps these; like sidetone they are re-sent on (re)connect.
 //!
-//! Left out: `51 10` (pelta-control: 0 = hardware effects; G-Helper: 0 =
-//! lights off), the Pelta equalizer (G-Helper only, 0-24 vs 0-100 gain
-//! scales between models), the Pelta cable PID `1b82` (pelta-control:
-//! untested). Sidetone levels stop at 20: pelta-control's maximum (G-Helper
-//! allows 100 on the Pelta, 20 elsewhere).
+//! Left out: the same three on the Delta II (G-Helper only; it also sends a
+//! `41 10` noise reduction level there), `51 10` (pelta-control: 0 =
+//! hardware effects; G-Helper: 0 = lights off), the Pelta equalizer
+//! (G-Helper only, 0-24 vs 0-100 gain scales between models), the Pelta
+//! cable PID `1b82` (pelta-control: untested). Sidetone levels stop at 20:
+//! pelta-control's maximum (G-Helper allows 100 on the Pelta, 20 elsewhere).
 
-use super::protocol::{self as p, Effect, Transport, VID};
+use super::protocol::{self as p, Transport, VID};
 use super::{effect_of, int_of, lighting_controls, lighting_defaults, rgb_of};
 use crate::drivers::DeviceAdapter;
 use anyhow::{Context, Result};
@@ -36,6 +41,8 @@ pub struct HeadsetSpec {
     pub iface: Option<u32>,
     /// `12 00 00 01` reports whether the headset is linked to the dongle.
     pub link_check: bool,
+    /// Strobing, noise reduction and voice prompt (two sources: Pelta only).
+    pub extras: bool,
 }
 
 pub const HEADSETS: &[HeadsetSpec] = &[
@@ -45,6 +52,7 @@ pub const HEADSETS: &[HeadsetSpec] = &[
         pids: &[0x1b84],
         iface: Some(3),
         link_check: true,
+        extras: true,
     },
     // [G DeltaII, DeltaIIKjp]
     HeadsetSpec {
@@ -52,12 +60,14 @@ pub const HEADSETS: &[HeadsetSpec] = &[
         pids: &[0x1afa],
         iface: None,
         link_check: false,
+        extras: false,
     },
     HeadsetSpec {
         name: "ASUS ROG Delta II KJP",
         pids: &[0x1d41],
         iface: None,
         link_check: false,
+        extras: false,
     },
 ];
 
@@ -173,6 +183,8 @@ impl HeadsetAdapter {
             SettingKey::Effect,
             SettingKey::MicSideTone,
             SettingKey::PmShutdown,
+            SettingKey::MicNoiseFilter,
+            SettingKey::VoicePrompts,
         ] {
             if let Err(e) = self.apply(key) {
                 errors.push(format!("{}: {e}", key.as_str()));
@@ -183,14 +195,15 @@ impl HeadsetAdapter {
 
     fn read_unset(&mut self) -> Result<()> {
         let mut hw = SettingsMap::new();
+        let extras = self.spec.extras;
         let t = self.t()?;
-        if let Some((effect, brightness, [r, g, b])) = p::hs_parse_led(&t.transact(p::HS_LIGHTING)?)
-        {
-            let name = match effect {
-                Effect::Static => "static",
-                Effect::Breathing => "breathing",
-                Effect::Cycle => "cycle",
-            };
+        let led = p::hs_parse_led(&t.transact(p::HS_LIGHTING)?)
+            .filter(|&(effect, ..)| effect != p::HS_STROBE || extras);
+        if let Some((effect, brightness, [r, g, b])) = led {
+            let name = p::HS_EFFECTS
+                .iter()
+                .find(|&&(w, _)| w == effect)
+                .map_or("static", |&(_, n)| n);
             for (k, v) in [
                 (SettingKey::Effect, SettingValue::Text(name.into())),
                 (SettingKey::Brightness, SettingValue::Int(brightness.into())),
@@ -211,6 +224,18 @@ impl HeadsetAdapter {
                 SettingValue::Int(v.into()),
             );
         }
+        if extras {
+            if let Ok(r) = t.transact(p::HS_NOISE_REDUCTION) {
+                let on = SettingValue::Bool(r[4] == 1);
+                merge_setting(&mut hw, SettingKey::MicNoiseFilter, on);
+            }
+            if let Ok(r) = t.transact(p::HS_VOICE_PROMPT) {
+                if p::HS_VOICE_PROMPTS.iter().any(|&(w, _)| w == r[4]) {
+                    let v = SettingValue::Int(r[4].into());
+                    merge_setting(&mut hw, SettingKey::VoicePrompts, v);
+                }
+            }
+        }
         for (k, v) in hw {
             self.settings.entry(k).or_insert(v);
         }
@@ -224,7 +249,7 @@ impl HeadsetAdapter {
             | SettingKey::ColorR
             | SettingKey::ColorG
             | SettingKey::ColorB => {
-                let effect = effect_of(&self.settings);
+                let effect = effect_wire(self.spec, &self.settings);
                 let brightness = int_of(&self.settings, SettingKey::Brightness, 100) as u8;
                 let rgb = rgb_of(&self.settings);
                 self.t()?
@@ -252,13 +277,44 @@ impl HeadsetAdapter {
                     .transact(&p::hs_set_power(sleep as u8, low, voice))
                     .map(drop)
             }
+            SettingKey::MicNoiseFilter => {
+                let Some(on) = get_setting(&self.settings, key).and_then(|v| v.as_bool()) else {
+                    return Ok(());
+                };
+                self.t()?.transact(&p::hs_set_noise_reduction(on)).map(drop)
+            }
+            SettingKey::VoicePrompts => {
+                let Some(v) = get_setting(&self.settings, key).and_then(|v| v.as_int()) else {
+                    return Ok(());
+                };
+                self.t()?
+                    .transact(&p::hs_set_voice_prompt(v as u8))
+                    .map(drop)
+            }
             _ => Ok(()),
         }
     }
 }
 
-pub fn controls(settings: &SettingsMap) -> Vec<SettingMeta> {
+/// Wire value of the chosen effect; static when unknown or not offered.
+fn effect_wire(spec: &HeadsetSpec, settings: &SettingsMap) -> u8 {
+    let name = get_setting(settings, SettingKey::Effect)
+        .and_then(|v| v.as_str())
+        .unwrap_or("static");
+    p::HS_EFFECTS
+        .iter()
+        .find(|&&(w, n)| n == name && (w != p::HS_STROBE || spec.extras))
+        .map_or(1, |&(w, _)| w)
+}
+
+pub fn controls(spec: &HeadsetSpec, settings: &SettingsMap) -> Vec<SettingMeta> {
     let mut c = lighting_controls(effect_of(settings), 1.0, false);
+    if spec.extras {
+        if let Some(m) = c.iter_mut().find(|m| m.key == SettingKey::Effect) {
+            m.options
+                .insert(2, SettingOption::text("strobing", "Strobing"));
+        }
+    }
     c.push(SettingMeta::slider(
         SettingKey::MicSideTone,
         "Sidetone",
@@ -266,6 +322,21 @@ pub fn controls(settings: &SettingsMap) -> Vec<SettingMeta> {
         p::HS_SIDETONE_MAX.into(),
         1.0,
     ));
+    if spec.extras {
+        c.push(SettingMeta::toggle(
+            SettingKey::MicNoiseFilter,
+            "AI noise reduction",
+        ));
+        let opts = p::HS_VOICE_PROMPTS
+            .iter()
+            .map(|&(v, label)| SettingOption::int(v.into(), label))
+            .collect();
+        c.push(SettingMeta::dropdown(
+            SettingKey::VoicePrompts,
+            "Voice prompt",
+            opts,
+        ));
+    }
     let opts = p::HS_SLEEP_MIN
         .iter()
         .map(|&m| match m {
@@ -294,7 +365,7 @@ impl DeviceAdapter for HeadsetAdapter {
             connected: self.t.is_some(),
             batteries: vec![self.battery.clone()],
             settings: self.settings.clone(),
-            controls: controls(&self.settings),
+            controls: controls(self.spec, &self.settings),
             last_error: self.last_error.clone(),
         }
     }
@@ -338,7 +409,7 @@ mod tests {
         }
         let mut s = SettingsMap::new();
         lighting_defaults(&mut s, false);
-        let c = controls(&s);
+        let c = controls(&HEADSETS[1], &s);
         let side = c.iter().find(|m| m.key == SettingKey::MicSideTone).unwrap();
         assert!(side.validate(&SettingValue::Int(20)).is_ok());
         assert!(side.validate(&SettingValue::Int(21)).is_err());
@@ -348,5 +419,47 @@ mod tests {
         }
         assert!(sleep.validate(&SettingValue::Int(1)).is_err());
         assert!(c.iter().all(|m| m.key != SettingKey::Speed));
+        // Delta II: no strobing, noise reduction or voice prompt.
+        let strobing = SettingValue::Text("strobing".into());
+        let effect = c.iter().find(|m| m.key == SettingKey::Effect).unwrap();
+        assert!(effect.validate(&strobing).is_err());
+        assert!(c
+            .iter()
+            .all(|m| m.key != SettingKey::MicNoiseFilter && m.key != SettingKey::VoicePrompts));
+        merge_setting(&mut s, SettingKey::Effect, strobing.clone());
+        assert_eq!(effect_wire(&HEADSETS[1], &s), 1);
+    }
+
+    #[test]
+    fn pelta_extras() {
+        let pelta = find(0x1b84).unwrap();
+        let mut s = SettingsMap::new();
+        lighting_defaults(&mut s, false);
+        let c = controls(pelta, &s);
+        let effect = c.iter().find(|m| m.key == SettingKey::Effect).unwrap();
+        let names: Vec<_> = effect.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(names, ["Static", "Breathing", "Strobing", "Color cycle"]);
+        let nr = c
+            .iter()
+            .find(|m| m.key == SettingKey::MicNoiseFilter)
+            .unwrap();
+        assert!(nr.validate(&SettingValue::Bool(true)).is_ok());
+        let vp = c
+            .iter()
+            .find(|m| m.key == SettingKey::VoicePrompts)
+            .unwrap();
+        for v in [0, 1, 2] {
+            assert!(vp.validate(&SettingValue::Int(v)).is_ok());
+        }
+        assert!(vp.validate(&SettingValue::Int(3)).is_err());
+        for (name, wire) in [
+            ("static", 1),
+            ("breathing", 2),
+            ("strobing", 3),
+            ("cycle", 4),
+        ] {
+            merge_setting(&mut s, SettingKey::Effect, SettingValue::Text(name.into()));
+            assert_eq!(effect_wire(pelta, &s), wire);
+        }
     }
 }

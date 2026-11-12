@@ -20,6 +20,18 @@
 //! sent, and saved values are re-sent whenever the device (re)connects. None of
 //! the modes used here needs re-streaming, so `tick` does nothing.
 //!
+//! OpenRGB's per-PID `CMKeyboardV2Controller::Initialize` (`51 00 00 00 <p>`
+//! profile select, `56 81 .. <p> .. bb` "magic" and the `12` / `42` / `43`
+//! startup packets) is only called from `SetLeds` before Direct per-key
+//! frames, never from `SetMode`, whose packets `keyboard.rs` mirrors; it is
+//! not sent here. Its `51 00` would also switch the live onboard profile.
+//!
+//! Not listed: SK620 Black / White (0157 / 0159) and MK850 (0069) are
+//! registered for OpenRGB's V2 detector but missing from its controller
+//! switch, so OpenRGB never drives them; MK750 (0067), SK630 (0089) and
+//! SK650 (008d) are V2 in OpenRGB but listed by libcmmk, whose protocol is
+//! V1: the sources disagree on the family.
+//!
 //! Saving to device memory is shown as a blocked `save_to_device` control:
 //! each save command has a single source or an unclear target (see
 //! `docs/onboard-writes/coolermaster.md` and `Family::save_blocked`).

@@ -14,7 +14,9 @@
 //!
 //! PIDs and names: OpenRGB `Controllers/RedragonController/
 //! RedragonControllerDetect.cpp` (GPL-2.0, IDs only); mouse_m908 README
-//! (GPL-3.0, IDs only) where it names the same PID differently.
+//! (GPL-3.0, IDs only) where it names the same PID differently, and for the
+//! 04d9 mice OpenRGB does not list (M719 onwards in `MODELS`; fc2a is also
+//! "Redragon M709" in usb.ids).
 //! <https://gitlab.com/CalcProgrammer1/OpenRGB>,
 //! <https://github.com/dokutan/mouse_m908>
 
@@ -54,6 +56,20 @@ pub const MODELS: &[Model] = &[
     model("Redragon M921 Azzinoth", &[0xfc40]),
     model("Redragon M711-FPS-1 Cobra FPS", &[0xfc62]),
     model("Redragon M901-K-2 Perdition", &[0xfc5e]),
+    model("Redragon M719 Invader", &[0xfc4f]),
+    model("Redragon M709 Tiger", &[0xfc2a]),
+    model("Redragon M721-Pro Lonewolf2", &[0xfc5c]),
+    model("Redragon M990 Legend", &[0xfc0f, 0xfc41]),
+    model("Redragon M702-2 Phoenix", &[0xfc2f]),
+    model("Redragon M909 Emperor / M802 Titanoboa 2", &[0xfc42]),
+    model("Redragon M612-RGB Predator", &[0xfc61]),
+    model("Redragon M901 Perdition", &[0xfc02]),
+    model("Redragon M910 Ranger", &[0xfc49]),
+];
+
+/// PIDs only mouse_m908 lists.
+const M908_ONLY: [u16; 10] = [
+    0xfc4f, 0xfc2a, 0xfc5c, 0xfc0f, 0xfc41, 0xfc2f, 0xfc42, 0xfc61, 0xfc02, 0xfc49,
 ];
 
 /// Why lighting is not offered for `pid`.
@@ -63,6 +79,10 @@ fn blocked_reason(pid: u16) -> &'static str {
         0xfc30 | 0xfc39 | 0xfc4d => {
             "every change is written to onboard profile memory; sources disagree on the \
              profile slot and the wave code"
+        }
+        p if M908_ONLY.contains(&p) => {
+            "every change is written to onboard memory; only mouse_m908 covers this model and \
+             the layout differs between Redragon models"
         }
         _ => {
             "every change is written to onboard memory; only OpenRGB covers this model and \
@@ -174,7 +194,8 @@ mod tests {
                 assert!(seen.insert(pid), "{pid:04x} listed twice");
             }
         }
-        assert_eq!(seen.len(), 12);
+        assert_eq!(seen.len(), 22);
+        assert!(M908_ONLY.iter().all(|p| seen.contains(p)));
     }
 
     #[test]
@@ -201,5 +222,6 @@ mod tests {
                 .is_err());
         }
         assert_ne!(blocked_reason(0xfc4d), blocked_reason(0xfa7e));
+        assert_ne!(blocked_reason(0xfc4f), blocked_reason(0xfa7e));
     }
 }

@@ -12,8 +12,8 @@
 //! - `keyboard`: Apex. Byte layouts from OpenRGB
 //!   `Controllers/SteelSeriesController/SteelSeriesApex*`,
 //!   `SteelSeriesOldApexController` and `SteelSeriesDevices.h`
-//!   (gitlab.com/CalcProgrammer1/OpenRGB); Apex Pro actuation from
-//!   apex-analog `apex_analog.py` (github.com/milescoviello/apex-analog).
+//!   (gitlab.com/CalcProgrammer1/OpenRGB); Apex Pro actuation and rapid tap
+//!   from apex-analog `apex_analog.py` (github.com/milescoviello/apex-analog).
 //!
 //! All are cited as references only; nothing is copied. Setters are
 //! volatile. A model's flash "save" (headsets: HeadsetControl "save state" /

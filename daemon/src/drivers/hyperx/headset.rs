@@ -6,7 +6,9 @@
 //! - Alpha: HeadsetControl `hyperx_cloud_alpha_wireless.hpp`, HyperHeadset `cloud_alpha_wireless.rs`
 //! - Cloud2Kingston: HeadsetControl `hyperx_cloud_2_wireless_kingston.hpp`,
 //!   HyperHeadset `cloud_ii_wireless.rs`
-//! - Cloud2Hp: HeadsetControl `hyperx_cloud_2_wireless.hpp`, HyperHeadset `cloud_ii_wireless_dts.rs`
+//! - Cloud2Hp: HeadsetControl `hyperx_cloud_2_wireless.hpp`, HyperHeadset `cloud_ii_wireless_dts.rs`;
+//!   Cloud Stinger 2 Wireless (03f0:0d93) and its sidetone volume (`0b` get / `23` set,
+//!   one byte) also from hsctl `docs/COMMANDS.md` (MIT): <https://github.com/oauthul/hsctl>
 //! - Cloud3 / Cloud2Core: HyperHeadset `cloud_iii_wireless.rs` / `cloud_ii_core_wireless.rs`
 //! - Cloud3S: HyperHeadset `cloud_iii_s_wireless.rs` (incl. auto-off, voice prompts, EQ)
 //! - Alpha2: HeadsetControl `hyperx_cloud_alpha_2_wireless.hpp`
@@ -14,14 +16,15 @@
 //! - AlphaS: HeadsetControl `hyperx_cloud_alpha_s.hpp`
 //!
 //! Voice prompts on the Alpha Wireless: HeadsetControl and HyperHeadset agree
-//! on `13` (set) / `09` (get).
+//! on `13` (set) / `09` (get). Boom-mic presence (read-only) per HyperHeadset's
+//! `get_mic_connected_packet`: Alpha `08`, Cloud2Hp `08`, Cloud2Core `8c` (event `07`).
 
 use super::{exchange, get_input_report, open_node, pad, read_reports, Node, Spec, HP, KINGSTON};
 use crate::drivers::{DeviceAdapter, DriverCtx, Opened};
 use crate::hid::HidrawDevice;
 use anyhow::{bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
-use hako_core::config::{merge_setting, ConfigPaths};
+use hako_core::config::{get_setting, load_device_settings, merge_setting, ConfigPaths};
 use hako_core::device::{BatteryState, DeviceId, DeviceKind, DeviceSnapshot};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
@@ -71,7 +74,14 @@ pub(super) const CLOUD_FLIGHT_S: Spec<Family> = Spec {
 pub(super) const CLOUD_II_HP: Spec<Family> = Spec {
     name: "HyperX Cloud II Wireless",
     vid: HP,
-    pids: &[0x0696, 0x018b, 0x0d93],
+    pids: &[0x0696, 0x018b],
+    family: Cloud2Hp,
+};
+/// hsctl's only PID; HyperHeadset added it as the Stinger 2 (commit 7e2c301).
+pub(super) const CLOUD_STINGER_2: Spec<Family> = Spec {
+    name: "HyperX Cloud Stinger 2 Wireless",
+    vid: HP,
+    pids: &[0x0d93],
     family: Cloud2Hp,
 };
 pub(super) const CLOUD_III: Spec<Family> = Spec {
@@ -135,6 +145,7 @@ pub(super) const ALL: &[&Spec<Family>] = &[
     &CLOUD_II,
     &CLOUD_FLIGHT_S,
     &CLOUD_II_HP,
+    &CLOUD_STINGER_2,
     &CLOUD_III,
     &CLOUD_II_CORE,
     &CLOUD_III_S,
@@ -232,13 +243,13 @@ const ALPHA_S_SIDETONE: u8 = 0x07;
 fn queries(f: Family) -> Vec<Vec<u8>> {
     let cmds: &[u8] = match f {
         Flight => &[0x05],
-        Alpha => &[0x03, 0x0b, 0x0c, 0x0a, 0x05, 0x06, 0x07, 0x09],
+        Alpha => &[0x03, 0x0b, 0x0c, 0x0a, 0x05, 0x06, 0x07, 0x09, 0x08],
         // 0x01 answers connection status (reply id 1) and mute (reply id 8).
         Cloud2Kingston => &[0x01, 0x02, 0x03, 0x1a],
         // No 0x01 here: HyperHeadset notes it resets state (unmutes the mic).
-        Cloud2Hp => &[0x02, 0x03, 0x05, 0x06, 0x07],
+        Cloud2Hp => &[0x02, 0x03, 0x05, 0x06, 0x0b, 0x07, 0x08],
         Cloud3 => &[0x82, 0x89, 0x8a, 0x86, 0x84, 0x85],
-        Cloud2Core => &[0x82, 0x89, 0x8a, 0x86, 0x84, 0x88, 0x85],
+        Cloud2Core => &[0x82, 0x89, 0x8a, 0x86, 0x84, 0x88, 0x85, 0x8c],
         Cloud3S => {
             return [0x02, 0x06, 0x48, 0x04, 0x16, 0x14, 0x4b]
                 .map(cloud3s_get)
@@ -272,6 +283,7 @@ fn set_packets(f: Family, key: SettingKey, value: &SettingValue) -> Result<Vec<V
         (Cloud2Kingston, SettingKey::PmShutdown) => vec![p(0x18, n)],
         (Cloud2Hp, SettingKey::MicMute) => vec![p(0x20, on.unwrap_or(0))],
         (Cloud2Hp, SettingKey::MicSideTone) => vec![p(0x21, n)],
+        (Cloud2Hp, SettingKey::MicSideToneVolume) => vec![p(0x23, n)],
         (Cloud2Hp, SettingKey::PmShutdown) => vec![p(0x22, n)],
         (Cloud3 | Cloud2Core, SettingKey::MicMute) => vec![p(0x03, on.unwrap_or(0))],
         (Cloud3 | Cloud2Core, SettingKey::PmShutdown) => vec![p(0x02, n)],
@@ -309,6 +321,8 @@ enum Event {
     Muted(bool),
     SideToneOn(bool),
     SideToneLevel(i64),
+    SideToneVolume(u8),
+    MicAttached(bool),
     AutoOff(u8),
     EqPreset(u8),
     ChatMix(f64, f64),
@@ -356,6 +370,7 @@ fn parse(f: Family, r: &[u8]) -> Vec<Event> {
                 0x06 | 0x11 => vec![SideToneLevel(i64::from(*v))],
                 0x07 | 0x12 => vec![AutoOff(*v)],
                 0x09 | 0x13 => vec![VoicePrompts(*v == 0x01)],
+                0x08 => vec![MicAttached(*v == 0x01)],
                 _ => vec![],
             },
             _ => vec![],
@@ -379,6 +394,8 @@ fn parse(f: Family, r: &[u8]) -> Vec<Event> {
                 0x05 | 0x20 => vec![Muted(*d4 == 0x01)],
                 0x06 | 0x21 => vec![SideToneOn(*d4 == 0x01)],
                 0x07 | 0x22 => vec![AutoOff(*d4)],
+                0x08 => vec![MicAttached(*d4 == 0x01)],
+                0x0b => vec![SideToneVolume(*d4)],
                 _ => vec![],
             },
             _ => vec![],
@@ -397,6 +414,7 @@ fn parse(f: Family, r: &[u8]) -> Vec<Event> {
                     0x09 | 0x01 if core => vec![SideToneOn(*a == 0x01)],
                     0x85 => vec![AutoOff(*a)],
                     0x02 if core => vec![AutoOff(*a)],
+                    0x8c | 0x07 if core => vec![MicAttached(*a == 0x01)],
                     0x88 | 0x05 if core => {
                         let level = *a as i8;
                         vec![SideToneLevel(if (-5..=5).contains(&level) {
@@ -637,6 +655,14 @@ fn controls(f: Family) -> Vec<SettingMeta> {
         }
         _ => {}
     }
+    if matches!(f, Alpha | Cloud2Hp | Cloud2Core) {
+        c.push(SettingMeta::readonly(
+            MicAttached,
+            "Boom mic attached",
+            0.0,
+            1.0,
+        ));
+    }
     match f {
         Alpha2 => c.push(SettingMeta::slider(MicSideTone, "Sidetone", 0.0, 20.0, 1.0)),
         Cloud2Core => {
@@ -649,10 +675,30 @@ fn controls(f: Family) -> Vec<SettingMeta> {
         }
         Alpha | Flight => {}
     }
+    // A byte per hsctl; HyperHeadset offers 0..=250.
+    if f == Cloud2Hp {
+        c.push(SettingMeta::slider(
+            MicSideToneVolume,
+            "Sidetone volume",
+            0.0,
+            255.0,
+            1.0,
+        ));
+    }
     c
 }
 
 // ── Adapter ─────────────────────────────────────────────────────────────────
+
+/// The model's settings file. The Stinger 2 used to be listed under the HP
+/// Cloud II Wireless, so its old settings sit in that model's file.
+fn load_settings(spec: &Spec<Family>, paths: &ConfigPaths) -> Result<SettingsMap> {
+    let settings = load_device_settings(paths, spec.vid, spec.pids[0])?;
+    if settings.is_empty() && spec.pids == CLOUD_STINGER_2.pids {
+        return Ok(load_device_settings(paths, HP, CLOUD_II_HP.pids[0]).unwrap_or_default());
+    }
+    Ok(settings)
+}
 
 const POLL: Duration = Duration::from_secs(30);
 const REPLY_WAIT: Duration = Duration::from_millis(300);
@@ -707,7 +753,7 @@ impl HeadsetAdapter {
             },
             dev: Some(dev),
             input,
-            settings: hako_core::config::load_device_settings(&paths, spec.vid, spec.pids[0])?,
+            settings: load_settings(spec, &paths)?,
             battery: BatteryState {
                 label: "Headset".into(),
                 percent: None,
@@ -789,6 +835,16 @@ impl HeadsetAdapter {
             ),
             Event::SideToneOn(on) => self.sidetone.0 = Some(on),
             Event::SideToneLevel(l) => self.sidetone.1 = Some(l),
+            Event::SideToneVolume(v) => merge_setting(
+                &mut self.settings,
+                SettingKey::MicSideToneVolume,
+                SettingValue::Int(i64::from(v)),
+            ),
+            Event::MicAttached(on) => merge_setting(
+                &mut self.settings,
+                SettingKey::MicAttached,
+                SettingValue::Bool(on),
+            ),
             Event::AutoOff(m) => merge_setting(
                 &mut self.settings,
                 SettingKey::PmShutdown,
@@ -891,7 +947,15 @@ impl DeviceAdapter for HeadsetAdapter {
                 vec![]
             },
             settings: self.settings.clone(),
-            controls: controls(self.family()),
+            // Boom-mic presence only once the headset reports it (the
+            // Stinger 2's mic is fixed and may never answer).
+            controls: controls(self.family())
+                .into_iter()
+                .filter(|c| {
+                    c.key != SettingKey::MicAttached
+                        || get_setting(&self.settings, SettingKey::MicAttached).is_some()
+                })
+                .collect(),
             last_error: self.last_error.clone(),
         }
     }

@@ -115,6 +115,75 @@ pub fn segmented(
     clicked
 }
 
+/// The one slider look: an accent fill and a solid knob. egui paints its knob
+/// in the rail's colour slot, so here its own knob is reduced to the rail
+/// colour; call `knob` with the value's position afterwards to paint the real one.
+pub fn slider(ui: &mut Ui, s: egui::Slider, width: f32) -> Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().slider_width = width;
+        ui.spacing_mut().interact_size.y = 18.0;
+        let vis = ui.visuals_mut();
+        vis.selection.bg_fill = pal().accent;
+        let w = &mut vis.widgets;
+        w.inactive.bg_fill = pal().surface_hover;
+        w.hovered.bg_fill = Color32::TRANSPARENT;
+        w.active.bg_fill = Color32::TRANSPARENT;
+        for state in [
+            &mut w.noninteractive,
+            &mut w.inactive,
+            &mut w.hovered,
+            &mut w.active,
+        ] {
+            state.fg_stroke = Stroke::NONE;
+        }
+        ui.add(s)
+    })
+    .inner
+}
+
+/// Where `v` sits in `min..=max` (0..1), on a log scale if `log`.
+pub fn fraction(v: f32, min: f32, max: f32, log: bool) -> f32 {
+    if max <= min {
+        return 0.0;
+    }
+    if log && min > 0.0 {
+        (v / min).ln() / (max / min).ln()
+    } else {
+        (v - min) / (max - min)
+    }
+}
+
+/// Track span of a `slider` (egui insets it by the knob radius).
+pub fn track(resp: &Response) -> egui::Rangef {
+    resp.rect.x_range().shrink(resp.rect.height() / 2.5)
+}
+
+/// Solid knob at fraction `t` of a `slider`'s track; grows under the pointer.
+pub fn knob(ui: &Ui, resp: &Response, t: f32) {
+    let x = egui::lerp(track(resp), t.clamp(0.0, 1.0));
+    let hot = ui.ctx().animate_bool_with_time(
+        resp.id.with("knob"),
+        resp.hovered() || resp.dragged(),
+        0.12,
+    );
+    let c = pos2(x, resp.rect.center().y);
+    let fill = if ui.is_enabled() {
+        Color32::WHITE
+    } else {
+        pal().text_faint
+    };
+    let r = 7.5 + 1.5 * hot;
+    ui.painter()
+        .circle_filled(c + vec2(0.0, 1.0), r, Color32::from_black_alpha(60));
+    ui.painter()
+        .circle(c, r, fill, Stroke::new(1.0_f32, pal().border_hi));
+}
+
+/// A number readout beside a control, in the body face.
+pub fn value_text(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text.into()).color(pal().text)
+}
+
 /// Fill for a selected / lifted element inside a control.
 pub fn raised() -> Color32 {
     if pal().dark {
@@ -125,32 +194,71 @@ pub fn raised() -> Color32 {
 }
 
 /// A settings row: label (+ optional hint) on the left, control right-aligned,
-/// both vertically centered in `ROW_H`.
+/// both vertically centered in a row at least `ROW_H` tall. The text wraps in
+/// the space the control leaves (its width is remembered from the last
+/// frame) and the row grows to fit.
 pub fn row(ui: &mut Ui, label: &str, hint: Option<&str>, add: impl FnOnce(&mut Ui)) {
     let w = ui.available_width();
+    let ctl_id = ui.id().with(("row_ctl", label));
+    let ctl_w = ui.data(|m| m.get_temp::<f32>(ctl_id)).unwrap_or(0.0);
+    let text_w = (w - ctl_w - theme::SPACE_LG).max(w * 0.35);
+    let gap = 2.0;
+    let wrap = |text: egui::RichText, style: egui::TextStyle| {
+        egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Wrap), text_w, style)
+    };
+    let title = wrap(
+        egui::RichText::new(label).color(pal().text),
+        egui::TextStyle::Body,
+    );
+    let sub = hint.map(|h| {
+        wrap(
+            egui::RichText::new(h).small().color(pal().text_faint),
+            egui::TextStyle::Small,
+        )
+    });
+    let text_h = title.size().y + sub.as_ref().map_or(0.0, |g| gap + g.size().y);
+    let h = theme::ROW_H.max(text_h + 2.0 * theme::SPACE_MD);
     ui.allocate_ui_with_layout(
-        vec2(w, theme::ROW_H),
+        vec2(w, h),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.set_min_size(vec2(w, theme::ROW_H));
-            // Exact text-block height, so the layout can center it.
-            let gap = 2.0;
-            let mut h = ui.text_style_height(&egui::TextStyle::Body);
-            if hint.is_some() {
-                h += gap + ui.text_style_height(&egui::TextStyle::Small);
-            }
+            ui.set_min_size(vec2(w, h));
             ui.allocate_ui_with_layout(
-                vec2(ui.available_width(), h),
+                vec2(text_w, text_h),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.spacing_mut().item_spacing.y = gap;
-                    ui.label(egui::RichText::new(label).color(pal().text));
-                    if let Some(h) = hint {
-                        ui.label(egui::RichText::new(h).small().color(pal().text_faint));
+                    ui.label(title);
+                    if let Some(g) = sub {
+                        ui.label(g);
                     }
                 },
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+            let ctl = ui
+                .with_layout(egui::Layout::right_to_left(egui::Align::Center), add)
+                .response
+                .rect
+                .width();
+            if (ctl - ctl_w).abs() > 0.5 {
+                ui.data_mut(|m| m.insert_temp(ctl_id, ctl));
+                ui.ctx().request_discard("row control width changed");
+            }
+        },
+    );
+}
+
+/// A read-only fact: muted name left, value right, tighter than a `row`.
+pub fn fact(ui: &mut Ui, name: &str, value: &str) {
+    let w = ui.available_width();
+    ui.allocate_ui_with_layout(
+        vec2(w, 30.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_size(vec2(w, 30.0));
+            ui.label(egui::RichText::new(name).color(pal().text_muted));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(value).color(pal().text));
+            });
         },
     );
 }
@@ -428,51 +536,6 @@ pub fn icon_grip(p: &egui::Painter, r: Rect, c: Color32) {
     }
 }
 
-/// Pip, the mascot, filling the square `r`; the caller paints the tile behind.
-/// Shapes and colours mirror `branding/parts/`.
-pub fn pip(p: &egui::Painter, r: Rect) {
-    const NAVY: Color32 = Color32::from_rgb(30, 41, 59);
-    const ORANGE: Color32 = Color32::from_rgb(255, 167, 38);
-    const EYE: Color32 = Color32::from_rgb(31, 27, 46);
-    let blush = Color32::from_rgba_unmultiplied(255, 122, 154, 128);
-    // The art is on a 120-unit canvas; Pip sits inside x 10..110, y 13..113.
-    let s = r.width() / 100.0;
-    let at = |x: f32, y: f32| pos2(r.left() + (x - 10.0) * s, r.top() + (y - 13.0) * s);
-    let oval = |x: f32, y: f32, rx: f32, ry: f32, deg: f32, fill: Color32| {
-        let (sin, cos) = deg.to_radians().sin_cos();
-        let pts = (0..32)
-            .map(|i| {
-                let (ty, tx) = (i as f32 / 32.0 * std::f32::consts::TAU).sin_cos();
-                let (dx, dy) = (rx * tx, ry * ty);
-                at(x + dx * cos - dy * sin, y + dx * sin + dy * cos)
-            })
-            .collect();
-        p.add(egui::Shape::convex_polygon(pts, fill, Stroke::NONE));
-    };
-    oval(48.0, 100.0, 9.0, 4.5, 0.0, ORANGE);
-    oval(72.0, 100.0, 9.0, 4.5, 0.0, ORANGE);
-    oval(29.0, 72.0, 6.5, 14.0, 18.0, NAVY);
-    oval(91.0, 72.0, 6.5, 14.0, -18.0, NAVY);
-    for (x, y) in [(52.0, 26.0), (65.0, 23.0), (71.0, 29.0)] {
-        p.line_segment([at(60.0, 36.0), at(x, y)], Stroke::new(3.6 * s, NAVY));
-    }
-    oval(60.0, 67.0, 31.0, 34.0, 0.0, NAVY);
-    oval(49.0, 60.0, 13.0, 13.0, 0.0, Color32::WHITE);
-    oval(71.0, 60.0, 13.0, 13.0, 0.0, Color32::WHITE);
-    oval(60.0, 77.0, 21.0, 22.0, 0.0, Color32::WHITE);
-    for x in [49.0, 71.0] {
-        oval(x, 61.0, 5.0, 6.0, 0.0, EYE);
-        p.circle_filled(at(x + 1.7, 58.8), 1.9 * s, Color32::WHITE);
-    }
-    oval(45.5, 70.0, 4.4, 2.6, 0.0, blush);
-    oval(74.5, 70.0, 4.4, 2.6, 0.0, blush);
-    p.add(egui::Shape::convex_polygon(
-        vec![at(54.3, 65.3), at(65.7, 65.3), at(60.0, 73.2)],
-        ORANGE,
-        Stroke::NONE,
-    ));
-}
-
 pub fn icon_gear(p: &egui::Painter, r: Rect, c: Color32) {
     let center = r.center();
     let rad = r.width() / 2.0;
@@ -714,7 +777,7 @@ fn update_card(ui: &mut Ui, o: &UpdateOffer) -> Option<bool> {
         .show(ui, |ui| {
             ui.set_width(TOAST_W - 28.0);
             ui.label(
-                egui::RichText::new(format!("Hako v{} is available", o.version))
+                egui::RichText::new(format!("hako v{} is available", o.version))
                     .color(pal().text)
                     .strong(),
             );
@@ -729,7 +792,7 @@ fn update_card(ui: &mut Ui, o: &UpdateOffer) -> Option<bool> {
                 return;
             }
             ui.label(
-                egui::RichText::new("Hako restarts to finish. Audio routing pauses for a moment.")
+                egui::RichText::new("hako restarts to finish. Audio routing pauses for a moment.")
                     .color(pal().text_muted),
             );
             ui.add_space(theme::SPACE_SM);

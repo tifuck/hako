@@ -20,8 +20,22 @@
 //! - Headset lights (brightness property 0x02, 0 or 1000, bracketed by
 //!   software mode): HeadsetControl `corsair_virtuoso_xt.hpp` for the
 //!   Virtuoso XT/SE PIDs, the same values as ckb-next `led_bragi.c`.
+//! - V2 headset sidetone (0xD1 / 0x46 / 0x47) and sleep timer (0x0D /
+//!   0x0E) on the V2 receivers: HeadsetControl `corsair_void_v2w.hpp`
+//!   (2a08, 2a02, 0a97) and OpenLinkHub `voidV2W.go`, `virtuosomaxW.go`,
+//!   `hs80maxW.go` (every V2 receiver PID) write the same properties.
+//! - Virtuoso XT/SE sleep timer on their receivers: HeadsetControl
+//!   `corsair_virtuoso_xt.hpp` and OpenLinkHub `virtuosorgbXTW.go` /
+//!   `virtuosoSEW.go` agree (0x0D, 0x0E); on the cable OpenLinkHub also
+//!   writes 0x37, so the cable PIDs stay blocked.
+//! - NXP mouse poll rate (`07 0A 00 00 <ms>`, write-only, current rate read
+//!   from the `0E 01` identification report): ckb-next `device_mouse.c`
+//!   `cmd_pollrate` on its `SUPPORTS_ADJRATE` PIDs and OpenLinkHub
+//!   `m65rgbelite.go` / `m65prorgb.go` / `glaivergb.go` /
+//!   `scimitarprorgb.go` agree byte for byte.
 
 use super::models::{Family, RECEIVERS};
+use super::nxp::Leds;
 
 /// What a model may do with one onboard setting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -43,6 +57,8 @@ pub struct Onboard {
     /// Bragi headset lights through the brightness property.
     pub lights: Offer,
     pub sidetone: Offer,
+    /// Switch active noise cancellation off before turning sidetone on.
+    pub anc: bool,
     pub sleep: Offer,
     pub dpi_stages: Offer,
     /// NXP "save to hardware" (whole onboard profile).
@@ -131,8 +147,28 @@ pub const ANGLE_SNAP: &[u16] = &[
 
 /// Virtuoso XT (receiver, cable) and SE (receiver, cable): HeadsetControl.
 pub const HEADSET_LIGHTS: &[u16] = &[0x0a64, 0x0a62, 0x0a3e, 0x0a3d];
-/// Virtuoso XT: the only Bragi headset with sidetone properties.
+/// Virtuoso XT / SE receivers: sleep timer agreed by both sources.
+const XT_SE_RECEIVERS: &[u16] = &[0x0a64, 0x0a3e];
+/// Virtuoso XT: sidetone properties with a disputed enable polarity.
 const XT: &[u16] = &[0x0a64, 0x0a62];
+/// V2 receivers (OpenLinkHub `devices.go`): sidetone and sleep timer, with
+/// whether the headset has ANC to switch off (OpenLinkHub writes 0xD1 for
+/// the Void V2 and Virtuoso MAX, not the HS80 MAX).
+pub const V2: &[(u16, bool)] = &[
+    (0x2a08, true),
+    (0x2a05, true),
+    (0x2a12, true),
+    (0x2a02, true),
+    (0x2a03, true),
+    (0x0a97, false),
+    (0x2a0f, false),
+    (0x2a0c, false),
+];
+/// NXP mice in ckb-next `usb.h` `SUPPORTS_ADJRATE`.
+pub const NXP_REPORT_RATE: &[u16] = &[
+    0x1b12, 0x1b2e, 0x1b5a, 0x1b14, 0x1b19, 0x1b2f, 0x1b32, 0x1b1e, 0x1b3e, 0x1b8b, 0x1b3c, 0x1b75,
+    0x1b34, 0x1b74, 0x1b22, 0x1b5c,
+];
 
 const NO_SOURCE: &str = "no source writes it for this model";
 const VIA_RECEIVER: &str = "set on the wireless receiver, which is not offered";
@@ -144,13 +180,24 @@ const SIDETONE: &str =
 const DPI_STAGES: &str = "layout only noted in a ckb-next comment; no implementation writes it";
 const NXP_SAVE: &str = "single implementation (ckb-next); unsupported on boards with hardware \
                         animations and reports of lost onboard profiles";
+const NXP_RATE: &str = "not in ckb-next's list of rate-adjustable mice";
 
 /// Onboard settings of the device with `pid` opened as `family`;
 /// `via_receiver` when it sits behind a wireless receiver.
 pub fn of(family: Family, pid: u16, via_receiver: bool) -> Onboard {
     let mut o = Onboard::default();
     match family {
-        Family::Nxp { .. } => o.save = Offer::Blocked(NXP_SAVE),
+        Family::Nxp { leds, .. } => {
+            o.save = Offer::Blocked(NXP_SAVE);
+            if matches!(leds, Leds::Mouse(_)) {
+                o.report_rate_max = 1000;
+                o.report_rate = if NXP_REPORT_RATE.contains(&pid) {
+                    Offer::Yes
+                } else {
+                    Offer::Blocked(NXP_RATE)
+                };
+            }
+        }
         Family::Bragi { dpi, wireless, .. } => {
             let wired = !via_receiver && !RECEIVERS.contains(&pid);
             if !wired {
@@ -182,13 +229,20 @@ pub fn of(family: Family, pid: u16, via_receiver: bool) -> Onboard {
             } else {
                 Offer::Blocked(NO_SOURCE)
             };
-            o.sleep = Offer::Blocked(if HEADSET_LIGHTS.contains(&pid) {
-                SLEEP_HEADSET
+            o.sleep = if XT_SE_RECEIVERS.contains(&pid) {
+                Offer::Yes
+            } else if HEADSET_LIGHTS.contains(&pid) {
+                Offer::Blocked(SLEEP_HEADSET)
             } else {
-                NO_SOURCE
-            });
+                Offer::Blocked(NO_SOURCE)
+            };
             if XT.contains(&pid) {
                 o.sidetone = Offer::Blocked(SIDETONE);
+            }
+            if let Some(&(_, anc)) = V2.iter().find(|(p, _)| *p == pid) {
+                o.sidetone = Offer::Yes;
+                o.anc = anc;
+                o.sleep = Offer::Yes;
             }
         }
         Family::Receiver | Family::Void | Family::VoidWired => {}
@@ -230,6 +284,21 @@ mod tests {
         for &pid in HEADSET_LIGHTS {
             assert!(matches!(family(pid), Family::BragiHeadset { wake: false }));
         }
+        for &(pid, _) in V2 {
+            assert!(matches!(family(pid), Family::BragiHeadset { wake: true }));
+        }
+        for &pid in NXP_REPORT_RATE {
+            assert!(
+                matches!(
+                    family(pid),
+                    Family::Nxp {
+                        leds: Leds::Mouse(_),
+                        ..
+                    }
+                ),
+                "{pid:04x} is not an NXP mouse"
+            );
+        }
     }
 
     #[test]
@@ -261,6 +330,20 @@ mod tests {
         assert!(matches!(xt.sidetone, Offer::Blocked(_)));
         let se = of(family(0x0a3d), 0x0a3d, false);
         assert_eq!((se.lights, se.sidetone), (Offer::Yes, Offer::No));
+        // Sleep timer on the XT/SE receivers, blocked on their cables.
+        assert_eq!(xt.sleep, Offer::Yes);
+        assert_eq!(of(family(0x0a3e), 0x0a3e, false).sleep, Offer::Yes);
+        assert_eq!(se.sleep, Offer::Blocked(SLEEP_HEADSET));
+        assert_eq!(
+            of(family(0x0a62), 0x0a62, false).sleep,
+            Offer::Blocked(SLEEP_HEADSET)
+        );
+        // V2 receivers: sidetone and sleep; ANC only where it exists.
+        let void_v2 = of(family(0x2a08), 0x2a08, false);
+        assert_eq!((void_v2.sidetone, void_v2.sleep), (Offer::Yes, Offer::Yes));
+        assert!(void_v2.anc);
+        let hs80_max = of(family(0x0a97), 0x0a97, false);
+        assert_eq!((hs80_max.sidetone, hs80_max.anc), (Offer::Yes, false));
         assert_eq!(
             of(family(0x0a6b), 0x0a6b, false).lights,
             Offer::Blocked(NO_SOURCE)
@@ -269,6 +352,13 @@ mod tests {
         let nxp = of(family(0x1b49), 0x1b49, false);
         assert!(matches!(nxp.save, Offer::Blocked(_)));
         assert_eq!(nxp.report_rate, Offer::No);
+        // NXP mice: poll rate up to 1 kHz where ckb-next adjusts it.
+        let m65 = of(family(0x1b5a), 0x1b5a, false);
+        assert_eq!((m65.report_rate, m65.report_rate_max), (Offer::Yes, 1000));
+        assert_eq!(
+            of(family(0x1b5d), 0x1b5d, false).report_rate,
+            Offer::Blocked(NXP_RATE)
+        );
         assert_eq!(of(family(0x0a14), 0x0a14, false), Onboard::default());
     }
 

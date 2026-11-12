@@ -1,4 +1,4 @@
-//! Hako control panel UI (snapshot-only; no HID / socket).
+//! hako control panel UI (snapshot-only; no HID / socket).
 //!
 //! Layout: top bar (brand, profiles, settings) · device rail · device page
 //! with a header and sub-tabs. Device controls are rendered from the
@@ -12,6 +12,7 @@ use hako_core::DeviceId;
 
 pub mod aux;
 pub mod bindings;
+pub mod brand;
 pub mod controls;
 pub mod theme;
 pub mod widgets;
@@ -166,18 +167,7 @@ impl HakoAppUi {
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    // Brand mark: Pip on the theme accent.
-                    let (r, _) =
-                        ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
-                    ui.painter().rect_filled(r, 8.0, pal().accent);
-                    widgets::pip(ui.painter(), r);
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new("Hako")
-                            .size(15.0)
-                            .strong()
-                            .color(pal().text),
-                    );
+                    brand::logo(ui, 40.0);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let on = self.show_settings;
@@ -189,13 +179,11 @@ impl HakoAppUi {
                         }
                         ui.add_space(theme::SPACE_XS);
                         self.profile_menu(ui, out);
-                        ui.add_space(theme::SPACE_SM);
-                        let (color, text) = if self.daemon_error.is_none() {
-                            (pal().ok, "Daemon online")
-                        } else {
-                            (pal().danger, "Daemon offline")
-                        };
-                        widgets::pill(ui, text, color);
+                        // Only a problem earns space in the top bar.
+                        if self.daemon_error.is_some() {
+                            ui.add_space(theme::SPACE_SM);
+                            widgets::pill(ui, "Daemon offline", pal().danger);
+                        }
                     });
                 });
             });
@@ -405,7 +393,7 @@ fn rail_entry(ui: &mut egui::Ui, d: &DeviceSnapshot, selected: bool) -> egui::Re
                 format!("{}{pct}%", if charging { "Charging · " } else { "" }),
                 widgets::battery_color(pct, charging),
             ),
-            None => (kind_label(d.kind).to_string(), pal().text_faint),
+            None => ("Connected".to_string(), pal().ok),
         }
     } else {
         ("Unavailable".into(), theme::pal().danger)
@@ -439,33 +427,69 @@ fn valid_profile_name(name: &str) -> bool {
 
 // ── Device page ──────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A device page. Setting groups are sections inside a page; related groups
+/// share one (microphone sits with audio, power with device memory).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
-    Group(SettingGroup),
+    Performance,
+    Lighting,
+    Audio,
+    LineIn,
     /// Host-side remaps; works for any mouse / keyboard.
     Bindings,
+    /// Power, onboard memory and device details; every device has it.
+    Device,
 }
 
 impl Tab {
+    fn of(g: SettingGroup) -> Tab {
+        match g {
+            SettingGroup::Performance => Tab::Performance,
+            SettingGroup::Lighting => Tab::Lighting,
+            SettingGroup::Audio | SettingGroup::Microphone => Tab::Audio,
+            SettingGroup::LineIn => Tab::LineIn,
+            SettingGroup::Power | SettingGroup::Memory => Tab::Device,
+        }
+    }
+
     fn label(self, kind: DeviceKind) -> &'static str {
         match (self, kind) {
-            (Tab::Group(g), _) => g.label(),
+            (Tab::Performance, _) => "Performance",
+            (Tab::Lighting, _) => "Lighting",
+            (Tab::Audio, _) => "Audio",
+            (Tab::LineIn, _) => "Line-in",
             (Tab::Bindings, DeviceKind::Mouse) => "Buttons",
             (Tab::Bindings, _) => "Key bindings",
+            (Tab::Device, _) => "Device",
         }
     }
 }
 
-/// One tab per setting group the driver declares (in group order), then remaps.
+/// The pages a device has, in the order that suits its kind: what people
+/// adjust most comes first, and `Device` is always last.
 fn tabs_for(d: &DeviceSnapshot) -> Vec<Tab> {
-    let mut groups: Vec<SettingGroup> = controls::visible(d).map(|m| m.key.group()).collect();
-    groups.sort();
-    groups.dedup();
-    let mut tabs: Vec<Tab> = groups.into_iter().map(Tab::Group).collect();
-    if matches!(d.kind, DeviceKind::Mouse | DeviceKind::Keyboard) {
-        tabs.push(Tab::Bindings);
-    }
-    tabs
+    use Tab::*;
+    let order: &[Tab] = match d.kind {
+        DeviceKind::Mouse => &[Performance, Bindings, Lighting, Audio, LineIn, Device],
+        DeviceKind::Keyboard => &[Lighting, Bindings, Performance, Audio, LineIn, Device],
+        DeviceKind::Headset | DeviceKind::Other => &[Audio, LineIn, Lighting, Performance, Device],
+    };
+    order
+        .iter()
+        .copied()
+        .filter(|&t| match t {
+            Bindings => matches!(d.kind, DeviceKind::Mouse | DeviceKind::Keyboard),
+            Device => true,
+            t => controls::visible(d).any(|m| Tab::of(m.key.group()) == t),
+        })
+        .collect()
+}
+
+/// Visible controls of one setting group, in driver order.
+fn group(d: &DeviceSnapshot, g: SettingGroup) -> Vec<&SettingMeta> {
+    controls::visible(d)
+        .filter(|m| m.key.group() == g)
+        .collect()
 }
 
 impl HakoAppUi {
@@ -499,17 +523,6 @@ impl HakoAppUi {
         }
 
         let tabs = tabs_for(d);
-        if tabs.is_empty() {
-            widgets::section(
-                ui,
-                "No controls",
-                |_| {},
-                |ui| {
-                    widgets::hint(ui, "This device has no adjustable settings yet.");
-                },
-            );
-            return;
-        }
         let labels: Vec<&str> = tabs.iter().map(|t| t.label(d.kind)).collect();
         let tab_id = egui::Id::new(("tab", d.id.key()));
         let mut tab = ui
@@ -524,118 +537,16 @@ impl HakoAppUi {
         ui.add_space(theme::SPACE_LG);
         widgets::page_transition(ui, (d.id.key(), tab));
 
-        let group = match tabs[tab] {
+        match tabs[tab] {
             Tab::Bindings if d.kind == DeviceKind::Mouse => {
-                return bindings::mouse_page(ui, d, remaps, out)
+                bindings::mouse_page(ui, d, remaps, out)
             }
-            Tab::Bindings => return bindings::keyboard_page(ui, d, remaps, out),
-            Tab::Group(g) => g,
-        };
-        let metas: Vec<&SettingMeta> = controls::visible(d)
-            .filter(|m| m.key.group() == group)
-            .collect();
-        // Keys with a dedicated widget; everything else renders as plain rows.
-        let special = |m: &&SettingMeta| {
-            matches!(
-                m.key,
-                SettingKey::Dpi
-                    | SettingKey::ReportRate
-                    | SettingKey::ChatMixGame
-                    | SettingKey::ChatMixChat
-            )
-        };
-        let rest: Vec<&SettingMeta> = metas.iter().copied().filter(|m| !special(m)).collect();
-        match group {
-            SettingGroup::Lighting => lighting_tab(ui, d, &metas, out),
-            SettingGroup::LineIn => self.line_in_tab(ui, d, out),
-            SettingGroup::Performance => {
-                if let Some(m) = controls::meta(d, SettingKey::Dpi) {
-                    widgets::section(
-                        ui,
-                        "Sensitivity",
-                        |_| {},
-                        |ui| controls::gated(ui, d, m, |ui| controls::dpi(ui, d, m, out)),
-                    );
-                }
-                if let Some(m) = controls::meta(d, SettingKey::ReportRate) {
-                    widgets::section(
-                        ui,
-                        "Polling rate",
-                        |_| {},
-                        |ui| {
-                            controls::gated(ui, d, m, |ui| {
-                                ui.horizontal_wrapped(|ui| controls::choice(ui, d, m, out));
-                            });
-                            ui.add_space(theme::SPACE_XS);
-                            widgets::hint(ui, "Higher rates lower latency but cost CPU; 8000 Hz needs a direct USB port.");
-                        },
-                    );
-                }
-            }
-            SettingGroup::Audio => {
-                if controls::meta(d, SettingKey::ChatMixGame).is_some() {
-                    widgets::section(
-                        ui,
-                        "ChatMix",
-                        |_| {},
-                        |ui| {
-                            controls::chatmix(ui, d);
-                            ui.add_space(theme::SPACE_XS);
-                            widgets::hint(ui, "Set by the headset's ChatMix dial. Route games to Hako_Game and voice apps to Hako_Chat.");
-                        },
-                    );
-                }
-            }
-            SettingGroup::Microphone => {
-                widgets::section(
-                    ui,
-                    "Microphone",
-                    |_| {},
-                    |ui| {
-                        controls::rows(ui, d, &rest, out);
-                        ui.add_space(theme::SPACE_XS);
-                        widgets::hint(
-                            ui,
-                            "Affects the boom mic only, not headset playback volume.",
-                        );
-                    },
-                );
-                return;
-            }
-            SettingGroup::Power => {}
-            SettingGroup::Memory => {
-                let saved: Vec<&str> = controls::visible(d)
-                    .filter(|m| m.persistent && m.blocked.is_none())
-                    .map(|m| m.label.as_str())
-                    .collect();
-                widgets::section(
-                    ui,
-                    "Device memory",
-                    |_| {},
-                    |ui| {
-                        controls::rows(ui, d, &rest, out);
-                        ui.add_space(theme::SPACE_XS);
-                        widgets::hint(
-                            ui,
-                            &format!(
-                                "When allowed, these settings are written to the device itself: {}. \
-                                 Writes happen only when you change one of them; profiles never include them.",
-                                saved.join(", ")
-                            ),
-                        );
-                    },
-                );
-                return;
-            }
-        }
-        // Lighting / Line-in draw their own rows; elsewhere leftovers go in a section.
-        if !matches!(group, SettingGroup::Lighting | SettingGroup::LineIn) && !rest.is_empty() {
-            widgets::section(
-                ui,
-                group.label(),
-                |_| {},
-                |ui| controls::rows(ui, d, &rest, out),
-            );
+            Tab::Bindings => bindings::keyboard_page(ui, d, remaps, out),
+            Tab::Lighting => lighting_tab(ui, d, &group(d, SettingGroup::Lighting), out),
+            Tab::LineIn => self.line_in_tab(ui, d, out),
+            Tab::Performance => performance_tab(ui, d, out),
+            Tab::Audio => audio_tab(ui, d, out),
+            Tab::Device => device_tab(ui, d, out),
         }
     }
 
@@ -782,15 +693,14 @@ impl HakoAppUi {
                     });
                 });
                 if let Some(st) = &self.state {
+                    widgets::divider(ui);
+                    ui.add_space(theme::SPACE_XS);
                     for (k, v) in [
                         ("Version", format!("v{}", st.health.version)),
                         ("Uptime", fmt_uptime(st.health.uptime_secs)),
                         ("Devices", st.health.adapter_count.to_string()),
                     ] {
-                        widgets::divider(ui);
-                        widgets::row(ui, k, None, |ui| {
-                            ui.label(egui::RichText::new(v).color(pal().text_muted));
-                        });
+                        widgets::fact(ui, k, &v);
                     }
                     if let Some(e) = &st.health.last_error {
                         widgets::divider(ui);
@@ -819,7 +729,7 @@ impl HakoAppUi {
                 widgets::divider(ui);
                 widgets::row(
                     ui,
-                    &format!("Hako v{}", env!("CARGO_PKG_VERSION")),
+                    &format!("hako v{}", env!("CARGO_PKG_VERSION")),
                     Some("Installed version"),
                     |ui| {
                         if widgets::button(ui, "Check now").clicked() {
@@ -842,7 +752,7 @@ impl HakoAppUi {
                 widgets::row(
                     ui,
                     "Reset audio graph",
-                    Some("Removes Hako sinks and line-in links, restores the default output"),
+                    Some("Removes hako sinks and line-in links, restores the default output"),
                     |ui| {
                         if widgets::button(ui, "Reset").clicked() {
                             out.push(UiCommand::ResetAudio);
@@ -884,12 +794,190 @@ impl HakoAppUi {
             |ui| {
                 widgets::hint(
                     ui,
-                    "Hako: one control panel for your keyboard, mouse, and headset on Linux.",
+                    "hako: one control panel for your keyboard, mouse, and headset on Linux.",
                 );
                 widgets::hint(ui, "MIT License. Device protocols reimplemented from public notes (OpenRazer, Logitech HID++, HeadsetControl).");
             },
         );
     }
+}
+
+fn performance_tab(ui: &mut egui::Ui, d: &DeviceSnapshot, out: &mut Vec<UiCommand>) {
+    if let Some(m) = controls::meta(d, SettingKey::Dpi) {
+        widgets::section(
+            ui,
+            "Sensitivity",
+            |_| {},
+            |ui| controls::gated(ui, d, m, |ui| controls::dpi(ui, d, m, out)),
+        );
+    }
+    if let Some(m) = controls::meta(d, SettingKey::ReportRate) {
+        let fast = m
+            .options
+            .iter()
+            .any(|o| o.value.as_int().is_some_and(|hz| hz > 1000));
+        widgets::section(
+            ui,
+            "Polling rate",
+            |_| {},
+            |ui| {
+                controls::gated(ui, d, m, |ui| {
+                    ui.horizontal_wrapped(|ui| controls::choice(ui, d, m, out));
+                });
+                ui.add_space(theme::SPACE_XS);
+                widgets::hint(
+                    ui,
+                    if fast {
+                        "Higher rates lower latency but use more CPU. Rates above 1000 Hz need a direct USB port."
+                    } else {
+                        "Higher rates lower latency but use more CPU."
+                    },
+                );
+            },
+        );
+    }
+    use SettingKey::*;
+    let (stages, rest): (Vec<&SettingMeta>, Vec<&SettingMeta>) =
+        group(d, SettingGroup::Performance)
+            .into_iter()
+            .filter(|m| !matches!(m.key, Dpi | ReportRate))
+            .partition(|m| {
+                matches!(
+                    m.key,
+                    DpiStage1 | DpiStage2 | DpiStage3 | DpiStage4 | DpiStage5 | DpiStageActive
+                )
+            });
+    for (title, metas) in [
+        ("DPI stages", stages),
+        (
+            if d.kind == DeviceKind::Mouse {
+                "Sensor"
+            } else {
+                "Response"
+            },
+            rest,
+        ),
+    ] {
+        if !metas.is_empty() {
+            widgets::section(ui, title, |_| {}, |ui| controls::rows(ui, d, &metas, out));
+        }
+    }
+}
+
+/// ChatMix, then output, then the microphone.
+fn audio_tab(ui: &mut egui::Ui, d: &DeviceSnapshot, out: &mut Vec<UiCommand>) {
+    if controls::meta(d, SettingKey::ChatMixGame).is_some() {
+        widgets::section(
+            ui,
+            "ChatMix",
+            |_| {},
+            |ui| {
+                controls::chatmix(ui, d);
+                ui.add_space(theme::SPACE_SM);
+                widgets::hint(
+                    ui,
+                    "Follows the dial on the base station. Send games to Hako_Game and voice chat to Hako_Chat.",
+                );
+            },
+        );
+    }
+    let sound: Vec<&SettingMeta> = group(d, SettingGroup::Audio)
+        .into_iter()
+        .filter(|m| !matches!(m.key, SettingKey::ChatMixGame | SettingKey::ChatMixChat))
+        .collect();
+    if !sound.is_empty() {
+        widgets::section(ui, "Sound", |_| {}, |ui| controls::rows(ui, d, &sound, out));
+    }
+    let mic = group(d, SettingGroup::Microphone);
+    if !mic.is_empty() {
+        widgets::section(
+            ui,
+            "Microphone",
+            |_| {},
+            |ui| controls::rows(ui, d, &mic, out),
+        );
+    }
+}
+
+/// Power, onboard memory and what the device is.
+fn device_tab(ui: &mut egui::Ui, d: &DeviceSnapshot, out: &mut Vec<UiCommand>) {
+    let power = group(d, SettingGroup::Power);
+    if !power.is_empty() {
+        widgets::section(ui, "Power", |_| {}, |ui| controls::rows(ui, d, &power, out));
+    }
+    let memory = group(d, SettingGroup::Memory);
+    if !memory.is_empty() {
+        let saved: Vec<&str> = controls::visible(d)
+            .filter(|m| {
+                m.persistent && m.blocked.is_none() && m.key.group() != SettingGroup::Memory
+            })
+            .map(|m| m.label.as_str())
+            .collect();
+        widgets::section(
+            ui,
+            "Device memory",
+            |_| {},
+            |ui| {
+                controls::rows(ui, d, &memory, out);
+                if !saved.is_empty() {
+                    ui.add_space(theme::SPACE_XS);
+                    widgets::hint(
+                        ui,
+                        &format!(
+                            "When allowed, {} {} written to the device itself, only when you change {}. Profiles never include {}.",
+                            saved.join(", "),
+                            if saved.len() == 1 { "is" } else { "are" },
+                            if saved.len() == 1 { "it" } else { "one" },
+                            if saved.len() == 1 { "it" } else { "them" },
+                        ),
+                    );
+                }
+            },
+        );
+    }
+    widgets::section(
+        ui,
+        "About this device",
+        |_| {},
+        |ui| {
+            let fact = widgets::fact;
+            fact(ui, "Model", &d.name);
+            fact(ui, "Type", kind_label(d.kind));
+            fact(
+                ui,
+                "USB ID",
+                &format!("{:04x}:{:04x}", d.id.vendor_id, d.id.product_id),
+            );
+            for b in &d.batteries {
+                let pct = b.percent.map_or("—".into(), |p| format!("{p}%"));
+                let text = if b.charging {
+                    format!("{pct}, charging")
+                } else {
+                    pct
+                };
+                let name = if d.batteries.len() == 1 {
+                    "Battery".to_string()
+                } else {
+                    format!("{} battery", b.label)
+                };
+                fact(ui, &name, &text);
+            }
+            ui.add_space(theme::SPACE_XS);
+            widgets::divider(ui);
+            let problem = d.last_error.as_deref().filter(|_| d.connected);
+            widgets::row(ui, "Status", problem, |ui| match (d.connected, problem) {
+                (false, _) => {
+                    widgets::pill(ui, "Unavailable", pal().danger);
+                }
+                (true, Some(_)) => {
+                    widgets::pill(ui, "Warning", pal().warn);
+                }
+                (true, None) => {
+                    widgets::pill(ui, "Connected", pal().ok);
+                }
+            });
+        },
+    );
 }
 
 fn lighting_tab(
@@ -898,28 +986,45 @@ fn lighting_tab(
     metas: &[&SettingMeta],
     out: &mut Vec<UiCommand>,
 ) {
-    let effect = metas.iter().find(|m| m.key == SettingKey::Effect).copied();
-    if let Some(m) = effect {
+    let find = |k: SettingKey| metas.iter().find(|m| m.key == k).copied();
+    let Some(effect) = find(SettingKey::Effect) else {
         widgets::section(
             ui,
-            "Effect",
+            "Lighting",
             |_| {},
-            |ui| controls::gated(ui, d, m, |ui| controls::effect_tiles(ui, d, m, out)),
+            |ui| controls::rows(ui, d, metas, out),
         );
-    }
-    let rest: Vec<&SettingMeta> = metas
+        return;
+    };
+    // Brightness applies to every effect, so it sits in the card's header;
+    // what the chosen effect offers (color, speed, direction) follows its tiles.
+    let brightness = find(SettingKey::Brightness);
+    let options: Vec<&SettingMeta> = metas
         .iter()
-        .filter(|m| m.key != SettingKey::Effect)
+        .filter(|m| !matches!(m.key, SettingKey::Effect | SettingKey::Brightness))
         .copied()
         .collect();
-    if !rest.is_empty() {
-        widgets::section(
-            ui,
-            "Customize",
-            |_| {},
-            |ui| controls::rows(ui, d, &rest, out),
-        );
-    }
+    let mut header_out = Vec::new();
+    widgets::section(
+        ui,
+        "Effect",
+        |ui| {
+            if let Some(b) = brightness {
+                controls::inline_slider(ui, d, b, &mut header_out);
+            }
+        },
+        |ui| {
+            controls::gated(ui, d, effect, |ui| {
+                controls::effect_tiles(ui, d, effect, out)
+            });
+            if !options.is_empty() {
+                ui.add_space(theme::SPACE_SM);
+                widgets::divider(ui);
+                controls::rows(ui, d, &options, out);
+            }
+        },
+    );
+    out.append(&mut header_out);
 }
 
 fn device_header(ui: &mut egui::Ui, d: &DeviceSnapshot) {
@@ -943,10 +1048,16 @@ fn device_header(ui: &mut egui::Ui, d: &DeviceSnapshot) {
             .percent
             .map(|p| format!("{p}%"))
             .unwrap_or_else(|| "—".into());
-        let sub = if b.charging {
-            format!("{} · charging", b.label)
+        // One battery needs no name (drivers often call it after the device).
+        let name = if d.batteries.len() == 1 {
+            "Battery"
         } else {
-            b.label.clone()
+            b.label.as_str()
+        };
+        let sub = if b.charging {
+            format!("{name} · charging")
+        } else {
+            name.to_string()
         };
         let pct = p.layout_no_wrap(pct, big.clone(), pal().text);
         let sub = p.layout_no_wrap(sub, small.clone(), pal().text_faint);
@@ -1056,7 +1167,9 @@ fn tab_bar(ui: &mut egui::Ui, id: egui::Id, tabs: &[&str], active: usize) -> Opt
 
 fn empty_state(ui: &mut egui::Ui, connected: bool, daemon_error: &Option<String>) {
     ui.vertical_centered(|ui| {
-        ui.add_space(theme::SPACE_XL * 3.0);
+        ui.add_space(theme::SPACE_XL * 2.5);
+        brand::pip(ui, 88.0, !connected);
+        ui.add_space(theme::SPACE_MD);
         let (title, body) = match daemon_error {
             Some(e) if !connected => ("Waiting for the daemon", e.as_str()),
             _ if connected => (

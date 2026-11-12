@@ -1,5 +1,8 @@
 //! Arctis Nova Pro Wireless (0x12e0 / 0x12e5) — port of known HID protocol.
-//! Base (`12e0`) and X (`12e5`) GameDACs speak the same protocol.
+//! Base (`12e0`) and X (`12e5`) GameDACs speak the same protocol. The X
+//! (white) `225d` shares it per Linux-Arctis-Manager `nova_pro_wireless.yaml`
+//! (same variant list and interface 4), the only source listing that PID, so
+//! it never gets the `06 09` flash save.
 
 use crate::drivers::{DeviceAdapter, DriverCtx, Opened};
 use crate::hid::{find_hidraw, pad64, HidrawDevice};
@@ -146,6 +149,9 @@ impl SteelSeriesAdapter {
     /// Kept byte-identical (hardware-verified driver); not behind the
     /// onboard-memory opt-in yet, see `docs/onboard-writes/steelseries.md`.
     fn commit(&mut self) -> Result<()> {
+        if !saves_after_set(self.id.product_id) {
+            return Ok(());
+        }
         self.write_cmd(&[0x06, 0x09, 0x00])
     }
 
@@ -324,6 +330,12 @@ impl SteelSeriesAdapter {
             settings,
         )
     }
+}
+
+/// `225d` is listed by one source only: its setters stay volatile (they are
+/// re-sent on open).
+fn saves_after_set(pid: u16) -> bool {
+    pid != 0x225d
 }
 
 /// Headset (percent, charging, online) from status byte \[15\]:
@@ -550,6 +562,12 @@ mod tests {
         assert_eq!(battery_pct(7), Some(88));
         assert_eq!(battery_pct(8), Some(100));
         assert_eq!(battery_pct(0xff), None);
+    }
+
+    #[test]
+    fn only_the_white_x_skips_the_flash_save() {
+        assert!(saves_after_set(0x12e0) && saves_after_set(0x12e5));
+        assert!(!saves_after_set(0x225d));
     }
 
     #[test]

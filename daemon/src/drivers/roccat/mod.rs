@@ -15,6 +15,9 @@
 //! - libratbag `src/driver-roccat.c`, `driver-roccat-kone-pure.c`,
 //!   `driver-roccat-kone-emp.c`, `data/devices/roccat-*.device` (MIT):
 //!   <https://github.com/libratbag/libratbag>
+//! - Eruption `eruption/src/hwdevices/roccat_kone_pro_air.rs` (GPL, layout
+//!   only): Kone Pro Air battery query `90 0a`:
+//!   <https://github.com/eruption-project/eruption>
 //!
 //! Every ROCCAT mode/effect write in those sources is a profile write (report
 //! 0x06 on mice, 0x0D/0x11 on keyboards, flagged "automatic save" by OpenRGB),
@@ -37,7 +40,7 @@ use crate::hid::{enumerate_hidraw, HidDeviceInfo, HidrawDevice};
 use anyhow::{bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
-use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
+use hako_core::device::{BatteryState, DeviceId, DeviceKind, DeviceSnapshot};
 use std::time::{Duration, Instant};
 use tracing::info;
 
@@ -193,7 +196,18 @@ trait Lights: Send {
     }
     /// Hand lighting back to the firmware when the protocol allows it.
     fn release(&mut self) {}
+    /// The battery's label, for devices whose [`Lights::battery`] reads one.
+    fn battery_label(&self) -> Option<&'static str> {
+        None
+    }
+    /// Battery percentage; `None` when the device does not answer.
+    fn battery(&mut self) -> Option<u8> {
+        None
+    }
 }
+
+/// How often a battery is read.
+const BATTERY_POLL: Duration = Duration::from_secs(60);
 
 /// Placeholder for an onboard lighting save the sources do not confirm.
 fn save_blocked(reason: &str) -> SettingMeta {
@@ -224,6 +238,8 @@ struct Adapter {
     settings: SettingsMap,
     paths: ConfigPaths,
     last_error: Option<String>,
+    battery: Option<BatteryState>,
+    last_poll: Option<Instant>,
 }
 
 impl Adapter {
@@ -237,6 +253,12 @@ impl Adapter {
         ctx: &DriverCtx,
     ) -> Opened {
         let settings = hako_core::config::load_device_settings(&ctx.paths, spec.vid, spec.pids[0])?;
+        let battery = lights.battery_label().map(|label| BatteryState {
+            label: label.into(),
+            percent: None,
+            charging: false,
+            present: false,
+        });
         let mut a = Adapter {
             id: DeviceId {
                 vendor_id: spec.vid,
@@ -250,6 +272,8 @@ impl Adapter {
             settings,
             paths: ctx.paths.clone(),
             last_error: None,
+            battery,
+            last_poll: None,
         };
         info!("{} open", spec.name);
         let mut result = Ok(());
@@ -324,7 +348,7 @@ impl DeviceAdapter for Adapter {
             kind: self.kind,
             name: self.name.into(),
             connected: self.lights.is_some(),
-            batteries: vec![],
+            batteries: self.battery.iter().cloned().collect(),
             settings: self.settings.clone(),
             controls,
             last_error: self.last_error.clone(),
@@ -361,6 +385,15 @@ impl DeviceAdapter for Adapter {
     }
 
     fn tick(&mut self) -> Result<()> {
+        let (Some(b), Some(l)) = (self.battery.as_mut(), self.lights.as_mut()) else {
+            return Ok(());
+        };
+        if self.last_poll.is_some_and(|t| t.elapsed() < BATTERY_POLL) {
+            return Ok(());
+        }
+        self.last_poll = Some(Instant::now());
+        b.percent = l.battery();
+        b.present = b.percent.is_some();
         Ok(())
     }
 
@@ -371,19 +404,24 @@ impl DeviceAdapter for Adapter {
     }
 }
 
-/// Reads input reports until `stop` matches or `timeout` passes.
-fn read_until(dev: &mut HidrawDevice, timeout: Duration, stop: impl Fn(&[u8]) -> bool) -> bool {
+/// Reads input reports until `stop` matches (returning that report) or
+/// `timeout` passes.
+fn read_until(
+    dev: &mut HidrawDevice,
+    timeout: Duration,
+    stop: impl Fn(&[u8]) -> bool,
+) -> Option<Vec<u8>> {
     let deadline = Instant::now() + timeout;
     let mut buf = [0u8; 64];
     for _ in 0..32 {
         let left = deadline.saturating_duration_since(Instant::now());
         match dev.read_timeout(&mut buf, left) {
-            Ok(n) if stop(&buf[..n]) => return true,
+            Ok(n) if stop(&buf[..n]) => return Some(buf[..n].to_vec()),
             Ok(_) => {}
-            Err(_) => return false,
+            Err(_) => return None,
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]

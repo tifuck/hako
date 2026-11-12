@@ -1,9 +1,19 @@
 //! Logitech "Centurion" headsets: PRO X 2 LIGHTSPEED (`0af7`), PRO X 3
-//! LIGHTSPEED (`0b45`), G522 LIGHTSPEED (`0b18`).
+//! LIGHTSPEED (`0b45`), G522 LIGHTSPEED (`0b18` dongle, `0b19` USB cable).
 //!
 //! The dongle speaks HID++-like requests in 64-byte frames on its usage page
 //! 0xFFA0 node; the headset sits behind a bridge feature (0x0003) and is
 //! reached through bridge messages. Feature indexes are looked up by id.
+//!
+//! A headset on its USB cable (G522 `0b19`) has no bridge: it answers direct
+//! requests itself, in 0x50 frames whose address byte is unknown until
+//! probed (Root fn 1 to each address 0x00..=0xFF, 5 ms each; the reply
+//! carries the address at byte 1). Sources: Solaar `base.py`
+//! `probe_centurion_device_addr` and `centurion.py`
+//! `create_centurion_receiver` (no bridge = direct device), OpenRGB
+//! `LogitechHIDPP20Controller.cpp` `DiscoverTransport` (same sweep); PID
+//! `0b19` from Solaar `descriptors.py` and OpenRGB
+//! `LOGITECH_G522_LIGHTSPEED_USB_PID`.
 //!
 //! Layouts reimplemented from HeadsetControl (no code copied):
 //! `lib/devices/protocols/logitech_centurion_protocol.hpp` (framing, bridge,
@@ -65,6 +75,8 @@ enum AutoSleep {
 #[derive(Debug)]
 pub struct Spec {
     pid: u16,
+    /// The same headset on its USB cable (direct, address probed).
+    wired_pid: Option<u16>,
     prefix: &'static [u8],
     /// Sidetone device range 0..=max.
     sidetone_max: Option<u8>,
@@ -80,6 +92,7 @@ pub struct Spec {
 const SPECS: &[Spec] = &[
     Spec {
         pid: 0x0af7,
+        wired_pid: None,
         prefix: &[0x51],
         sidetone_max: Some(100),
         sidetone_readable: false,
@@ -91,6 +104,7 @@ const SPECS: &[Spec] = &[
     },
     Spec {
         pid: 0x0b45,
+        wired_pid: None,
         prefix: &[0x50, 0x23],
         sidetone_max: None,
         sidetone_readable: false,
@@ -101,6 +115,7 @@ const SPECS: &[Spec] = &[
     },
     Spec {
         pid: 0x0b18,
+        wired_pid: Some(0x0b19),
         prefix: &[0x50, 0x23],
         sidetone_max: Some(9),
         sidetone_readable: true,
@@ -113,8 +128,14 @@ const SPECS: &[Spec] = &[
 ];
 
 pub fn spec(pid: u16) -> Option<&'static Spec> {
-    SPECS.iter().find(|s| s.pid == pid)
+    SPECS
+        .iter()
+        .find(|s| s.pid == pid || s.wired_pid == Some(pid))
 }
+
+/// Report id of addressed (0x50) frames; a wired headset's address follows.
+const ADDRESSED: u8 = 0x50;
+const PROBE_WAIT: Duration = Duration::from_millis(5);
 
 // ── Framing ──────────────────────────────────────────────────────────────────
 
@@ -224,12 +245,30 @@ pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         .collect();
     nodes.sort_by_key(|d| d.interface);
     let info = nodes.first().context("no Centurion (0xFFA0) interface")?;
-    let dev = HidrawDevice::open(&info.path)?;
+    let mut dev = HidrawDevice::open(&info.path)?;
+    let wired = if pid == spec.pid {
+        None
+    } else {
+        Some(probe_address(&mut dev).context("headset did not answer")?)
+    };
     Ok(vec![Box::new(CenturionHeadset::new(
         spec,
         dev,
+        wired,
         ctx.paths.clone(),
     )?)])
+}
+
+/// Root fn 1 (ping) to each 0x50 address until one answers.
+fn probe_address(dev: &mut HidrawDevice) -> Option<u8> {
+    dev.drain(Duration::from_millis(1));
+    let mut buf = [0u8; FRAME];
+    (0..=255u8).find_map(|addr| {
+        let f = frame(&[ADDRESSED, addr], &direct_payload(0x00, 0x10, &[0, 0, 0]));
+        dev.write(&f).ok()?;
+        let n = dev.read_timeout(&mut buf, PROBE_WAIT).ok()?;
+        (n >= 2 && buf[0] == ADDRESSED).then_some(buf[1])
+    })
 }
 
 struct CenturionHeadset {
@@ -237,6 +276,10 @@ struct CenturionHeadset {
     spec: &'static Spec,
     name: &'static str,
     dev: Option<HidrawDevice>,
+    /// Frame prefix; a wired headset's carries its probed address.
+    prefix: Vec<u8>,
+    /// Through the dongle's bridge (false: wired, direct requests).
+    bridged: bool,
     paths: ConfigPaths,
     bridge: Option<u8>,
     /// Feature id → headset feature index (None = not supported).
@@ -250,7 +293,13 @@ struct CenturionHeadset {
 }
 
 impl CenturionHeadset {
-    fn new(spec: &'static Spec, dev: HidrawDevice, paths: ConfigPaths) -> Result<Self> {
+    /// `wired`: the probed address of a headset on its cable.
+    fn new(
+        spec: &'static Spec,
+        dev: HidrawDevice,
+        wired: Option<u8>,
+        paths: ConfigPaths,
+    ) -> Result<Self> {
         let chosen = hako_core::config::load_device_settings(&paths, VID, spec.pid)?;
         let name = super::MODELS
             .iter()
@@ -265,6 +314,8 @@ impl CenturionHeadset {
             spec,
             name,
             dev: Some(dev),
+            prefix: wired.map_or_else(|| spec.prefix.to_vec(), |a| vec![ADDRESSED, a]),
+            bridged: wired.is_none(),
             paths,
             bridge: None,
             feats: HashMap::new(),
@@ -290,7 +341,7 @@ impl CenturionHeadset {
     }
 
     fn read(&mut self, deadline: Instant) -> Result<Vec<u8>> {
-        let prefix = self.spec.prefix;
+        let prefix = self.prefix.clone();
         let dev = self.dev()?;
         let mut buf = [0u8; FRAME];
         loop {
@@ -299,7 +350,7 @@ impl CenturionHeadset {
                 bail!("Centurion timeout");
             }
             if let Ok(n) = dev.read_timeout(&mut buf, left) {
-                if let Some(p) = payload(prefix, &buf[..n]) {
+                if let Some(p) = payload(&prefix, &buf[..n]) {
                     return Ok(p.to_vec());
                 }
             }
@@ -308,7 +359,7 @@ impl CenturionHeadset {
 
     /// Direct request to a dongle feature; the reply must echo index + fn.
     fn direct(&mut self, index: u8, function: u8, params: &[u8]) -> Result<Vec<u8>> {
-        let f = frame(self.spec.prefix, &direct_payload(index, function, params));
+        let f = frame(&self.prefix, &direct_payload(index, function, params));
         let dev = self.dev()?;
         dev.drain(Duration::from_millis(1));
         dev.write(&f)?;
@@ -328,7 +379,7 @@ impl CenturionHeadset {
         if p.len() - 4 > MAX_BRIDGE_MESSAGE {
             bail!("Centurion message too long");
         }
-        let f = frame(self.spec.prefix, &p);
+        let f = frame(&self.prefix, &p);
         let dev = self.dev()?;
         dev.drain(Duration::from_millis(1));
         dev.write(&f)?;
@@ -347,8 +398,18 @@ impl CenturionHeadset {
         }
     }
 
-    /// Headset feature index of `fid` (Root.getFeature through the bridge).
+    /// Headset feature index of `fid` (Root.getFeature, through the bridge
+    /// unless wired).
     fn feature(&mut self, fid: u16) -> Result<u8> {
+        if !self.bridged {
+            if let Some(&known) = self.feats.get(&fid) {
+                return known.context("feature not supported");
+            }
+            let r = self.direct(0x00, 0x00, &fid.to_be_bytes())?;
+            let idx = r.first().copied().filter(|&i| i != 0 || fid == FEAT_ROOT);
+            self.feats.insert(fid, idx);
+            return idx.context("feature not supported");
+        }
         if self.bridge.is_none() {
             // Root (index 0) fn 0 [id] on the dongle → [index, flags, version].
             let r = self.direct(0x00, 0x00, &FEAT_BRIDGE.to_be_bytes())?;
@@ -368,7 +429,11 @@ impl CenturionHeadset {
 
     fn call(&mut self, fid: u16, function: u8, params: &[u8]) -> Result<Vec<u8>> {
         let idx = self.feature(fid)?;
-        self.bridged(idx, function, params)
+        if self.bridged {
+            self.bridged(idx, function, params)
+        } else {
+            self.direct(idx, function, params)
+        }
     }
 
     fn poll(&mut self) {
@@ -384,7 +449,8 @@ impl CenturionHeadset {
                 self.battery.charging = charging;
             }
             Ok(None) | Err(_) => {
-                self.online = false;
+                // On its cable the headset is there whenever its node is.
+                self.online = !self.bridged;
                 self.battery.percent = None;
                 self.battery.charging = false;
             }
@@ -648,6 +714,11 @@ mod tests {
             assert!(eq[0].persistent && eq[0].blocked.as_deref() == Some(s.eq_block));
         }
         assert_eq!(spec(0x0b18).unwrap().prefix, &[0x50, 0x23]);
+        // Wired G522 shares the dongle's spec; its address is probed with
+        // Root fn 1 in a 0x50 frame (Solaar probe_centurion_device_addr).
+        assert_eq!(spec(0x0b19).unwrap().pid, 0x0b18);
+        let f = frame(&[ADDRESSED, 0x23], &direct_payload(0x00, 0x10, &[0, 0, 0]));
+        assert_eq!(&f[..10], &[0x50, 0x23, 0x06, 0x00, 0x00, 0x11, 0, 0, 0, 0]);
         assert_eq!(spec(0x0af7).unwrap().prefix, &[0x51]);
         assert!(spec(0x0aba).is_none());
     }

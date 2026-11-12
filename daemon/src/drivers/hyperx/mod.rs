@@ -4,6 +4,7 @@
 //! - HeadsetControl `lib/devices/hyperx_*.hpp` (GPL, layouts only):
 //!   <https://github.com/Sapd/HeadsetControl/tree/master/lib/devices>
 //! - HyperHeadset `src/devices/*.rs` (MIT): <https://github.com/LennardKittner/HyperHeadset>
+//! - hsctl `docs/COMMANDS.md` (MIT, Cloud Stinger 2 Wireless): <https://github.com/oauthul/hsctl>
 //! - ngenuity-linux-cli `docs/protocol/universal.md` and
 //!   `docs/devices/pulsefire-haste-2-wireless.md`: <https://github.com/PMarinov1994/ngenuity-linux-cli>
 //! - OpenRGB `Controllers/HyperXMouseController`, `Controllers/HyperXKeyboardController`
@@ -69,6 +70,7 @@ macro_rules! model {
 pub const MODELS: &[Model] = &[
     model!(Headset, headset::CLOUD_II),
     model!(Headset, headset::CLOUD_II_HP),
+    model!(Headset, headset::CLOUD_STINGER_2),
     model!(Headset, headset::CLOUD_III),
     model!(Headset, headset::CLOUD_III_S),
     model!(Headset, headset::CLOUD_II_CORE),

@@ -37,7 +37,7 @@ cat > "$PKG/DEBIAN/control" <<EOF
 Package: hako
 Version: $VERSION
 Architecture: $ARCH
-Maintainer: Hako maintainers <173309113+tifuck@users.noreply.github.com>
+Maintainer: hako maintainers <173309113+tifuck@users.noreply.github.com>
 Installed-Size: $(du -sk --exclude=DEBIAN "$PKG" | cut -f1)
 Depends: $LINKED, $RUNTIME, systemd, udev
 Recommends: pipewire-bin, wireplumber, alsa-utils, curl, pkexec | policykit-1
@@ -46,7 +46,7 @@ Section: utils
 Priority: optional
 Homepage: https://github.com/tifuck/Hako
 Description: control panel for gaming keyboards, mice and headsets
- Hako replaces vendor tools (Synapse, G HUB, iCUE, GG, NGENUITY, Armoury
+ hako replaces vendor tools (Synapse, G HUB, iCUE, GG, NGENUITY, Armoury
  Crate) with one background service and one native window: lighting, DPI,
  polling rate, key bindings and macros, headset battery, sidetone, ChatMix
  and line-in monitoring for Razer, Logitech, SteelSeries, Corsair, HyperX,

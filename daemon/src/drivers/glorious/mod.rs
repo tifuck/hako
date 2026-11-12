@@ -16,6 +16,14 @@
 //!   asked; the receiver pushes input report 6 `06 fb <percent> <toggle>` on
 //!   interface 1 every 20-40 s while the mouse is used. No frames arrive while
 //!   the cable (`821a`) is plugged in, which is the only charging signal.
+//! - Model O 2 Wireless (PixArt, dongle `822d`, cable `822a`): o2ctl (MIT)
+//!   `docs/PROTOCOL.md`, `o2ctl/protocol.py`, `o2ctl/device.py`
+//!   <https://github.com/danexpo/o2ctl>. The same interface-1 frames, but
+//!   `06 fb <percent> <charging>` carries a charge flag. Over the cable the
+//!   mouse sends no frames and is asked instead: feature report 3
+//!   `03 08 fa 14`, wait 50 ms, read report 3 back as `03 08 14 <percent>
+//!   <charging>` (up to three tries, once a minute). Bluetooth (`822b`) is
+//!   left to the generic driver, as the Model I 2's is.
 //!
 //! DPI, report rate and lighting of the wireless mice are blocked
 //! placeholders: every documented path writes onboard profile storage
@@ -24,7 +32,8 @@
 //! confident enough (Model O/D Wireless: mxw alone for DPI, rate, debounce and
 //! lift-off, OpenRGB and mxw disagree on the static-color packet, and mxw's
 //! README says its author bricked mice while writing it; Model I 2: one
-//! write-only source). Nothing here writes a wireless setting. Research:
+//! write-only source; Model O 2: write-only, o2ctl only). Nothing here writes
+//! a wireless setting. Research:
 //! `docs/onboard-writes/glorious.md`.
 
 mod wired;
@@ -39,8 +48,6 @@ use tracing::info;
 
 const SINOWEALTH: u16 = 0x258a;
 const PIXART: u16 = 0x093a;
-const I2_RECEIVER: u16 = 0x821d;
-const I2_CABLE: u16 = 0x821a;
 
 /// SinoWealth wireless mouse: cable PID first (mxw prefers it when both are
 /// present), then the dongle.
@@ -58,18 +65,27 @@ macro_rules! sino {
     };
 }
 
+/// PixArt wireless mouse: receiver PID first, it is opened when both are
+/// present.
+macro_rules! pixart {
+    ($spec:ident) => {
+        Model {
+            vendor_id: PIXART,
+            product_ids: &[$spec.receiver, $spec.cable],
+            kind: DeviceKind::Mouse,
+            name: $spec.name,
+            usbfs: false,
+            multi: false,
+            open: |pid, _| PixArtMouse::open(&$spec, pid),
+        }
+    };
+}
+
 pub const MODELS: &[Model] = &[
     sino!("Glorious Model O Wireless", 0x2011, 0x2022),
     sino!("Glorious Model D Wireless", 0x2012, 0x2023),
-    Model {
-        vendor_id: PIXART,
-        product_ids: &[I2_RECEIVER, I2_CABLE],
-        kind: DeviceKind::Mouse,
-        name: "Glorious Model I 2 Wireless",
-        usbfs: false,
-        multi: false,
-        open: |pid, _| I2Mouse::open(pid),
-    },
+    pixart!(I2),
+    pixart!(O2),
     sino!("Glorious Model O- Wireless", 0x2013, 0x2024),
     sino!("Glorious Model D- Wireless", 0x2014, 0x2025),
     Model {
@@ -94,7 +110,6 @@ pub const MODELS: &[Model] = &[
 
 const GMOW_BLOCKED: &str = "one source (mxw), whose author bricked mice writing it; \
 nothing can be read back";
-const I2_BLOCKED: &str = "write-only protocol (nothing can be read back), one source (glorious-i2)";
 
 /// Blocked placeholders for the onboard settings of a wireless mouse.
 /// `max_dpi`: Model O/D Wireless sensor 19000, Model I 2 26000 (glorious-i2).
@@ -308,73 +323,167 @@ impl DeviceAdapter for SinoMouse {
     }
 }
 
-// ── PixArt Model I 2 Wireless ──────────────────────────────────────────────
+// ── PixArt Model I 2 / O 2 Wireless ────────────────────────────────────────
+
+struct PixArt {
+    name: &'static str,
+    receiver: u16,
+    cable: u16,
+    blocked: &'static str,
+    /// Battery frame byte 3 is a charge flag (o2ctl); on the I 2 it toggles.
+    charge_flag: bool,
+    /// The cable answers the `08` battery query (o2ctl).
+    cable_query: bool,
+}
+
+const I2: PixArt = PixArt {
+    name: "Glorious Model I 2 Wireless",
+    receiver: 0x821d,
+    cable: 0x821a,
+    blocked: "write-only protocol (nothing can be read back), one source (glorious-i2)",
+    charge_flag: false,
+    cable_query: false,
+};
+
+const O2: PixArt = PixArt {
+    name: "Glorious Model O 2 Wireless",
+    receiver: 0x822d,
+    cable: 0x822a,
+    blocked: "write-only protocol (nothing can be read back), one source (o2ctl)",
+    charge_flag: true,
+    cable_query: true,
+};
 
 /// Frames are pushed between mouse reports on the same node, so each tick
 /// keeps reading for most of its interval.
 const I2_TICK: Duration = Duration::from_millis(200);
 const I2_READ: Duration = Duration::from_millis(180);
 const CABLE_CHECK: Duration = Duration::from_secs(2);
+/// o2ctl asks the cable once a minute.
+const CABLE_POLL: Duration = Duration::from_secs(60);
 
-/// `06 fb <percent> <toggle>`; the all-zero frame that follows and the `f9`
-/// (button) / `f6` (profile) frames are not levels. The toggle is not a
-/// charge flag.
-fn parse_frame(r: &[u8]) -> Option<u8> {
+/// `06 fb <percent> <flag>`; the all-zero frame that follows and the `f9`
+/// (button) / `f6` (profile) frames are not levels.
+fn parse_frame(r: &[u8]) -> Option<(u8, bool)> {
     match r {
-        [0x06, 0xfb, pct @ 1..=100, _, ..] => Some(*pct),
+        [0x06, 0xfb, pct @ 1..=100, flag, ..] => Some((*pct, *flag != 0)),
         _ => None,
     }
 }
 
-fn cable_present() -> bool {
+/// Model O 2 cable battery query (o2ctl `battery_query_packet`, cable route `fa`).
+fn cable_query() -> [u8; 64] {
+    let mut b = [0u8; 64];
+    b[..4].copy_from_slice(&[0x03, 0x08, 0xfa, 0x14]);
+    b
+}
+
+/// Feature report 3 after a query, report id first: `03 08 14 <percent>
+/// <charging>`. o2ctl shows 0 % as 1 %; `ff` = no answer yet.
+fn parse_query_reply(r: &[u8]) -> Option<(u8, bool)> {
+    match r {
+        [0x03, 0x08, 0x14, pct @ 0..=100, charging, ..] => Some(((*pct).max(1), *charging != 0)),
+        _ => None,
+    }
+}
+
+fn query_cable_battery(dev: &HidrawDevice) -> Result<Option<(u8, bool)>> {
+    for _ in 0..3 {
+        dev.set_feature(&mut cable_query())?;
+        std::thread::sleep(Duration::from_millis(50));
+        let mut reply = [0u8; 64];
+        reply[0] = 0x03;
+        dev.get_feature(&mut reply)?;
+        if let Some(r) = parse_query_reply(&reply) {
+            return Ok(Some(r));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(None)
+}
+
+fn cable_present(cable: u16) -> bool {
     enumerate_hidraw().is_ok_and(|nodes| {
         nodes
             .iter()
-            .any(|d| d.vendor_id == PIXART && d.product_id == I2_CABLE)
+            .any(|d| d.vendor_id == PIXART && d.product_id == cable)
     })
 }
 
-struct I2Mouse {
+struct PixArtMouse {
+    spec: &'static PixArt,
     id: DeviceId,
-    /// Receiver node; `None` on the cable, which sends no battery frames.
+    /// Opened on the cable only when it answers battery queries.
+    wired: bool,
+    /// Receiver node, or the cable node (`wired`); `None` on a cable that
+    /// sends no battery frames and cannot be asked.
     dev: Option<HidrawDevice>,
     connected: bool,
     battery: BatteryState,
+    /// The last frame's charge flag (`spec.charge_flag` only).
+    flag_charging: bool,
+    /// Last cable presence check, or last query when `wired`.
     cable_checked: Option<Instant>,
     last_error: Option<String>,
 }
 
-impl I2Mouse {
-    const NAME: &'static str = "Glorious Model I 2 Wireless";
-
-    fn open(pid: u16) -> Opened {
-        let (dev, instance) = if pid == I2_RECEIVER {
+impl PixArtMouse {
+    fn open(spec: &'static PixArt, pid: u16) -> Opened {
+        let wired = pid == spec.cable;
+        let (dev, instance) = if !wired || spec.cable_query {
             let (dev, instance) = open_node(PIXART, pid, 1)?;
-            info!("{} open via {}", Self::NAME, dev.path.display());
+            info!("{} open via {}", spec.name, dev.path.display());
             (Some(dev), instance)
         } else {
             let info = crate::hid::find_hidraw(PIXART, pid, Some(1))?;
             (None, info.path.display().to_string())
         };
         let mut battery = mouse_battery();
-        battery.charging = pid == I2_CABLE;
-        battery.present = pid == I2_CABLE;
+        battery.charging = wired;
+        battery.present = wired;
         Ok(vec![Box::new(Self {
+            spec,
             id: DeviceId {
                 vendor_id: PIXART,
                 product_id: pid,
                 instance,
             },
+            wired,
             dev,
             connected: true,
             battery,
+            flag_charging: false,
             cable_checked: None,
             last_error: None,
         })])
     }
+
+    fn poll_cable(&mut self) -> Result<()> {
+        let Some(dev) = self.dev.as_ref() else {
+            return Ok(());
+        };
+        if self.cable_checked.is_some_and(|t| t.elapsed() < CABLE_POLL) {
+            return Ok(());
+        }
+        self.cable_checked = Some(Instant::now());
+        match query_cable_battery(dev) {
+            Ok(reading) => {
+                if let Some((pct, charging)) = reading {
+                    self.battery.percent = Some(pct);
+                    self.battery.charging = charging;
+                }
+                self.last_error = None;
+                Ok(())
+            }
+            Err(e) => {
+                self.last_error = Some(e.to_string());
+                Err(e)
+            }
+        }
+    }
 }
 
-impl DeviceAdapter for I2Mouse {
+impl DeviceAdapter for PixArtMouse {
     fn id(&self) -> &DeviceId {
         &self.id
     }
@@ -382,19 +491,22 @@ impl DeviceAdapter for I2Mouse {
     fn snapshot(&self) -> DeviceSnapshot {
         snapshot(
             &self.id,
-            Self::NAME,
+            self.spec.name,
             self.connected,
             &self.battery,
             &self.last_error,
-            (I2_BLOCKED, 26000.0),
+            (self.spec.blocked, 26000.0),
         )
     }
 
     fn set(&mut self, key: SettingKey, _value: SettingValue) -> Result<()> {
-        bail!("{} has no setting {}", Self::NAME, key.as_str())
+        bail!("{} has no setting {}", self.spec.name, key.as_str())
     }
 
     fn tick(&mut self) -> Result<()> {
+        if self.wired {
+            return self.poll_cable();
+        }
         let Some(dev) = self.dev.as_mut() else {
             return Ok(());
         };
@@ -404,9 +516,10 @@ impl DeviceAdapter for I2Mouse {
             let Ok(n) = dev.read_timeout(&mut buf, left) else {
                 break;
             };
-            if let Some(pct) = parse_frame(&buf[..n]) {
+            if let Some((pct, flag)) = parse_frame(&buf[..n]) {
                 self.battery.percent = Some(pct);
                 self.battery.present = true;
+                self.flag_charging = self.spec.charge_flag && flag;
             }
         }
         if self
@@ -414,14 +527,14 @@ impl DeviceAdapter for I2Mouse {
             .is_none_or(|t| t.elapsed() >= CABLE_CHECK)
         {
             self.cable_checked = Some(Instant::now());
-            self.battery.charging = cable_present();
+            self.battery.charging = cable_present(self.spec.cable) || self.flag_charging;
             self.battery.present |= self.battery.charging;
         }
         Ok(())
     }
 
     fn tick_interval(&self) -> Duration {
-        if self.dev.is_some() {
+        if self.dev.is_some() && !self.wired {
             I2_TICK
         } else {
             Duration::from_secs(1)
@@ -478,8 +591,16 @@ mod tests {
     #[test]
     fn i2_battery_frames() {
         // Captured pair from glorious-i2's monitor notes.
-        assert_eq!(parse_frame(&[0x06, 0xfb, 0x32, 0x00, 0, 0, 0, 0]), Some(50));
-        assert_eq!(parse_frame(&[0x06, 0xfb, 0x32, 0x01, 0, 0, 0, 0]), Some(50));
+        assert_eq!(
+            parse_frame(&[0x06, 0xfb, 0x32, 0x00, 0, 0, 0, 0]),
+            Some((50, false))
+        );
+        assert_eq!(
+            parse_frame(&[0x06, 0xfb, 0x32, 0x01, 0, 0, 0, 0]),
+            Some((50, true))
+        );
+        // o2ctl PROTOCOL.md: `06 fb 2f 00` = 47 % through the O 2 dongle.
+        assert_eq!(parse_frame(&[0x06, 0xfb, 0x2f, 0x00]), Some((47, false)));
         assert_eq!(parse_frame(&[0x06, 0, 0, 0, 0, 0, 0, 0]), None);
         assert_eq!(parse_frame(&[0x06, 0xf9, 0x80, 0x01]), None);
         assert_eq!(parse_frame(&[0x06, 0xf6, 0x02, 0x00]), None);
@@ -488,6 +609,36 @@ mod tests {
         assert_eq!(parse_frame(&[0x06, 0xfb, 0x32]), None);
         // Mouse input reports share the node.
         assert_eq!(parse_frame(&[0x01, 0xfb, 0x32, 0x00]), None);
+    }
+
+    #[test]
+    fn o2_cable_battery_query_matches_o2ctl() {
+        let q = cable_query();
+        assert_eq!(q[..4], [0x03, 0x08, 0xfa, 0x14]);
+        assert!(q[4..].iter().all(|&b| b == 0));
+        // o2ctl PROTOCOL.md, verified over the cable: `08 14 64 01` = 100 %, charging.
+        let reply = |b: &[u8]| {
+            let mut r = [0u8; 64];
+            r[0] = 0x03;
+            r[1..=b.len()].copy_from_slice(b);
+            r
+        };
+        assert_eq!(
+            parse_query_reply(&reply(&[0x08, 0x14, 0x64, 0x01])),
+            Some((100, true))
+        );
+        assert_eq!(
+            parse_query_reply(&reply(&[0x08, 0x14, 0x40, 0x00])),
+            Some((64, false))
+        );
+        assert_eq!(
+            parse_query_reply(&reply(&[0x08, 0x14, 0x00, 0x00])),
+            Some((1, false))
+        );
+        // No answer yet, or a reply to another command.
+        assert_eq!(parse_query_reply(&reply(&[0x08, 0x14, 0xff, 0x00])), None);
+        assert_eq!(parse_query_reply(&reply(&[0x08, 0x06, 0x40, 0x00])), None);
+        assert_eq!(parse_query_reply(&[0u8; 64]), None);
     }
 
     #[test]
@@ -502,6 +653,7 @@ mod tests {
                 (SINOWEALTH, &[0x2011, 0x2022][..]),
                 (SINOWEALTH, &[0x2012, 0x2023][..]),
                 (PIXART, &[0x821d, 0x821a][..]),
+                (PIXART, &[0x822d, 0x822a][..]),
                 (SINOWEALTH, &[0x2013, 0x2024][..]),
                 (SINOWEALTH, &[0x2014, 0x2025][..]),
                 (SINOWEALTH, &[0x0036][..]),

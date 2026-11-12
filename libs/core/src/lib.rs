@@ -1,4 +1,4 @@
-//! Shared types, settings catalog, config, and IPC messages for Hako.
+//! Shared types, settings catalog, config, and IPC messages for hako.
 
 pub mod catalog;
 pub mod config;

@@ -9,10 +9,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-authors = ["Hako"]
+authors = ["hako"]
 
 [workspace.dependencies]
 hako-core = { path = "libs/core" }
@@ -29,3 +29,5 @@ dirs = "6"
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
+# SVG loader (resvg) for the logo, drawn from branding/parts at screen resolution.
+egui_extras = { version = "0.31", default-features = false, features = ["svg"] }

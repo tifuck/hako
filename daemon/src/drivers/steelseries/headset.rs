@@ -7,10 +7,17 @@
 //! - Nova (Arctis 7+, Nova 3P/5/7, GameBuds): report id `0x00`, 64-byte output
 //!   reports, status = `00 b0`, answered by a report starting with `0xb0`.
 //! - Nova 3 (wired): 64-byte feature reports with report id `0x06`.
+//! - Nova Pro (wired GameDAC): 64-byte output reports `06 37` mic level
+//!   (1-10) and `06 39` sidetone (0-3) on interface 4, from
+//!   Linux-Arctis-Manager `base_arctis_nova_pro.yaml` / `nova_pro_wired.yaml`
+//!   only (HeadsetControl has no wired Nova Pro); the hardware-verified
+//!   wireless sibling (`nova_pro.rs`) sends the same two commands.
 //!
 //! Cross-checked against Linux-Arctis-Manager `daemon/device-configs/*.yaml`
 //! (github.com/elegos/Linux-Arctis-Manager); where the two disagree the
-//! feature is left out (see `models.rs`).
+//! feature is left out (see `models.rs`). Arctis 7+ mic level (`00 37`, 1-7)
+//! and mute LED (`00 ae`, 0-3) come from Linux-Arctis-Manager
+//! `base_arctis_7_plus.yaml` only, same bytes as the Nova 7 setters.
 //!
 //! Settings apply live and are re-sent whenever the headset (re)connects.
 //! HeadsetControl follows most setters with a "save state" (`06 09`, `00 09`,
@@ -78,6 +85,8 @@ pub enum Family {
     Nova3,
     /// Arctis GameBuds: battery of each bud.
     GameBuds,
+    /// Arctis Nova Pro wired GameDAC (no battery, nothing to poll).
+    NovaProWired,
 }
 
 /// What the ChatMix dial does.
@@ -298,8 +307,12 @@ fn encode(family: Family, key: SettingKey, v: u8) -> Option<Packet> {
         (ProWireless, PmShutdown) => legacy(&[0x3c, 0xaa, v / 10]),
         (Arctis7Plus | Nova7 | Nova5, MicSideTone) => nova(0x39, v),
         (Arctis7Plus | Nova7 | Nova5, PmShutdown) => nova(0xa3, v),
-        (Nova7 | Nova5, MicVolume) => nova(0x37, v),
-        (Nova7, MicLedBrightness) => nova(0xae, v),
+        (Arctis7Plus | Nova7 | Nova5, MicVolume) => nova(0x37, v),
+        (Arctis7Plus | Nova7, MicLedBrightness) => nova(0xae, v),
+        (NovaProWired, MicVolume | MicSideTone) => {
+            let cmd = if key == MicVolume { 0x37 } else { 0x39 };
+            Some(Packet::Output(pad(&[0x06, cmd, v], 64)))
+        }
         // Nova 5 steps are off / 0x01 / 0x04 / 0x0a.
         (Nova5, MicLedBrightness) => nova(0xae, [0x00, 0x01, 0x04, 0x0a][usize::from(v.min(3))]),
         (Nova7, VolumeLimiter) => nova(0x3a, v.min(1)),
@@ -406,7 +419,7 @@ fn status_request(family: Family) -> Option<Vec<u8>> {
         Family::Arctis7Plus | Family::Nova7 | Family::Nova5 | Family::GameBuds => {
             Some(vec![0x00, 0xb0])
         }
-        Family::Nova3 => None,
+        Family::Nova3 | Family::NovaProWired => None,
     }
 }
 
@@ -642,10 +655,12 @@ pub(super) fn controls(spec: &HeadsetSpec) -> Vec<SettingMeta> {
         c.push(SettingMeta::dropdown(PmShutdown, "Auto-off", options));
     }
     if let Some(max) = spec.mic_volume {
+        // Linux-Arctis-Manager starts these at 1.
+        let min = matches!(spec.family, Family::Arctis7Plus | Family::NovaProWired);
         c.push(SettingMeta::slider(
             MicVolume,
             "Mic level",
-            0.0,
+            f64::from(u8::from(min)),
             max.into(),
             1.0,
         ));
@@ -1162,7 +1177,25 @@ mod tests {
         assert!(feature);
         assert_eq!(b.len(), 64);
         assert_eq!(&b[..3], &[0x06, 0x37, 10]);
-        assert!(encode(Family::Arctis7Plus, MicVolume, 1).is_none());
+        // Arctis 7+ (Linux-Arctis-Manager): 00 37 mic, 00 ae mute LED.
+        assert_eq!(
+            &bytes(encode(Family::Arctis7Plus, MicVolume, 7)).1[..3],
+            &[0x00, 0x37, 7]
+        );
+        assert_eq!(
+            &bytes(encode(Family::Arctis7Plus, MicLedBrightness, 2)).1[..3],
+            &[0x00, 0xae, 2]
+        );
+        assert!(encode(Family::Arctis7Plus, VolumeLimiter, 1).is_none());
+        // Wired Nova Pro: 06 37 / 06 39, 64-byte output reports.
+        let (feature, b) = bytes(encode(Family::NovaProWired, MicVolume, 10));
+        assert!(!feature);
+        assert_eq!((b.len(), &b[..4]), (64, &[0x06, 0x37, 10, 0x00][..]));
+        assert_eq!(
+            &bytes(encode(Family::NovaProWired, MicSideTone, 3)).1[..3],
+            &[0x06, 0x39, 3]
+        );
+        assert!(encode(Family::NovaProWired, PmShutdown, 5).is_none());
         // Volume limiter: 0x3a on the Nova 7, 0x27 on the Nova 5.
         assert_eq!(
             &bytes(encode(Family::Nova7, VolumeLimiter, 1)).1[..3],

@@ -468,19 +468,19 @@ pub(super) fn interval_row(ui: &mut Ui, label: &str, ms: &mut u32) -> bool {
     let mut commit = false;
     widgets::row(ui, label, None, |ui| {
         let rate = 1000.0 / *ms as f32;
-        ui.label(
-            egui::RichText::new(format!("{ms} ms · {rate:.1}/s"))
-                .monospace()
-                .color(pal().text),
-        );
+        ui.label(widgets::value_text(format!("{ms} ms · {rate:.1}/s")));
         let mut v = *ms as f32;
-        ui.spacing_mut().slider_width = (ui.available_width() - 16.0).clamp(80.0, 220.0);
-        let resp = ui.add(
-            // Above 2 s a repeat stops feeling like one; the daemon allows more.
-            egui::Slider::new(&mut v, MIN_INTERVAL_MS as f32..=2000.0)
+        // Above 2 s a repeat stops feeling like one; the daemon allows more.
+        let (min, max) = (MIN_INTERVAL_MS as f32, 2000.0);
+        let width = (ui.available_width() - 16.0).clamp(80.0, 220.0);
+        let resp = widgets::slider(
+            ui,
+            egui::Slider::new(&mut v, min..=max)
                 .logarithmic(true)
                 .show_value(false),
+            width,
         );
+        widgets::knob(ui, &resp, widgets::fraction(v, min, max, true));
         *ms = v.round() as u32;
         commit = resp.drag_stopped() || (resp.changed() && !resp.dragged());
     });

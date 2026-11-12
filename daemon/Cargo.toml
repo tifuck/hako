@@ -3,7 +3,7 @@ name = "hakod"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Hako device daemon: owns HID, audio routing and config for gaming peripherals"
+description = "hako device daemon: owns HID, audio routing and config for gaming peripherals"
 
 [[bin]]
 name = "hakod"

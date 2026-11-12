@@ -7,8 +7,13 @@
 //! `docs/protocols.md` and OpenLinkHub issue #235 (Virtuoso RGB Wireless).
 //! LED counts: ckb-next `led_bragi.c` where listed, else OpenLinkHub
 //! `LEDChannels`, or `(colorPacketLength - 2) / 3` where the two disagree
-//! (what OpenLinkHub declares on the wire). DPI ranges: OpenLinkHub
-//! `minDpiValue`/`maxDpiValue`. Bragi rows were checked against the
+//! (what OpenLinkHub declares on the wire), OpenRGB
+//! `CorsairPeripheralV2Devices.cpp` zones for the KATAR PRO V2 (0x1BBA).
+//! HS80 RGB Wireless receiver 0x0A73: OpenLinkHub `devices.go` /
+//! `headsetdongle.go`. DPI ranges: OpenLinkHub
+//! `minDpiValue`/`maxDpiValue`; NXP mice OpenLinkHub lacks: ckb-next
+//! `usb.c` `mouse_dpi_list` maximum with the GUI's 100 dpi minimum
+//! (`mperfwidget.ui`). Bragi rows were checked against the
 //! OpenLinkHub transfer framing (`[0x08, cmd..]`); devices framed otherwise
 //! (Sabre v2 Pro, Nightsword v2, Slipstream v2) are not listed.
 
@@ -147,21 +152,21 @@ corsair_models! {
 
     // Legacy NXP mice.
     "Corsair M65 RGB ELITE", Mouse, [0x1b5a], nxp_mouse(ZONES, Some((100, 18000)));
-    "Corsair M65 PRO RGB", Mouse, [0x1b2e], nxp_mouse(ZONES, None);
+    "Corsair M65 PRO RGB", Mouse, [0x1b2e], nxp_mouse(ZONES, Some((100, 12000)));
     "Corsair IRONCLAW RGB", Mouse, [0x1b5d], nxp_mouse(ZONES, Some((200, 18000)));
     "Corsair SCIMITAR RGB ELITE", Mouse, [0x1b8b], nxp_mouse(ZONES, Some((100, 18000)));
-    "Corsair SCIMITAR PRO RGB", Mouse, [0x1b3e], nxp_mouse(ZONES, None);
+    "Corsair SCIMITAR PRO RGB", Mouse, [0x1b3e], nxp_mouse(ZONES, Some((100, 16000)));
     "Corsair HARPOON RGB PRO", Mouse, [0x1b75], nxp_mouse(ZONES, Some((200, 12000)));
-    "Corsair HARPOON RGB", Mouse, [0x1b3c], nxp_mouse(ZONES, None);
+    "Corsair HARPOON RGB", Mouse, [0x1b3c], nxp_mouse(ZONES, Some((100, 6000)));
     "Corsair GLAIVE RGB PRO", Mouse, [0x1b74], nxp_mouse(GLAIVE_ZONES, Some((100, 18000)));
-    "Corsair GLAIVE RGB", Mouse, [0x1b34], nxp_mouse(GLAIVE_ZONES, None);
+    "Corsair GLAIVE RGB", Mouse, [0x1b34], nxp_mouse(GLAIVE_ZONES, Some((100, 16000)));
     "Corsair NIGHTSWORD RGB", Mouse, [0x1b5c], nxp_mouse(ZONES, Some((100, 18000)));
-    "Corsair SABRE RGB", Mouse, [0x1b2f], nxp_mouse(ZONES, None);
-    "Corsair SABRE RGB Optical", Mouse, [0x1b32, 0x1b14], nxp_mouse(ZONES, None);
-    "Corsair SABRE RGB Laser", Mouse, [0x1b19], nxp_mouse(ZONES, None);
-    "Corsair M65 RGB", Mouse, [0x1b12], nxp_mouse(ZONES, None);
+    "Corsair SABRE RGB", Mouse, [0x1b2f], nxp_mouse(ZONES, Some((100, 10000)));
+    "Corsair SABRE RGB Optical", Mouse, [0x1b32, 0x1b14], nxp_mouse(ZONES, Some((100, 6400)));
+    "Corsair SABRE RGB Laser", Mouse, [0x1b19], nxp_mouse(ZONES, Some((100, 8200)));
+    "Corsair M65 RGB", Mouse, [0x1b12], nxp_mouse(ZONES, Some((100, 8200)));
     "Corsair SCIMITAR RGB", Mouse, [0x1b1e], nxp_mouse(ZONES, Some((100, 12000)));
-    "Corsair KATAR", Mouse, [0x1b22], nxp_mouse(ZONES, None);
+    "Corsair KATAR", Mouse, [0x1b22], nxp_mouse(ZONES, Some((100, 8000)));
 
     // Bragi keyboards.
     "Corsair K70 RGB PRO", Keyboard, [0x1bc4, 0x1bc6], kb(193);
@@ -201,6 +206,8 @@ corsair_models! {
     "Corsair HARPOON V2 WIRELESS", Mouse, [0x2b2e], mouse_wireless(2, 100, 26000);
     "Corsair KATAR PRO", Mouse, [0x1b93], mouse(1, 200, 12400);
     "Corsair KATAR PRO XT", Mouse, [0x1bac], mouse(1, 100, 18000);
+    // OpenRGB: two single-LED zones (scroll wheel, DPI); no DPI range known.
+    "Corsair KATAR PRO V2", Mouse, [0x1bba], Family::Bragi { leds: 2, dpi: None, wireless: false };
     "Corsair KATAR PRO WIRELESS", Mouse, [0x1b94], mouse_wireless(1, 200, 10000);
     "Corsair M55 RGB PRO", Mouse, [0x1b70], mouse(2, 200, 12400);
     "Corsair M55", Mouse, [0x2b03], mouse(1, 100, 16000);
@@ -230,7 +237,7 @@ corsair_models! {
     "Corsair VOID ELITE Wireless", Headset, [0x0a55, 0x0a51, 0x0a75], Family::Void;
     "Corsair HS70 Wireless", Headset, [0x0a38], Family::Void;
     "Corsair HS70 PRO Wireless", Headset, [0x0a4f], Family::Void;
-    "Corsair VOID USB", Headset, [0x1b2a, 0x1b29, 0x1b1c], Family::VoidWired;
+    "Corsair VOID USB", Headset, [0x1b2a, 0x1b29, 0x1b1c, 0x0a0f], Family::VoidWired;
     "Corsair VOID PRO USB", Headset, [0x0a17, 0x0a1d], Family::VoidWired;
     "Corsair VOID ELITE USB", Headset, [0x0a52, 0x0a56], Family::VoidWired;
 
@@ -238,7 +245,7 @@ corsair_models! {
     "Corsair VIRTUOSO RGB Wireless", Headset, [0x0a42, 0x0a44, 0x0a41, 0x0a43], HEADSET;
     "Corsair VIRTUOSO RGB Wireless SE", Headset, [0x0a3e, 0x0a40, 0x0a3d, 0x0a3f], HEADSET;
     "Corsair VIRTUOSO RGB Wireless XT", Headset, [0x0a64, 0x0a62], HEADSET;
-    "Corsair HS80 RGB Wireless", Headset, [0x0a6b, 0x0a69], HEADSET;
+    "Corsair HS80 RGB Wireless", Headset, [0x0a6b, 0x0a69, 0x0a73], HEADSET;
     "Corsair HS80 MAX Wireless", Headset, [0x0a97, 0x2a0f, 0x2a0c], HEADSET_V2;
     "Corsair VOID Wireless V2", Headset, [0x2a08], HEADSET_V2;
     "Corsair VOID MAX Wireless V2", Headset, [0x2a12, 0x2a05], HEADSET_V2;

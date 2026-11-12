@@ -44,6 +44,9 @@ pub const PROP_POLLRATE: u8 = 0x01;
 pub const PROP_BRIGHTNESS: u8 = 0x02;
 pub const PROP_MODE: u8 = 0x03;
 pub const PROP_ANGLE_SNAP: u8 = 0x07;
+/// Headset sleep timer on (1) / off (0), and its timeout in ms.
+pub const PROP_SLEEP_ENABLED: u8 = 0x0d;
+pub const PROP_SLEEP_TIMEOUT: u8 = 0x0e;
 pub const PROP_BATTERY_LEVEL: u8 = 0x0f;
 pub const PROP_BATTERY_STATUS: u8 = 0x10;
 pub const PROP_PID: u8 = 0x12;
@@ -51,13 +54,26 @@ pub const PROP_APP_VER: u8 = 0x13;
 pub const PROP_DPI_X: u8 = 0x21;
 pub const PROP_DPI_Y: u8 = 0x22;
 pub const PROP_SUBDEVICES: u8 = 0x36;
+/// V2 headsets: 0 = sidetone on, 1 = off (HeadsetControl
+/// `corsair_void_v2w.hpp`, OpenLinkHub `voidV2W.go`); the XT reads it the
+/// other way round.
+pub const PROP_SIDETONE_OFF: u8 = 0x46;
+/// Sidetone level, 0..=1000 in steps of 10.
+pub const PROP_SIDETONE_LEVEL: u8 = 0x47;
 /// Highest poll-rate value the device accepts (read only; ckb-next).
 pub const PROP_MAX_POLLRATE: u8 = 0x96;
+/// Active noise cancellation (0 off; Virtuoso MAX 0..=2), which has to be
+/// off for sidetone.
+pub const PROP_ANC: u8 = 0xd1;
 
 pub const MODE_HARDWARE: u32 = 1;
 pub const MODE_SOFTWARE: u32 = 2;
 /// Brightness property scale (ckb-next, HeadsetControl).
 pub const BRIGHTNESS_MAX: u32 = 1000;
+pub const SIDETONE_LEVEL_MAX: u32 = 1000;
+/// Longest headset sleep timer (HeadsetControl caps it at 90 minutes).
+pub const SLEEP_MAX_MS: u32 = 90 * MINUTE_MS;
+pub const MINUTE_MS: u32 = 60_000;
 
 const RES_LIGHTING: u8 = 0x01;
 const RES_ALT_LIGHTING: u8 = 0x22;
@@ -166,6 +182,10 @@ pub fn storable(prop: u8, value: u32) -> bool {
         PROP_POLLRATE => pollrate_hz(value).is_some(),
         PROP_ANGLE_SNAP => value <= 1,
         PROP_BRIGHTNESS => value <= BRIGHTNESS_MAX,
+        PROP_SLEEP_ENABLED | PROP_SIDETONE_OFF => value <= 1,
+        PROP_SLEEP_TIMEOUT => value <= SLEEP_MAX_MS && value.is_multiple_of(MINUTE_MS),
+        PROP_SIDETONE_LEVEL => value <= SIDETONE_LEVEL_MAX && value.is_multiple_of(10),
+        PROP_ANC => value <= 2,
         _ => false,
     }
 }
@@ -202,23 +222,43 @@ pub fn store(io: &mut impl Props, addr: u8, prop: u8, value: u32) -> Result<()> 
     Ok(())
 }
 
-/// `store` in software mode, which headsets require for writes
-/// (HeadsetControl); a device the host does not drive goes back to hardware
-/// mode afterwards.
+/// `store` each of `writes` on the last of `path`, in software mode, which
+/// headsets require for writes (HeadsetControl). Unless the host already
+/// drives the device (`software`), every address on `path` (a V2 receiver,
+/// then its headset) is switched to software mode first and back to
+/// hardware mode afterwards, also when a write fails.
 pub fn store_in_software(
     io: &mut impl Props,
-    addr: u8,
-    prop: u8,
-    value: u32,
+    path: &[u8],
+    writes: &[(u8, u32)],
     software: bool,
 ) -> Result<()> {
+    let &addr = path.last().context("no address to write")?;
+    let store_all = |io: &mut _| {
+        writes
+            .iter()
+            .try_for_each(|&(prop, value)| store(io, addr, prop, value))
+    };
     if software {
-        return store(io, addr, prop, value);
+        return store_all(io);
     }
-    io.set(addr, PROP_MODE, MODE_SOFTWARE)?;
-    let result = store(io, addr, prop, value);
-    let back = io.set(addr, PROP_MODE, MODE_HARDWARE);
-    result.and(back)
+    let mut switched = 0;
+    let mut result = Ok(());
+    for &a in path {
+        result = io.set(a, PROP_MODE, MODE_SOFTWARE);
+        if result.is_err() {
+            break;
+        }
+        switched += 1;
+    }
+    if result.is_ok() {
+        result = store_all(io);
+    }
+    for &a in path[..switched].iter().rev() {
+        let back = io.set(a, PROP_MODE, MODE_HARDWARE);
+        result = result.and(back);
+    }
+    result
 }
 
 /// One report as written to hidraw: report number 0 for an unnumbered
@@ -472,9 +512,9 @@ impl Backend for Bragi {
         pollrate_hz(self.link.get(self.addr, PROP_POLLRATE).ok()?)
     }
 
-    fn store(&mut self, prop: u8, value: u32) -> Result<()> {
+    fn store(&mut self, writes: &[(u8, u32)]) -> Result<()> {
         let software = self.software == Some(true);
-        store_in_software(&mut self.link, self.addr, prop, value, software)
+        store_in_software(&mut self.link, &[self.addr], writes, software)
     }
 
     fn stored(&mut self, prop: u8) -> Option<u32> {
@@ -603,7 +643,7 @@ mod tests {
     #[test]
     fn store_brackets_software_mode_when_needed() {
         let mut d = fake(PROP_BRIGHTNESS, 1000);
-        store_in_software(&mut d, SELF | 1, PROP_BRIGHTNESS, 0, false).unwrap();
+        store_in_software(&mut d, &[SELF | 1], &[(PROP_BRIGHTNESS, 0)], false).unwrap();
         assert_eq!(
             d.writes,
             [
@@ -614,15 +654,48 @@ mod tests {
         );
         // A failed store still hands the device back to hardware mode.
         let mut d = fake(PROP_BRIGHTNESS, 5000);
-        assert!(store_in_software(&mut d, SELF, PROP_BRIGHTNESS, 0, false).is_err());
+        assert!(store_in_software(&mut d, &[SELF], &[(PROP_BRIGHTNESS, 0)], false).is_err());
         assert_eq!(
             d.writes,
             [(PROP_MODE, MODE_SOFTWARE), (PROP_MODE, MODE_HARDWARE)]
         );
         // Already in software mode (host lighting): no mode switch.
         let mut d = fake(PROP_POLLRATE, 4);
-        store_in_software(&mut d, SELF, PROP_POLLRATE, 3, true).unwrap();
+        store_in_software(&mut d, &[SELF], &[(PROP_POLLRATE, 3)], true).unwrap();
         assert_eq!(d.writes, [(PROP_POLLRATE, 3)]);
+    }
+
+    #[test]
+    fn v2_writes_bracket_receiver_and_headset() {
+        let mut d = Fake {
+            props: [(PROP_SLEEP_ENABLED, 0), (PROP_SLEEP_TIMEOUT, 0)].into(),
+            ..Fake::default()
+        };
+        let writes = [
+            (PROP_SLEEP_ENABLED, 1),
+            (PROP_SLEEP_TIMEOUT, 15 * MINUTE_MS),
+        ];
+        store_in_software(&mut d, &[SELF, SELF | 1], &writes, false).unwrap();
+        assert_eq!(
+            d.writes,
+            [
+                (PROP_MODE, MODE_SOFTWARE),
+                (PROP_MODE, MODE_SOFTWARE),
+                (PROP_SLEEP_ENABLED, 1),
+                (PROP_SLEEP_TIMEOUT, 900_000),
+                (PROP_MODE, MODE_HARDWARE),
+                (PROP_MODE, MODE_HARDWARE)
+            ]
+        );
+        // A timeout that is not whole minutes (or over 90) is never sent, and
+        // nor is anything after it.
+        let mut d = fake(PROP_SLEEP_TIMEOUT, 0);
+        let bad = [(PROP_SLEEP_TIMEOUT, 61_000), (PROP_SIDETONE_OFF, 0)];
+        assert!(store_in_software(&mut d, &[SELF], &bad, true).is_err());
+        assert!(!storable(PROP_SLEEP_TIMEOUT, 91 * MINUTE_MS));
+        assert!(!storable(PROP_SIDETONE_LEVEL, 1005));
+        assert!(!storable(PROP_ANC, 3));
+        assert!(d.writes.is_empty());
     }
 
     #[test]
