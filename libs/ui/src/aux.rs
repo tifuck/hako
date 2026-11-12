@@ -31,8 +31,7 @@ pub fn chain_editor(ui: &mut Ui, chain: &mut AuxEffectChain) -> bool {
     }
 
     let count = chain.effects.len();
-    for index in 0..count {
-        let effect = &mut chain.effects[index];
+    for (index, effect) in chain.effects.iter_mut().enumerate() {
         let row = ui.push_id(effect.id.clone(), |ui| {
             stage_row(
                 ui,
