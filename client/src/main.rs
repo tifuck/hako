@@ -56,8 +56,10 @@ struct ClientState {
     error: Option<String>,
     /// Command outcomes waiting to be shown as toasts.
     notices: Vec<(Tone, String)>,
-    /// Newer release on offer.
-    update: Option<update::Release>,
+    /// Newer release, downloaded and waiting for a restart.
+    update: Option<update::Ready>,
+    /// Looking for or downloading a release.
+    checking: bool,
     /// Installing `update`.
     updating: bool,
 }
@@ -376,11 +378,11 @@ impl App {
         };
         let state = self.state.clone();
         self.rt.spawn_blocking(move || {
-            let res = update::check(repo);
+            let res = fetch_update(repo, &state, true);
             let mut s = state.lock().unwrap();
             match res {
-                Ok(Some(rel)) => s.update = Some(rel),
-                Ok(None) => s.notices.push((
+                Ok(true) => {}
+                Ok(false) => s.notices.push((
                     Tone::Ok,
                     format!("v{} is the latest version", env!("CARGO_PKG_VERSION")),
                 )),
@@ -397,7 +399,7 @@ impl App {
         };
         let rel = {
             let mut s = self.state.lock().unwrap();
-            let Some(rel) = s.update.clone().filter(|_| !s.updating) else {
+            let Some(rel) = s.update.clone().filter(|_| !s.updating && !s.checking) else {
                 return;
             };
             s.updating = true;
@@ -419,8 +421,49 @@ impl App {
     }
 }
 
-/// Background release checks while the UI is open, if the user allows them.
-/// "Later" only hides the offer, so the next check brings it back.
+/// Look for a newer release and download it, so the offer only has to
+/// restart. `Ok(false)` = this build is the latest. `loud` announces the
+/// download (the user clicked "Check now").
+fn fetch_update(repo: &str, state: &Mutex<ClientState>, loud: bool) -> anyhow::Result<bool> {
+    {
+        let mut s = state.lock().unwrap();
+        if s.checking || s.updating {
+            anyhow::bail!("an update is already in progress");
+        }
+        s.checking = true;
+    }
+    let res = (|| {
+        let Some(rel) = update::check(repo)? else {
+            return Ok(false);
+        };
+        let have = state
+            .lock()
+            .unwrap()
+            .update
+            .as_ref()
+            .map(|r| r.version.clone());
+        if have.as_deref() != Some(rel.version.as_str()) {
+            {
+                // The download replaces any older one on disk.
+                let mut s = state.lock().unwrap();
+                s.update = None;
+                if loud {
+                    s.notices
+                        .push((Tone::Ok, format!("Downloading hako v{}…", rel.version)));
+                }
+            }
+            let ready = update::download(&rel)?;
+            state.lock().unwrap().update = Some(ready);
+        }
+        Ok(true)
+    })();
+    state.lock().unwrap().checking = false;
+    res
+}
+
+/// Background release checks while the UI is open, if the user allows them;
+/// a newer release is downloaded, then offered. "Later" only hides the
+/// offer, so the next check brings it back.
 async fn update_checks(repo: &'static str, state: Arc<Mutex<ClientState>>) {
     let mut last: Option<Instant> = None;
     loop {
@@ -436,12 +479,8 @@ async fn update_checks(repo: &'static str, state: Arc<Mutex<ClientState>>) {
             continue;
         }
         last = Some(Instant::now());
-        if let Ok(Ok(Some(rel))) = tokio::task::spawn_blocking(move || update::check(repo)).await {
-            let mut s = state.lock().unwrap();
-            if !s.updating {
-                s.update = Some(rel);
-            }
-        }
+        let state = state.clone();
+        let _ = tokio::task::spawn_blocking(move || fetch_update(repo, &state, false)).await;
     }
 }
 
@@ -494,13 +533,21 @@ async fn refresh(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> bo
     let Some(resp) = call(stream, Method::GetState, serde_json::Value::Null).await else {
         return false;
     };
-    if let Some(hub) = resp
-        .result
-        .and_then(|r| serde_json::from_value::<HubState>(r).ok())
-    {
-        let mut s = state.lock().unwrap();
-        s.hub = Some(hub);
-        s.error = None;
+    let hub = match (resp.result, resp.error) {
+        (Some(r), _) => serde_json::from_value::<HubState>(r)
+            .map_err(|e| format!("hakod sent a state this UI cannot read ({e}); update both")),
+        (None, e) => Err(format!(
+            "hakod could not report its state: {}",
+            e.map_or_else(|| "no reason given".into(), |e| e.message)
+        )),
+    };
+    let mut s = state.lock().unwrap();
+    match hub {
+        Ok(hub) => {
+            s.hub = Some(hub);
+            s.error = None;
+        }
+        Err(e) => s.error = Some(e),
     }
     true
 }

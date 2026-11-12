@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 const VID: u16 = 0x1038;
+/// How often a missing ChatMix is retried.
+const CHATMIX_RETRY: Duration = Duration::from_secs(5);
 /// ChatMix target: the analog output, else any Nova Pro sink.
 const CHATMIX_SINKS: &[&str] = &[
     r"alsa_output\.usb-SteelSeries_Arctis_Nova_Pro_Wireless.*analog",
@@ -27,11 +29,17 @@ const CHATMIX_SINKS: &[&str] = &[
 ];
 
 pub(super) fn open(pid: u16, ctx: &DriverCtx) -> Opened {
-    let cfg = hako_core::config::load_app_config(&ctx.paths).unwrap_or_default();
+    let aux = match hako_core::config::load_app_config(&ctx.paths) {
+        Ok(cfg) => cfg.aux,
+        Err(e) => {
+            warn!("AUX auto-enable skipped: {e:#}");
+            AuxConfig::default()
+        }
+    };
     Ok(vec![Box::new(SteelSeriesAdapter::try_open(
         pid,
         ctx.audio.clone(),
-        cfg.aux,
+        aux,
         ctx.paths.clone(),
     )?)])
 }
@@ -47,6 +55,7 @@ pub struct SteelSeriesAdapter {
     batteries: Vec<BatteryState>,
     last_poll: Instant,
     last_aux_check: Instant,
+    last_chatmix_try: Instant,
     poll_failures: u8,
     audio: Arc<AudioService>,
     /// A dial report arrived since the ChatMix volumes were last pushed.
@@ -106,6 +115,7 @@ impl SteelSeriesAdapter {
             ],
             last_poll: Instant::now() - Duration::from_secs(10),
             last_aux_check: Instant::now(),
+            last_chatmix_try: Instant::now(),
             poll_failures: 0,
             audio,
             mix_dirty: false,
@@ -504,9 +514,7 @@ impl DeviceAdapter for SteelSeriesAdapter {
             }
             SettingKey::AuxEnabled => {
                 let on = value.as_bool().unwrap_or(false);
-                let mut cfg = hako_core::config::load_app_config(&self.paths)
-                    .map(|c| c.aux)
-                    .unwrap_or_default();
+                let mut cfg = hako_core::config::load_app_config(&self.paths)?.aux;
                 if let Some(p) =
                     get_setting(&proposed, SettingKey::AuxCapturePercent).and_then(|v| v.as_int())
                 {
@@ -526,13 +534,16 @@ impl DeviceAdapter for SteelSeriesAdapter {
             }
             _ => bail!("unsupported setting {}", key.as_str()),
         }
-        self.persist(&proposed)?;
+        // The device (or audio graph) already changed: show it even if saving fails.
         self.settings = proposed;
-        Ok(())
+        self.persist(&self.settings)
     }
 
     fn tick(&mut self) -> Result<()> {
-        if !self.audio.chatmix_active() {
+        // Each try spawns pw-* processes under the audio lock: not every tick.
+        if self.last_chatmix_try.elapsed() >= CHATMIX_RETRY && !self.audio.chatmix_active() {
+            self.last_chatmix_try = Instant::now();
+            // A failure is kept in the audio service's ChatMix error.
             let _ = self.audio.ensure_chatmix(CHATMIX_SINKS);
         }
         // ChatMix dial events arrive unsolicited; pick them up every tick.

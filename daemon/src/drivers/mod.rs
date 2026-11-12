@@ -359,9 +359,9 @@ impl PlaceholderAdapter {
         id: DeviceId,
         kind: DeviceKind,
         name: &str,
-        detail: impl ToString,
+        detail: &anyhow::Error,
     ) -> Self {
-        let detail = detail.to_string();
+        let detail = format!("{detail:#}");
         let error = if detail.contains("Permission denied") || detail.contains("permission") {
             format!(
                 "Cannot open device ({detail}). Install udev rules:\n  sudo install -m 644 udev/70-hako.rules /etc/udev/rules.d/\n  sudo udevadm control --reload-rules && sudo udevadm trigger\nThen unplug/replug and restart hakod."

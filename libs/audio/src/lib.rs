@@ -7,12 +7,12 @@ use hako_core::{
 };
 use regex::Regex;
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 pub const CHATMIX_GAME: &str = "Hako_Game";
@@ -113,7 +113,10 @@ struct AudioState {
     chatmix: ChatMixState,
     aux: Option<AuxState>,
     defaults: DefaultState,
-    last_error: Option<String>,
+    /// Last ChatMix / AUX failure, kept apart so one part's success never
+    /// hides the other's error.
+    chatmix_error: Option<String>,
+    aux_error: Option<String>,
     /// ChatMix takes the default sink when it comes up.
     chatmix_set_default: bool,
     /// Set by `reset_all` (the kill-switch): ChatMix stays down until
@@ -132,7 +135,8 @@ impl AudioService {
                 chatmix: ChatMixState::default(),
                 aux: None,
                 defaults: DefaultState::default(),
-                last_error: None,
+                chatmix_error: None,
+                aux_error: None,
                 chatmix_set_default: true,
                 chatmix_suppressed: false,
             }),
@@ -142,7 +146,7 @@ impl AudioService {
     fn state(&self) -> MutexGuard<'_, AudioState> {
         self.state.lock().unwrap_or_else(|poisoned| {
             let mut state = poisoned.into_inner();
-            state.last_error = Some("audio state mutex was poisoned; recovered state".into());
+            state.chatmix_error = Some("audio state mutex was poisoned; recovered state".into());
             state
         })
     }
@@ -173,11 +177,16 @@ impl AudioService {
     }
 
     pub fn last_error(&self) -> Option<String> {
-        self.state().last_error.clone()
+        let state = self.state();
+        match (&state.chatmix_error, &state.aux_error) {
+            (Some(c), Some(a)) => Some(format!("ChatMix: {c}; AUX: {a}")),
+            (c, a) => c.clone().or_else(|| a.clone()),
+        }
     }
 
     pub fn healthy(&self) -> bool {
-        self.state().last_error.is_none()
+        let state = self.state();
+        state.chatmix_error.is_none() && state.aux_error.is_none()
     }
 
     /// Bring ChatMix up on the headset's playback sink: the first node name
@@ -190,7 +199,7 @@ impl AudioService {
         }
 
         let result = ensure_chatmix_locked(&mut state, sink_regexes);
-        record_result(&mut state, &result);
+        record_result(&mut state.chatmix_error, &result);
         result
     }
 
@@ -214,7 +223,7 @@ impl AudioService {
         } else {
             release_default(&mut state.defaults, DefaultOwner::ChatMix)
         };
-        record_result(&mut state, &result);
+        record_result(&mut state.chatmix_error, &result);
         result
     }
 
@@ -237,14 +246,14 @@ impl AudioService {
             }),
         };
         state.chatmix.volumes = result.is_ok().then_some((game, chat));
-        record_result(&mut state, &result);
+        record_result(&mut state.chatmix_error, &result);
         result
     }
 
     pub fn destroy_chatmix(&self) -> Result<()> {
         let mut state = self.state();
         let result = destroy_chatmix_locked(&mut state);
-        record_result(&mut state, &result);
+        record_result(&mut state.chatmix_error, &result);
         result
     }
 
@@ -254,7 +263,7 @@ impl AudioService {
             return Ok(());
         }
         let result = aux_enable_locked(&mut state, cfg, chain);
-        record_result(&mut state, &result);
+        record_result(&mut state.aux_error, &result);
         result
     }
 
@@ -287,13 +296,13 @@ impl AudioService {
         if result.is_err() {
             state.aux = Some(AuxState::pending(cfg, chain));
         }
-        record_result(&mut state, &result);
+        record_result(&mut state.aux_error, &result);
     }
 
     pub fn aux_disable(&self) -> Result<()> {
         let mut state = self.state();
         let result = aux_disable_locked(&mut state);
-        record_result(&mut state, &result);
+        record_result(&mut state.aux_error, &result);
         result
     }
 
@@ -312,7 +321,7 @@ impl AudioService {
             },
             None => bail_result("AUX is not active"),
         };
-        record_result(&mut state, &result);
+        record_result(&mut state.aux_error, &result);
         result
     }
 
@@ -336,7 +345,7 @@ impl AudioService {
                     aux.cfg = cfg.clone();
                     aux.chain = chain.clone();
                 }
-                record_result(&mut state, &result);
+                record_result(&mut state.aux_error, &result);
                 return result;
             }
         }
@@ -370,7 +379,7 @@ impl AudioService {
         if result.is_err() && state.aux.is_none() && old.is_some() {
             state.aux = Some(AuxState::pending(cfg.clone(), chain.clone()));
         }
-        record_result(&mut state, &result);
+        record_result(&mut state.aux_error, &result);
         result
     }
 
@@ -379,30 +388,31 @@ impl AudioService {
     pub fn reset_all(&self) -> Result<()> {
         let mut state = self.state();
         state.chatmix_suppressed = true;
-        let mut first_error = aux_disable_locked(&mut state).err();
-        if let Err(error) = destroy_chatmix_locked(&mut state) {
-            first_error.get_or_insert(error);
-        }
+        let aux = aux_disable_locked(&mut state);
+        let mut chatmix = destroy_chatmix_locked(&mut state);
         if let Some(original) = state.defaults.restore() {
-            if let Err(error) = set_default_sink(&original) {
-                first_error.get_or_insert(error);
-            }
+            chatmix = chatmix.and(set_default_sink(&original));
         }
-        let result = first_error.map_or(Ok(()), Err);
-        record_result(&mut state, &result);
-        result
+        record_result(&mut state.aux_error, &aux);
+        record_result(&mut state.chatmix_error, &chatmix);
+        aux.and(chatmix)
     }
 
     /// After a crash the daemon no longer knows which AUX links it made, and
     /// `pw-link` links outlive their creator: remove capture -> sink links
-    /// matching the AUX config. No-op while this service owns AUX.
+    /// matching the AUX config. No-op while this service owns AUX, or when
+    /// either node is absent (nothing can be linked).
     pub fn remove_orphan_aux_links(&self, cfg: &AuxConfig) -> Result<()> {
         let state = self.state();
         if state.aux.is_some() {
             return Ok(());
         }
-        let capture = find_source_node_name(&cfg.capture_name_regex)?;
-        let sink = find_sink_node_name(&cfg.sink_name_regex)?;
+        let (Ok(capture), Ok(sink)) = (
+            find_source_node_name(&cfg.capture_name_regex),
+            find_sink_node_name(&cfg.sink_name_regex),
+        ) else {
+            return Ok(());
+        };
         let present = parse_links(&run_cmd("pw-link", &["-l"])?);
         for link in stereo_links(&capture, &sink) {
             if present.contains(&link) {
@@ -433,8 +443,8 @@ impl Drop for AudioService {
     }
 }
 
-fn record_result(state: &mut AudioState, result: &Result<()>) {
-    state.last_error = result.as_ref().err().map(|error| format!("{error:#}"));
+fn record_result(slot: &mut Option<String>, result: &Result<()>) {
+    *slot = result.as_ref().err().map(|error| format!("{error:#}"));
 }
 
 fn bail_result<T>(message: &str) -> Result<T> {
@@ -1059,11 +1069,55 @@ fn stereo_links(source: &str, sink: &str) -> Vec<(String, String)> {
     ]
 }
 
-fn run_cmd(bin: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(bin)
-        .args(args)
-        .output()
+/// Longest a PipeWire / ALSA tool may run: a hung server must not hold the
+/// audio lock (and with it GetState and daemon shutdown) forever.
+const CMD_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `Command::output` that kills the child after `timeout`.
+fn output_within(cmd: &mut Command, timeout: Duration) -> Result<Output> {
+    let bin = cmd.get_program().to_string_lossy().into_owned();
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("spawn {bin}"))?;
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("wait for {bin}"))?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{bin} did not finish within {timeout:?}");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+/// Read a child pipe to the end on its own thread (a full pipe would stall the child).
+fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
+fn run_cmd(bin: &str, args: &[&str]) -> Result<String> {
+    let output = output_within(Command::new(bin).args(args), CMD_TIMEOUT)?;
     if !output.status.success() {
         bail!(
             "{bin} {:?} failed: {}",
@@ -1286,10 +1340,10 @@ fn node_has_stereo_ports(ports: &str, node: &str, left: &str, right: &str) -> bo
 }
 
 fn link_nodes(source: &str, destination: &str) -> Result<()> {
-    let output = Command::new("pw-link")
-        .args([source, destination])
-        .output()
-        .map_err(|error| anyhow!("pw-link: {error}"))?;
+    let output = output_within(
+        Command::new("pw-link").args([source, destination]),
+        CMD_TIMEOUT,
+    )?;
     if output.status.success() {
         return Ok(());
     }
@@ -1604,6 +1658,18 @@ mod tests {
         }
         reap_exited(&mut slot);
         assert!(slot.is_none(), "exited child must be reaped");
+    }
+
+    #[test]
+    fn commands_are_killed_at_the_timeout() {
+        let t0 = std::time::Instant::now();
+        let err =
+            output_within(Command::new("sleep").arg("5"), Duration::from_millis(100)).unwrap_err();
+        assert!(err.to_string().contains("did not finish"), "{err}");
+        assert!(t0.elapsed() < Duration::from_secs(2));
+        let out = output_within(Command::new("echo").arg("hi"), Duration::from_secs(5)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"hi\n");
     }
 
     #[test]

@@ -376,8 +376,9 @@ fn open_transport() -> Result<(Transport, String)> {
     bail!("no Razer control path ({})", errs.join("; "))
 }
 
+/// Rounded, so it exactly inverts the truncating `pct * 255 / 100`.
 fn pct_from_wire(wire: u8) -> u8 {
-    ((wire as u16) * 100 / 255).min(100) as u8
+    ((u16::from(wire) * 100 + 127) / 255).min(100) as u8
 }
 
 fn defaults(s: &mut SettingsMap) {
@@ -645,7 +646,9 @@ mod tests {
             .unwrap();
         assert!(save.persistent && save.blocked.is_none());
         assert!(c.iter().filter(|m| m.persistent).count() == 1);
-        assert_eq!(pct_from_wire((33u16 * 255 / 100) as u8), 32);
+        for pct in 0..=100u8 {
+            assert_eq!(pct_from_wire((u16::from(pct) * 255 / 100) as u8), pct);
+        }
     }
 
     #[test]

@@ -32,6 +32,36 @@ misconfigured until it is reset with the maker's software. hako only offers writ
 memory layout several independent sources confirm, and only writes when you change a setting \
 (never automatically). Continue?";
 
+/// A request refused before it reached the device, with the IPC error code
+/// that names whose fault it is.
+#[derive(Debug)]
+pub struct Refused {
+    code: &'static str,
+    message: String,
+}
+
+impl Refused {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// IPC code for `e`: the refusal's own, else `io` (the device failed).
+    pub fn code(e: &anyhow::Error) -> &'static str {
+        e.downcast_ref::<Self>().map_or("io", |r| r.code)
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 enum Cmd {
     Set {
         key: SettingKey,
@@ -163,7 +193,7 @@ impl Gate {
             .unwrap_or(false);
         if saving && !self.allowed {
             if let Err(e) = a.set(SettingKey::SaveToDevice, SettingValue::Bool(false)) {
-                warn!("{}: could not leave save-to-device mode: {e}", self.stem);
+                warn!("{}: could not leave save-to-device mode: {e:#}", self.stem);
             }
         }
     }
@@ -220,7 +250,7 @@ fn run(
             Err(RecvTimeoutError::Timeout) => {
                 next_tick = Instant::now() + adapter.tick_interval();
                 if let Err(e) = adapter.tick() {
-                    warn!("tick {}: {e}", adapter.id().key());
+                    warn!("tick {}: {e:#}", adapter.id().key());
                 }
                 if let Some(snap) = publish(gate.view(adapter.as_ref())) {
                     let _ = events.send(AdapterEvent::Updated(snap));
@@ -252,24 +282,29 @@ fn set_checked(
                 .unwrap_or_default()
         );
     }
-    let meta = snap
-        .controls
-        .iter()
-        .find(|c| c.key == key)
-        .ok_or_else(|| anyhow!("{} has no {} control", snap.name, key.as_str()))?;
-    meta.validate(&value).map_err(anyhow::Error::msg)?;
+    let meta = snap.controls.iter().find(|c| c.key == key).ok_or_else(|| {
+        Refused::new(
+            "invalid_value",
+            format!("{} has no {} control", snap.name, key.as_str()),
+        )
+    })?;
+    meta.validate(&value)
+        .map_err(|e| Refused::new("invalid_value", e))?;
     if key == SettingKey::OnboardWrites {
         gate.set(value.as_bool().unwrap_or(false))?;
         gate.enforce(a);
         return Ok(());
     }
     if meta.persistent && !gate.allowed {
-        bail!(
-            "{} is saved to the {}'s onboard memory: turn on \"Allow saving to device memory\" \
-             (Device tab) first",
-            meta.label,
-            snap.name
-        );
+        return Err(Refused::new(
+            "invalid_value",
+            format!(
+                "{} is saved to the {}'s onboard memory: turn on \"Allow saving to device \
+                 memory\" (Device tab) first",
+                meta.label, snap.name
+            ),
+        )
+        .into());
     }
     a.set(key, value)
 }
@@ -365,7 +400,10 @@ mod tests {
 
         // Ordinary writes pass; onboard writes are refused until allowed.
         set_checked(&mut a, &mut gate, SettingKey::Dpi, int(400)).unwrap();
-        assert!(set_checked(&mut a, &mut gate, SettingKey::DpiStage1, int(400)).is_err());
+        let refused = set_checked(&mut a, &mut gate, SettingKey::DpiStage1, int(400)).unwrap_err();
+        assert_eq!(Refused::code(&refused), "invalid_value");
+        let out_of_range = set_checked(&mut a, &mut gate, SettingKey::Dpi, int(5)).unwrap_err();
+        assert_eq!(Refused::code(&out_of_range), "invalid_value");
         set_checked(
             &mut a,
             &mut gate,

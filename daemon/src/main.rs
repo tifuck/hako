@@ -96,15 +96,25 @@ async fn main() -> Result<()> {
 
     let hub_disc = hub.clone();
     let discovery = tokio::spawn(async move {
+        // Each pass is its own task: a panic in one (driver code) is logged
+        // and the next pass still runs, instead of hotplug silently ending.
+        // A JoinSet, so aborting discovery at shutdown aborts the pass too.
+        let pass = |hub: Arc<DaemonHub>| async move {
+            let mut set = tokio::task::JoinSet::new();
+            set.spawn(async move { hub.discover_once().await });
+            if let Some(Err(e)) = set.join_next().await {
+                warn!("discovery pass crashed: {e}");
+            }
+        };
         // Discovery runs in the background so the socket is already accepting.
-        hub_disc.discover_once().await;
+        pass(hub_disc.clone()).await;
         hub_disc.maybe_apply_last_profile().await;
 
         // Devices tick on their own worker threads; this only finds new ones.
         let mut interval = tokio::time::interval(DISCOVERY_PERIOD);
         loop {
             interval.tick().await;
-            hub_disc.discover_once().await;
+            pass(hub_disc.clone()).await;
         }
     });
 

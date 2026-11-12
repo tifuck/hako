@@ -175,10 +175,11 @@ fn slider(
         }
     }
     let resp = widgets::slider(ui, s, width);
-    if dpi {
-        v = snap_dpi(v, min, max, meta.step.unwrap_or(1.0) as f32);
-    }
     if resp.changed() {
+        // Only the user's input snaps; the device's own value shows as is.
+        if dpi {
+            v = snap_dpi(v, min, max, meta.step.unwrap_or(1.0) as f32);
+        }
         ui.ctx().data_mut(|m| m.insert_temp(id, v));
     }
     if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {

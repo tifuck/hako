@@ -60,7 +60,7 @@ pub fn enumerate_hidraw() -> Result<Vec<HidDeviceInfo>> {
                 hid_name = rest.to_string();
             }
         }
-        let interface = read_b_interface_number(&dev);
+        let interface = usb_interface(bus, &dev);
         out.push(HidDeviceInfo {
             path: PathBuf::from(format!("/dev/{name}")),
             vendor_id: vid,
@@ -83,6 +83,15 @@ impl HidDeviceInfo {
     pub fn report_descriptor(&self) -> Vec<u8> {
         std::fs::read(self.sys.join("report_descriptor")).unwrap_or_default()
     }
+}
+
+/// USB interface number of a HID device on `bus`. Only USB has one: walking
+/// up from a Bluetooth device would reach its adapter's USB interface.
+fn usb_interface(bus: u16, device: &Path) -> Option<u32> {
+    if bus != BUS_USB {
+        return None;
+    }
+    read_b_interface_number(device)
 }
 
 fn read_b_interface_number(device: &Path) -> Option<u32> {
@@ -507,6 +516,18 @@ impl Drop for UsbDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_usb_devices_have_an_interface() {
+        // usb/1-5:1.2/<hid device>, as sysfs nests a HID device in its interface.
+        let root = std::env::temp_dir().join(format!("hako-iface-{}", std::process::id()));
+        let hid = root.join("1-5:1.2/0005:046D:B023.0007");
+        std::fs::create_dir_all(&hid).unwrap();
+        std::fs::write(root.join("1-5:1.2/bInterfaceNumber"), "02\n").unwrap();
+        assert_eq!(usb_interface(BUS_USB, &hid), Some(2));
+        assert_eq!(usb_interface(BUS_BLUETOOTH, &hid), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn report_descriptor_ids() {

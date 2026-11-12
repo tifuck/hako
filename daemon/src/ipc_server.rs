@@ -10,6 +10,7 @@ use hako_core::{read_json_frame, write_json_frame};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -34,7 +35,16 @@ pub async fn serve(listener: UnixListener, hub: Arc<DaemonHub>) -> Result<()> {
     // SAFETY: geteuid has no preconditions.
     let uid = unsafe { libc::geteuid() };
     loop {
-        let (stream, _) = listener.accept().await?;
+        // Accept errors (out of fds, aborted handshake) are per connection;
+        // they must not stop the daemon.
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                warn!("accept: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         // Clients can inject keystrokes (macros), so only our own user may connect.
         match stream.peer_cred() {
             Ok(cred) if cred.uid() == uid => {}
@@ -74,7 +84,19 @@ async fn serve_requests(
     loop {
         let v = match read_json_frame(stream).await {
             Ok(v) => v,
-            Err(_) => break,
+            Err(e) => {
+                // A bad frame gets an answer before the close.
+                if !client_left(&e) {
+                    warn!("client sent a bad frame: {e:#}");
+                    let resp = IpcResponse::err(
+                        serde_json::json!(null),
+                        "invalid_value",
+                        format!("{e:#}"),
+                    );
+                    let _ = write_json_frame(stream, &resp).await;
+                }
+                break;
+            }
         };
         // Event messages from server use type field; client requests use method
         let req: IpcRequest = match serde_json::from_value(v) {
@@ -111,15 +133,30 @@ async fn serve_requests(
             break;
         }
 
-        if req.method == Method::StartCapture {
-            if let Ok(p) = serde_json::from_value::<StartCaptureParams>(req.params.clone()) {
-                *capture = Some(p.device_id);
+        let method = req.method;
+        let started = (method == Method::StartCapture)
+            .then(|| serde_json::from_value::<StartCaptureParams>(req.params.clone()).ok())
+            .flatten();
+        let resp = hub.handle(req).await;
+        if resp.ok {
+            match method {
+                Method::StartCapture => *capture = started.map(|p| p.device_id),
+                Method::CancelCapture => *capture = None,
+                _ => {}
             }
         }
-        let resp = hub.handle(req).await;
         write_json_frame(stream, &resp).await?;
     }
     Ok(())
+}
+
+/// The read failed because the client went away (EOF, reset), not because
+/// it sent something malformed.
+fn client_left(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>().is_some_and(|e| {
+        use std::io::ErrorKind::*;
+        matches!(e.kind(), UnexpectedEof | ConnectionReset | BrokenPipe)
+    })
 }
 
 fn to_ipc_event(ev: AdapterEvent) -> Result<IpcEvent> {
@@ -142,6 +179,22 @@ fn to_ipc_event(ev: AdapterEvent) -> Result<IpcEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_closed_client_is_not_a_bad_frame() {
+        use tokio::io::AsyncWriteExt;
+        let (mut server, client) = UnixStream::pair().unwrap();
+        drop(client);
+        assert!(client_left(
+            &read_json_frame(&mut server).await.unwrap_err()
+        ));
+
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(&u32::MAX.to_le_bytes()).await.unwrap();
+        assert!(!client_left(
+            &read_json_frame(&mut server).await.unwrap_err()
+        ));
+    }
 
     #[tokio::test]
     async fn bind_is_owner_only_and_refuses_a_live_daemon() {

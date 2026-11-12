@@ -3,13 +3,13 @@
 use crate::drivers::{self, DeviceAdapter, DriverCtx, EventTx, Model, PlaceholderAdapter};
 use crate::hid::HidDeviceInfo;
 use crate::remap::RemapEngine;
-use crate::worker::DeviceHandle;
+use crate::worker::{DeviceHandle, Refused};
 use anyhow::{Context, Result};
 use hako_audio::AudioService;
-use hako_core::catalog::{SettingKey, SettingValue};
+use hako_core::catalog::{SettingKey, SettingMeta, SettingValue};
 use hako_core::config::{
     list_profiles, load_app_config, load_profile, save_profile, settings_from_profile_device,
-    update_app_config, AppConfig, ConfigPaths, ProfileFile, TomlSetting,
+    update_app_config, validate_profile_name, AppConfig, ConfigPaths, ProfileFile, TomlSetting,
 };
 use hako_core::device::{AudioSummary, DaemonHealth, DeviceId, DeviceKind, HubState};
 use hako_core::ipc::{
@@ -19,6 +19,7 @@ use hako_core::protocol::AdapterEvent;
 use hako_core::remap::{CancelCaptureParams, ClearRemapParams, SetRemapParams, StartCaptureParams};
 use hako_core::VERSION;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -57,10 +58,16 @@ impl DaemonHub {
         let (events, _) = broadcast::channel(64);
         let remap = RemapEngine::start(paths.clone(), events.clone());
         let audio = AudioService::new();
+        let cfg = load_app_config(&paths);
         // ChatMix is not up yet, so this only records the preference.
-        let _ = audio.set_chatmix_default(
-            load_app_config(&paths).map_or(true, |c| c.chatmix_set_default_sink),
-        );
+        let _ =
+            audio.set_chatmix_default(cfg.as_ref().map_or(true, |c| c.chatmix_set_default_sink));
+        // AUX links a crashed daemon made outlive it (pw-link links linger).
+        if let Ok(cfg) = &cfg {
+            if let Err(e) = audio.remove_orphan_aux_links(&cfg.aux) {
+                warn!("orphan AUX links: {e:#}");
+            }
+        }
         Self {
             paths,
             audio: Arc::new(audio),
@@ -161,29 +168,32 @@ impl DaemonHub {
                 } else {
                     let (n, at) = retry.entry(retry_key(model)).or_insert((0, now));
                     *n += 1;
-                    *at = now
-                        + DISCOVERY_PERIOD
-                            .saturating_mul(1 << (*n).min(5))
-                            .min(MAX_BACKOFF);
+                    *at = now + backoff(*n);
                 }
             }
         }
 
+        // Built before taking the map lock: spawning runs driver code (and
+        // may write the device), which must not happen under it.
+        let handles: Vec<DeviceHandle> = discovered
+            .into_iter()
+            .map(|(model, a)| {
+                let snap = a.snapshot();
+                if matches!(snap.kind, DeviceKind::Mouse | DeviceKind::Keyboard) && snap.connected {
+                    self.remap
+                        .attach(snap.id.clone(), snap.kind, model.remap_pids(&snap.id));
+                }
+                let nodes = model_nodes(model, &present);
+                DeviceHandle::spawn(model, a, self.events.clone(), nodes, self.paths.clone())
+            })
+            .collect();
         let mut map = self.devices.lock().unwrap();
         // Reopened models replace their stale placeholders / dead adapters
         // (once per model: a receiver may return several devices).
-        for (model, _) in &discovered {
-            map.retain(|_, h| !h.model.same(model) || h.snapshot().connected);
+        for h in &handles {
+            map.retain(|_, old| !old.model.same(h.model) || old.snapshot().connected);
         }
-        for (model, a) in discovered {
-            let snap = a.snapshot();
-            if matches!(snap.kind, DeviceKind::Mouse | DeviceKind::Keyboard) && snap.connected {
-                self.remap
-                    .attach(snap.id.clone(), snap.kind, model.remap_pids(&snap.id));
-            }
-            let nodes = model_nodes(model, &present);
-            let handle =
-                DeviceHandle::spawn(model, a, self.events.clone(), nodes, self.paths.clone());
+        for handle in handles {
             let snap = handle.snapshot();
             map.insert(snap.id.key(), handle);
             let _ = self.events.send(AdapterEvent::Connected(snap));
@@ -249,10 +259,16 @@ impl DaemonHub {
         if *applied {
             return;
         }
-        let cfg = load_app_config(&self.paths).unwrap_or_default();
+        let cfg = match load_app_config(&self.paths) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!("startup profile skipped: {e:#}");
+                AppConfig::default()
+            }
+        };
         if let Some(name) = cfg.last_profile {
             if let Err(error) = self.apply_profile(&name, true).await {
-                warn!("apply last profile {name}: {error}");
+                warn!("apply last profile {name}: {error:#}");
             }
         }
         *applied = true;
@@ -263,7 +279,10 @@ impl DaemonHub {
             Ok(cfg) => (cfg, None),
             Err(e) => (AppConfig::default(), Some(format!("{e:#}"))),
         };
-        let profiles = list_profiles(&self.paths).unwrap_or_default();
+        let (profiles, profiles_error) = match list_profiles(&self.paths) {
+            Ok(p) => (p, None),
+            Err(e) => (Vec::new(), Some(format!("profiles: {e:#}"))),
+        };
         let devices: Vec<_> = self.handles().iter().map(DeviceHandle::snapshot).collect();
         // Device threads hold the audio lock across pw-* subprocesses.
         let audio = tokio::task::block_in_place(|| AudioSummary {
@@ -278,7 +297,7 @@ impl DaemonHub {
                 version: VERSION.into(),
                 uptime_secs: self.started.elapsed().as_secs(),
                 adapter_count: devices.len(),
-                last_error: config_error,
+                last_error: config_error.or(profiles_error),
             },
             last_profile: cfg.last_profile,
             profiles,
@@ -321,7 +340,7 @@ impl DaemonHub {
                 } else {
                     match serde_json::from_value::<SnapshotParams>(req.params) {
                         Ok(p) => p.device_id,
-                        Err(e) => return IpcResponse::err(id, "invalid_value", e.to_string()),
+                        Err(e) => return IpcResponse::err(id, "invalid_value", format!("{e:#}")),
                     }
                 };
                 let handles = self.handles();
@@ -340,41 +359,58 @@ impl DaemonHub {
                         let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
                         IpcResponse::ok(id, snap)
                     }
-                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                    Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
                 },
-                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::ListProfiles => {
-                let names = list_profiles(&self.paths).unwrap_or_default();
-                let cfg = load_app_config(&self.paths).unwrap_or_default();
-                IpcResponse::ok(
-                    id,
-                    serde_json::json!({"profiles": names, "last_profile": cfg.last_profile}),
-                )
+                match list_profiles(&self.paths)
+                    .and_then(|names| Ok((names, load_app_config(&self.paths)?.last_profile)))
+                {
+                    Ok((names, last)) => IpcResponse::ok(
+                        id,
+                        serde_json::json!({"profiles": names, "last_profile": last}),
+                    ),
+                    Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
+                }
+            }
+            Method::ApplyProfile | Method::SaveProfile
+                if serde_json::from_value::<ProfileNameParams>(req.params.clone())
+                    .is_ok_and(|p| validate_profile_name(&p.name).is_err()) =>
+            {
+                IpcResponse::err(id, "invalid_value", "invalid profile name")
             }
             Method::ApplyProfile => match serde_json::from_value::<ProfileNameParams>(req.params) {
                 Ok(p) => match self.apply_profile(&p.name, false).await {
                     Ok(()) => IpcResponse::ok(id, serde_json::json!({"applied": p.name})),
-                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                    Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
                 },
-                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::SaveProfile => match serde_json::from_value::<ProfileNameParams>(req.params) {
                 Ok(p) => match self.save_profile(&p.name).await {
                     Ok(()) => IpcResponse::ok(id, serde_json::json!({"saved": p.name})),
-                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                    Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
                 },
-                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::ResetAudio => {
                 // pactl / pw-* subprocesses: keep them off the async runtime.
                 let audio = self.audio.clone();
-                let reset = tokio::task::spawn_blocking(move || audio.reset_all())
-                    .await
-                    .unwrap_or_else(|e| Err(anyhow::anyhow!("reset task: {e}")));
+                let aux = load_app_config(&self.paths).map(|c| c.aux);
+                let reset = tokio::task::spawn_blocking(move || {
+                    audio.reset_all()?;
+                    // Links a crashed daemon left are not in this one's state.
+                    match aux {
+                        Ok(aux) => audio.remove_orphan_aux_links(&aux),
+                        Err(_) => Ok(()),
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("reset task: {e}")));
                 match reset {
                     Ok(()) => IpcResponse::ok(id, serde_json::json!({"reset": true})),
-                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                    Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
                 }
             }
             Method::GetConfig => match load_app_config(&self.paths) {
@@ -391,7 +427,7 @@ impl DaemonHub {
                         Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
                     }
                 }
-                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::GetRemaps => {
                 match serde_json::from_value::<SnapshotParams>(req.params)
@@ -400,7 +436,7 @@ impl DaemonHub {
                 {
                     Some(dev) => match self.remap.snapshot(&dev) {
                         Ok(snap) => IpcResponse::ok(id, snap),
-                        Err(e) => IpcResponse::err(id, "not_found", e.to_string()),
+                        Err(e) => IpcResponse::err(id, "not_found", format!("{e:#}")),
                     },
                     None => IpcResponse::ok(id, self.remap.snapshots()),
                 }
@@ -411,9 +447,9 @@ impl DaemonHub {
                         let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
                         IpcResponse::ok(id, snap)
                     }
-                    Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                    Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
                 },
-                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::ClearRemap => match serde_json::from_value::<ClearRemapParams>(req.params) {
                 Ok(p) => match self.remap.clear_binding(p.device_id, p.source) {
@@ -421,9 +457,9 @@ impl DaemonHub {
                         let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
                         IpcResponse::ok(id, snap)
                     }
-                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                    Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
                 },
-                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::StartCapture => {
                 match serde_json::from_value::<StartCaptureParams>(req.params) {
@@ -432,9 +468,9 @@ impl DaemonHub {
                             let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
                             IpcResponse::ok(id, snap)
                         }
-                        Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                        Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
                     },
-                    Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                    Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
                 }
             }
             Method::CancelCapture => {
@@ -444,9 +480,9 @@ impl DaemonHub {
                             let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
                             IpcResponse::ok(id, snap)
                         }
-                        Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                        Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
                     },
-                    Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                    Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
                 }
             }
             // The connection loop turns its connection into an event stream
@@ -467,7 +503,7 @@ impl DaemonHub {
     ) -> Result<hako_core::DeviceSnapshot> {
         let handle = self.devices.lock().unwrap().get(&device_id.key()).cloned();
         handle
-            .ok_or_else(|| anyhow::anyhow!("device offline"))?
+            .ok_or_else(|| Refused::new("not_found", "device offline"))?
             .set(key, value)
             .await
     }
@@ -477,6 +513,8 @@ impl DaemonHub {
     /// re-applying would write onboard memory at every boot).
     async fn apply_profile(&self, name: &str, startup: bool) -> Result<()> {
         let profile = load_profile(&self.paths, name)?;
+        // At startup AUX follows `aux.auto_enable`, as it does on connect.
+        let skip_aux = startup && !load_app_config(&self.paths).is_ok_and(|c| c.aux.auto_enable);
         let mut failures = Vec::new();
         for h in self.handles() {
             let saving = h
@@ -507,19 +545,12 @@ impl DaemonHub {
             let controls = h.snapshot().controls;
             for (k, v) in settings_from_profile_device(dev_map) {
                 let result = match SettingKey::parse(&k) {
-                    // Profiles re-apply at every start: never onboard memory
-                    // writes (flash wear) or the opt-in that allows them.
-                    Some(key)
-                        if key == SettingKey::OnboardWrites
-                            || controls.iter().any(|c| c.key == key && c.persistent) =>
-                    {
-                        continue
-                    }
+                    Some(key) if profile_skips(key, &controls, skip_aux) => continue,
                     Some(key) => h.set(key, v).await.map(|_| ()),
                     None => Err(anyhow::anyhow!("unknown setting")),
                 };
                 if let Err(error) = result {
-                    failures.push(format!("{} {k}: {error}", m.name));
+                    failures.push(format!("{} {k}: {error:#}", m.name));
                 }
             }
             let _ = self.events.send(AdapterEvent::Updated(h.snapshot()));
@@ -582,7 +613,9 @@ impl DaemonHub {
         })
         .await
         .ok();
-        let _ = self.audio.reset_all();
+        if let Err(e) = self.audio.reset_all() {
+            warn!("audio teardown: {e:#}");
+        }
         self.remap.shutdown();
         let _ = self.events.send(AdapterEvent::ShuttingDown);
     }
@@ -606,6 +639,23 @@ fn validate_settings(s: &AppSettings) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Wait after the `n`th consecutive failed open (n >= 1): one discovery
+/// period, doubling, capped.
+fn backoff(n: u32) -> Duration {
+    DISCOVERY_PERIOD
+        .saturating_mul(1 << (n.max(1) - 1).min(5))
+        .min(MAX_BACKOFF)
+}
+
+/// Profile keys never applied: onboard memory writes (profiles re-apply at
+/// every start: flash wear) and the opt-in that allows them, plus AUX when
+/// `skip_aux` (startup without `aux.auto_enable`).
+fn profile_skips(key: SettingKey, controls: &[SettingMeta], skip_aux: bool) -> bool {
+    key == SettingKey::OnboardWrites
+        || (skip_aux && key == SettingKey::AuxEnabled)
+        || controls.iter().any(|c| c.key == key && c.persistent)
 }
 
 fn retry_key(m: &Model) -> (u16, u16) {
@@ -676,16 +726,19 @@ fn discover_blocking(
             .map(|(_, id)| id.clone())
             .collect();
         let rescan = !ctx.open.is_empty();
-        match (model.open)(pid, &ctx) {
+        // A driver bug fails only its own model (with backoff), not the pass.
+        let opened = catch_unwind(AssertUnwindSafe(|| (model.open)(pid, &ctx)))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("driver crashed while opening")));
+        match opened {
             Ok(adapters) => {
                 // A receiver with nothing reachable backs off like a failure;
                 // a rescan that finds nothing new is fine.
                 attempted.push((model, rescan || !adapters.is_empty()));
                 out.extend(adapters.into_iter().map(|a| (model, a)));
             }
-            Err(e) if rescan => warn!("{} rescan: {e}", model.name),
+            Err(e) if rescan => warn!("{} rescan: {e:#}", model.name),
             Err(e) => {
-                warn!("{}: {e}", model.name);
+                warn!("{}: {e:#}", model.name);
                 attempted.push((model, false));
                 let placeholder = PlaceholderAdapter::permission_denied(
                     DeviceId {
@@ -716,5 +769,24 @@ mod tests {
         assert!(validate_settings(&s).is_err());
         s.log_level = String::new();
         assert!(validate_settings(&s).is_ok());
+    }
+
+    #[test]
+    fn first_retry_waits_one_discovery_period() {
+        let secs: Vec<u64> = (1..=8).map(|n| backoff(n).as_secs()).collect();
+        assert_eq!(secs, [3, 6, 12, 24, 48, 60, 60, 60]);
+    }
+
+    #[test]
+    fn startup_profile_leaves_aux_to_auto_enable() {
+        let controls = [
+            SettingMeta::toggle(SettingKey::AuxEnabled, "AUX"),
+            SettingMeta::toggle(SettingKey::SaveToDevice, "Save").persistent(),
+        ];
+        assert!(profile_skips(SettingKey::AuxEnabled, &controls, true));
+        assert!(!profile_skips(SettingKey::AuxEnabled, &controls, false));
+        assert!(profile_skips(SettingKey::SaveToDevice, &controls, false));
+        assert!(profile_skips(SettingKey::OnboardWrites, &controls, false));
+        assert!(!profile_skips(SettingKey::Dpi, &controls, true));
     }
 }

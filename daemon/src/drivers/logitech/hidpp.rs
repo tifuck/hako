@@ -321,6 +321,10 @@ pub fn parse_dpi_list(bytes: &[u8]) -> Vec<u16> {
                             .step_by(step as usize)
                             .map(|d| d as u16),
                     );
+                    // A range ends at `to` even when it is off the step grid.
+                    if out.last() != Some(&to) {
+                        out.push(to);
+                    }
                 }
                 _ => return out,
             }
@@ -336,7 +340,8 @@ pub fn parse_dpi_list(bytes: &[u8]) -> Vec<u16> {
 /// `(min, max, smallest step)` when a slider suits `dpis`: one evenly spaced
 /// run, or too many values for a dropdown (writes snap to the list).
 pub fn dpi_slider(dpis: &[u16]) -> Option<(u16, u16, u16)> {
-    let (&min, &max) = (dpis.first()?, dpis.last()?);
+    // The device's order is not trusted: a descending list must not make min > max.
+    let (&min, &max) = (dpis.iter().min()?, dpis.iter().max()?);
     let gaps = || dpis.windows(2).map(|w| w[1].saturating_sub(w[0]));
     let step = gaps().min().unwrap_or(1).max(1);
     (dpis.len() > 16 || gaps().all(|g| g == step)).then_some((min, max, step))
@@ -602,6 +607,12 @@ mod tests {
         let v = parse_dpi_list(&[0x00, 0x64, 0xe0, 0x32, 0x03, 0xe8, 0xe0, 0x64, 0x07, 0xd0]);
         assert_eq!(v.len(), 29);
         assert_eq!(dpi_slider(&v), Some((100, 2000, 50)));
+        // A long descending list still gives min <= max.
+        let v: Vec<u16> = (1..=17).rev().map(|i| i * 100).collect();
+        assert_eq!(dpi_slider(&v), Some((100, 1700, 1)));
+        // An end off the step grid is still the last value.
+        let v = parse_dpi_list(&[0x00, 0x64, 0xe0, 0x32, 0x0f, 0xb9]);
+        assert_eq!((v[v.len() - 2], v[v.len() - 1]), (4000, 4025));
         // A step with nothing before it is malformed: stop.
         assert!(parse_dpi_list(&[0xe0, 0x32, 0x0f, 0xa0]).is_empty());
         // 0x2202 caps: bit 0 = separate Y, bit 1 = LOD.

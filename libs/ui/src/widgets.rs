@@ -703,11 +703,11 @@ pub struct Toast {
     pub shown: Option<f64>,
 }
 
-/// A newer release, offered on top of the toasts until the user answers.
+/// A downloaded newer release, offered on top of the toasts until the user answers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UpdateOffer {
     pub version: String,
-    /// Download and install in progress.
+    /// Install in progress.
     pub busy: bool,
 }
 
@@ -777,7 +777,7 @@ fn update_card(ui: &mut Ui, o: &UpdateOffer) -> Option<bool> {
         .show(ui, |ui| {
             ui.set_width(TOAST_W - 28.0);
             ui.label(
-                egui::RichText::new(format!("hako v{} is available", o.version))
+                egui::RichText::new(format!("hako v{} is ready to install", o.version))
                     .color(pal().text)
                     .strong(),
             );
@@ -785,9 +785,7 @@ fn update_card(ui: &mut Ui, o: &UpdateOffer) -> Option<bool> {
             if o.busy {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(
-                        egui::RichText::new("Downloading and installing…").color(pal().text_muted),
-                    );
+                    ui.label(egui::RichText::new("Installing…").color(pal().text_muted));
                 });
                 return;
             }

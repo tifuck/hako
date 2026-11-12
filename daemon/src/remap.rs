@@ -9,7 +9,7 @@
 use anyhow::Result;
 use evdev::{
     uinput::VirtualDevice, AttributeSet, Device, EventSummary, EventType, InputEvent, KeyCode,
-    MiscCode, RelativeAxisCode,
+    MiscCode, RelativeAxisCode, UinputAbsSetup,
 };
 use hako_core::config::{load_remap_bindings, remap_config_path, save_remap_bindings, ConfigPaths};
 use hako_core::device::{DeviceId, DeviceKind};
@@ -18,7 +18,7 @@ use hako_core::remap::{
     clamp_interval, emittable, CaptureRole, DeviceRemaps, EvdevKey, MacroRepeat, MacroStep,
     RemapBinding, RemapCaptured, RemapMode, MAX_MACRO_STEPS, MAX_STEP_DELAY_MS,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -129,6 +129,7 @@ impl RemapEngine {
             events,
             slots: Vec::new(),
             virt: None,
+            axes: Axes::default(),
             mapper: Mapper::default(),
             session: None,
         };
@@ -180,13 +181,23 @@ impl RemapEngine {
         let bindings = g.devices[idx].bindings.clone();
         let pids = g.devices[idx].pids.clone();
         // Sent under the lock so command order matches index order.
-        let _ = self.tx.send(Cmd::Attach {
+        if let Err(e) = self.send(Cmd::Attach {
             idx,
             id,
             kind,
             pids,
             bindings,
-        });
+        }) {
+            warn!("{e}");
+        }
+    }
+
+    /// Hand `cmd` to the worker thread; an error when it is gone (it would
+    /// otherwise look like success while nothing is applied).
+    fn send(&self, cmd: Cmd) -> Result<()> {
+        self.tx
+            .send(cmd)
+            .map_err(|_| anyhow::anyhow!("remap engine stopped; restart hakod"))
     }
 
     pub fn snapshots(&self) -> Vec<DeviceRemaps> {
@@ -227,12 +238,12 @@ impl RemapEngine {
         d.bindings = next;
         if d.capturing.take().is_some() {
             d.capture_source = None;
-            let _ = self.tx.send(Cmd::CancelCapture { idx });
+            self.send(Cmd::CancelCapture { idx })?;
         }
-        let _ = self.tx.send(Cmd::SetBindings {
+        self.send(Cmd::SetBindings {
             idx,
             bindings: d.bindings.clone(),
-        });
+        })?;
         Ok(d.snapshot())
     }
 
@@ -263,8 +274,9 @@ impl RemapEngine {
         if role == CaptureRole::Record {
             d.recorded.clear();
         }
-        let _ = self.tx.send(Cmd::StartCapture { idx });
-        Ok(d.snapshot())
+        let snap = d.snapshot();
+        self.send(Cmd::StartCapture { idx })?;
+        Ok(snap)
     }
 
     /// Stop listening. For a record session `keep` stores the take in `recorded`.
@@ -280,8 +292,9 @@ impl RemapEngine {
             };
         }
         d.capture_source = None;
-        let _ = self.tx.send(Cmd::CancelCapture { idx });
-        Ok(d.snapshot())
+        let snap = d.snapshot();
+        self.send(Cmd::CancelCapture { idx })?;
+        Ok(snap)
     }
 
     pub fn shutdown(&self) {
@@ -400,6 +413,8 @@ struct Worker {
     events: broadcast::Sender<AdapterEvent>,
     slots: Vec<Slot>,
     virt: Option<VirtualDevice>,
+    /// Axes `virt` declares beyond the fixed pointer set.
+    axes: Axes,
     mapper: Mapper,
     session: Option<Session>,
 }
@@ -465,11 +480,6 @@ impl Worker {
 
     fn set_bindings(&mut self, idx: usize, bindings: HashMap<u16, RemapBinding>) {
         let slot = &mut self.slots[idx];
-        for b in slot.bindings.values() {
-            if b.mode == RemapMode::Tap {
-                self.mapper.release(b.target.0);
-            }
-        }
         self.mapper.stop_device(idx);
         slot.bindings = bindings;
         if slot.bindings.is_empty() {
@@ -522,25 +532,10 @@ impl Worker {
     }
 
     fn try_grab(&mut self, idx: usize, now: Instant) {
-        if self.virt.is_none() {
-            match build_virtual() {
-                Ok(v) => self.virt = Some(v),
-                Err(e) => {
-                    warn!("uinput: {e}");
-                    self.slots[idx].retry = now + OPEN_RETRY;
-                    self.update(idx, |d| {
-                        d.last_error = Some(format!(
-                            "Cannot create virtual device ({e}). Need write access to /dev/uinput (group input)."
-                        ))
-                    });
-                    return;
-                }
-            }
-        }
-        let slot = &mut self.slots[idx];
         let nodes: Vec<(PathBuf, Device)> = evdev::enumerate()
-            .filter(|(_, dev)| node_matches(slot, dev))
+            .filter(|(_, dev)| node_matches(&self.slots[idx], dev))
             .collect();
+        let slot = &mut self.slots[idx];
         if nodes.is_empty() {
             slot.retry = now + OPEN_RETRY;
             // Present but unreadable (no udev rule for this device): say so.
@@ -569,6 +564,11 @@ impl Worker {
             slot.retry = now + GRAB_RETRY;
             return;
         }
+        if !self.ensure_virtual(idx, &nodes) {
+            self.slots[idx].retry = now + OPEN_RETRY;
+            return;
+        }
+        let slot = &mut self.slots[idx];
         let mut err = None;
         for (path, mut dev) in nodes {
             match dev.grab() {
@@ -598,6 +598,47 @@ impl Worker {
         });
     }
 
+    /// A virtual device that declares every axis of `nodes` (uinput drops
+    /// events it does not declare), rebuilt when they add one. False (error
+    /// reported on `idx`) when it cannot be created.
+    fn ensure_virtual(&mut self, idx: usize, nodes: &[(PathBuf, Device)]) -> bool {
+        let mut axes = self.axes.clone();
+        let grew = nodes
+            .iter()
+            .fold(false, |grew, (_, dev)| axes.merge(Axes::of(dev)) || grew);
+        if self.virt.is_some() && !grew {
+            return true;
+        }
+        if self.virt.is_some() {
+            // ponytail: keys held through other grabbed devices are released
+            // by the swap, like `ungrab`.
+            self.mapper.release_all();
+            self.flush();
+            self.virt = None;
+        }
+        match build_virtual(&axes) {
+            Ok(v) => {
+                self.virt = Some(v);
+                self.axes = axes;
+                true
+            }
+            Err(e) => {
+                warn!("uinput: {e}");
+                self.axes = Axes::default();
+                // The old device is gone: so is every grab forwarding into it.
+                for i in 0..self.slots.len() {
+                    self.drop_nodes(i);
+                }
+                self.update(idx, |d| {
+                    d.last_error = Some(format!(
+                        "Cannot create virtual device ({e}). Need write access to /dev/uinput (group input)."
+                    ))
+                });
+                false
+            }
+        }
+    }
+
     /// Release everything the virtual device holds, then let go of the device.
     fn ungrab(&mut self, idx: usize) {
         if self.slots[idx].nodes.is_empty() {
@@ -610,6 +651,7 @@ impl Worker {
         self.drop_nodes(idx);
         if self.slots.iter().all(|s| s.nodes.is_empty()) {
             self.virt = None;
+            self.axes = Axes::default();
         }
     }
 
@@ -843,6 +885,7 @@ impl Worker {
             // Fail safe: a grabbed device we cannot forward would eat all input.
             warn!("uinput emit: {e}; releasing all devices");
             self.virt = None;
+            self.axes = Axes::default();
             self.mapper = Mapper::default();
             for idx in 0..self.slots.len() {
                 if !self.slots[idx].nodes.is_empty() {
@@ -914,7 +957,50 @@ fn node_matches(slot: &Slot, dev: &Device) -> bool {
     }
 }
 
-fn build_virtual() -> Result<VirtualDevice> {
+/// Relative / absolute axes of grabbed nodes, so the virtual device can
+/// declare them: uinput silently drops events of undeclared codes.
+#[derive(Clone, Default)]
+struct Axes {
+    rel: BTreeSet<u16>,
+    abs: Vec<UinputAbsSetup>,
+}
+
+impl Axes {
+    fn of(dev: &Device) -> Self {
+        Self {
+            rel: dev
+                .supported_relative_axes()
+                .into_iter()
+                .flat_map(|axes| axes.iter())
+                .map(|axis| axis.0)
+                .collect(),
+            abs: dev
+                .get_absinfo()
+                .map(|axes| {
+                    axes.map(|(code, info)| UinputAbsSetup::new(code, info))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Add `other`'s axes; true when any was new.
+    fn merge(&mut self, other: Axes) -> bool {
+        let mut grew = false;
+        for code in other.rel {
+            grew |= self.rel.insert(code);
+        }
+        for setup in other.abs {
+            if !self.abs.iter().any(|a| a.code() == setup.code()) {
+                self.abs.push(setup);
+                grew = true;
+            }
+        }
+        grew
+    }
+}
+
+fn build_virtual(axes: &Axes) -> Result<VirtualDevice> {
     let mut keys = AttributeSet::<KeyCode>::new();
     for code in (1u16..0x2c0).filter(|&c| emittable(c)) {
         keys.insert(KeyCode::new(code));
@@ -926,15 +1012,21 @@ fn build_virtual() -> Result<VirtualDevice> {
     rel.insert(RelativeAxisCode::REL_HWHEEL);
     rel.insert(RelativeAxisCode::REL_WHEEL_HI_RES);
     rel.insert(RelativeAxisCode::REL_HWHEEL_HI_RES);
+    for &code in &axes.rel {
+        rel.insert(RelativeAxisCode(code));
+    }
     let mut msc = AttributeSet::<MiscCode>::new();
     msc.insert(MiscCode::MSC_SCAN);
 
-    Ok(VirtualDevice::builder()?
+    let mut builder = VirtualDevice::builder()?
         .name(VIRTUAL_NAME)
         .with_keys(&keys)?
         .with_relative_axes(&rel)?
-        .with_msc(&msc)?
-        .build()?)
+        .with_msc(&msc)?;
+    for setup in &axes.abs {
+        builder = builder.with_absolute_axis(setup)?;
+    }
+    Ok(builder.build()?)
 }
 
 /// A timed key sequence (turbo pulse or macro) driven by one bound source.
@@ -990,38 +1082,62 @@ fn ms(v: u32) -> Duration {
 struct Mapper {
     /// Keyed by (slot index, source code).
     runners: HashMap<(usize, u16), Runner>,
-    held: BTreeSet<u16>,
+    /// Tap sources held down: (slot index, source code) -> target.
+    taps: HashMap<(usize, u16), u16>,
+    /// Keys the virtual device holds, with how many owners (a physical key,
+    /// a tap, a runner) hold each.
+    held: BTreeMap<u16, u32>,
     out: Vec<InputEvent>,
 }
 
-fn push_key(out: &mut Vec<InputEvent>, held: &mut BTreeSet<u16>, code: u16, value: i32) {
+/// Count one owner's key edge; true when the virtual device must see it
+/// (first press, last release, autorepeat).
+fn hold(held: &mut BTreeMap<u16, u32>, code: u16, value: i32) -> bool {
     match value {
-        0 => {
-            held.remove(&code);
-        }
         1 => {
-            held.insert(code);
+            let n = held.entry(code).or_insert(0);
+            *n += 1;
+            *n == 1
         }
-        _ => {}
+        0 => match held.get_mut(&code) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                false
+            }
+            _ => {
+                held.remove(&code);
+                true
+            }
+        },
+        _ => true,
     }
-    out.push(InputEvent::new(EventType::KEY.0, code, value));
+}
+
+fn push_key(out: &mut Vec<InputEvent>, held: &mut BTreeMap<u16, u32>, code: u16, value: i32) {
+    if hold(held, code, value) {
+        out.push(InputEvent::new(EventType::KEY.0, code, value));
+    }
 }
 
 impl Mapper {
     /// Pass an unbound event through unchanged.
     fn forward(&mut self, ev: InputEvent) {
-        if ev.event_type() == EventType::KEY {
-            match ev.value() {
-                0 => {
-                    self.held.remove(&ev.code());
-                }
-                1 => {
-                    self.held.insert(ev.code());
-                }
-                _ => {}
-            }
+        if ev.event_type() == EventType::KEY && !hold(&mut self.held, ev.code(), ev.value()) {
+            return;
         }
         self.out.push(ev);
+    }
+
+    /// A tap source's edge, sent as its target's.
+    fn tap(&mut self, id: (usize, u16), target: u16, value: i32) {
+        let target = match value {
+            1 => self.taps.insert(id, target).is_none().then_some(target),
+            0 => self.taps.remove(&id),
+            _ => self.taps.get(&id).copied(),
+        };
+        if let Some(t) = target {
+            push_key(&mut self.out, &mut self.held, t, value);
+        }
     }
 
     /// A bound source key changed (`value` 0 up, 1 down, 2 autorepeat).
@@ -1029,7 +1145,7 @@ impl Mapper {
         let id = (dev, b.source.0);
         let running = self.runners.contains_key(&id);
         match (b.mode, value) {
-            (RemapMode::Tap, _) => push_key(&mut self.out, &mut self.held, b.target.0, value),
+            (RemapMode::Tap, _) => self.tap(id, b.target.0, value),
             (RemapMode::Disabled, _) | (_, 2) => {}
             (RemapMode::Turbo, 1) => self.start(id, Runner::pulse(b, now), now),
             (RemapMode::Turbo, _) => self.stop(id),
@@ -1070,6 +1186,7 @@ impl Mapper {
         }
     }
 
+    /// Stop the runners and release the taps of slot `dev`.
     fn stop_device(&mut self, dev: usize) {
         let ids: Vec<_> = self
             .runners
@@ -1080,18 +1197,17 @@ impl Mapper {
         for id in ids {
             self.stop(id);
         }
-    }
-
-    fn release(&mut self, code: u16) {
-        if self.held.contains(&code) {
-            push_key(&mut self.out, &mut self.held, code, 0);
+        let taps: Vec<_> = self.taps.keys().filter(|k| k.0 == dev).copied().collect();
+        for id in taps {
+            self.tap(id, 0, 0);
         }
     }
 
     /// Stop every runner and release every key the virtual device holds.
     fn release_all(&mut self) {
         self.runners.clear();
-        for k in std::mem::take(&mut self.held) {
+        self.taps.clear();
+        for k in std::mem::take(&mut self.held).into_keys() {
             self.out.push(InputEvent::new(EventType::KEY.0, k, 0));
         }
     }
@@ -1102,11 +1218,14 @@ impl Mapper {
         for (id, r) in self.runners.iter_mut() {
             while now >= r.next {
                 let s = r.steps[r.pos];
-                push_key(&mut self.out, &mut self.held, s.key.0, i32::from(s.down));
-                if s.down {
-                    r.held.insert(s.key.0);
+                // A runner owns each key once: repeated edges are no-ops.
+                let owned = if s.down {
+                    r.held.insert(s.key.0)
                 } else {
-                    r.held.remove(&s.key.0);
+                    r.held.remove(&s.key.0)
+                };
+                if owned {
+                    push_key(&mut self.out, &mut self.held, s.key.0, i32::from(s.down));
                 }
                 r.pos += 1;
                 if let Some(next) = r.steps.get(r.pos) {
@@ -1364,17 +1483,18 @@ mod tests {
         );
         m.key(1, &mac, 1, t0);
         m.take();
-        assert_eq!(m.held.iter().copied().collect::<Vec<_>>(), vec![30, 46, 48]);
+        assert_eq!(m.held.keys().copied().collect::<Vec<_>>(), vec![30, 46, 48]);
         m.release_all();
         assert_eq!(keys(&mut m), vec![(30, 0), (46, 0), (48, 0)]);
         assert!(m.held.is_empty() && m.runners.is_empty());
     }
 
     #[test]
-    fn stop_device_and_release_only_touch_their_keys() {
+    fn stop_device_only_touches_its_keys() {
         let t0 = Instant::now();
         let mut m = Mapper::default();
         m.forward(InputEvent::new(EventType::KEY.0, A.0, 1));
+        m.key(0, &RemapBinding::tap(EvdevKey::BTN_SIDE, B), 1, t0);
         let mac = macro_binding(
             vec![step(C, true, 0), step(C, false, 500)],
             MacroRepeat::Once,
@@ -1383,9 +1503,45 @@ mod tests {
         m.key(1, &mac, 1, t0);
         m.take();
         m.stop_device(1);
-        m.release(B.0); // not held: nothing to emit
         assert_eq!(keys(&mut m), vec![(46, 0)]);
-        assert_eq!(m.held.iter().copied().collect::<Vec<_>>(), vec![30]);
+        assert_eq!(m.held.keys().copied().collect::<Vec<_>>(), vec![30, 48]);
+        // Slot 0's tap is released with its slot, the physical key stays.
+        m.stop_device(0);
+        assert_eq!(keys(&mut m), vec![(48, 0)]);
+        assert_eq!(m.held.keys().copied().collect::<Vec<_>>(), vec![30]);
+    }
+
+    #[test]
+    fn shared_key_goes_up_with_its_last_holder() {
+        let t0 = Instant::now();
+        let mut m = Mapper::default();
+        let ctrl = EvdevKey(29);
+        let side = RemapBinding::tap(EvdevKey::BTN_SIDE, ctrl);
+        let extra = RemapBinding::tap(EvdevKey::BTN_EXTRA, ctrl);
+        m.key(0, &side, 1, t0);
+        m.key(0, &extra, 1, t0);
+        m.key(0, &side, 0, t0);
+        assert_eq!(
+            keys(&mut m),
+            vec![(29, 1)],
+            "still held by the other button"
+        );
+        m.key(0, &extra, 0, t0);
+        assert_eq!(keys(&mut m), vec![(29, 0)]);
+
+        // A macro pressing a physically held key does not release it.
+        m.forward(InputEvent::new(EventType::KEY.0, 29, 1));
+        let mac = macro_binding(
+            vec![step(ctrl, true, 0), step(ctrl, false, 10)],
+            MacroRepeat::Once,
+            50,
+        );
+        m.key(1, &mac, 1, t0);
+        m.tick(at(t0, 10));
+        assert_eq!(keys(&mut m), vec![(29, 1)]);
+        m.forward(InputEvent::new(EventType::KEY.0, 29, 0));
+        assert_eq!(keys(&mut m), vec![(29, 0)]);
+        assert!(m.held.is_empty());
     }
 
     #[test]
@@ -1468,6 +1624,25 @@ mod tests {
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("source = 275") && text.contains("source = 276"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn axes_merge_reports_only_new_axes() {
+        use evdev::{AbsInfo, AbsoluteAxisCode};
+        let abs =
+            |code| UinputAbsSetup::new(AbsoluteAxisCode(code), AbsInfo::new(0, 0, 100, 0, 0, 0));
+        let volume = || Axes {
+            rel: BTreeSet::from([0x07]), // REL_DIAL
+            abs: vec![abs(0x20)],        // ABS_VOLUME
+        };
+        let mut a = Axes::default();
+        assert!(a.merge(volume()));
+        assert!(!a.merge(volume()), "nothing new: no rebuild");
+        assert!(a.merge(Axes {
+            rel: BTreeSet::from([0x08]),
+            abs: vec![abs(0x20)],
+        }));
+        assert_eq!((a.rel.len(), a.abs.len()), (2, 1));
     }
 
     #[test]

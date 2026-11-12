@@ -229,8 +229,9 @@ pub fn load_device_settings(paths: &ConfigPaths, vid: u16, pid: u16) -> Result<S
     if !p.exists() {
         return Ok(SettingsMap::new());
     }
-    let text = fs::read_to_string(p)?;
-    let file: DeviceConfigFile = toml::from_str(&text)?;
+    let text = fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+    let file: DeviceConfigFile =
+        toml::from_str(&text).with_context(|| format!("parse {}", p.display()))?;
     Ok(file
         .settings
         .into_iter()
@@ -253,8 +254,8 @@ pub fn save_device_settings(
         file.settings.insert(k.clone(), v.into());
     }
     let text = toml::to_string_pretty(&file)?;
-    write_atomic(&device_config_path(paths, vid, pid), &text)?;
-    Ok(())
+    let p = device_config_path(paths, vid, pid);
+    write_atomic(&p, &text).with_context(|| format!("save {}", p.display()))
 }
 
 pub fn list_profiles(paths: &ConfigPaths) -> Result<Vec<String>> {
@@ -291,7 +292,7 @@ pub fn load_profile(paths: &ConfigPaths, name: &str) -> Result<ProfileFile> {
     validate_profile_name(name)?;
     let p = paths.profiles_dir.join(format!("{name}.toml"));
     let text = fs::read_to_string(&p).with_context(|| format!("profile {name}"))?;
-    Ok(toml::from_str(&text)?)
+    toml::from_str(&text).with_context(|| format!("parse {}", p.display()))
 }
 
 pub fn save_profile(paths: &ConfigPaths, profile: &ProfileFile) -> Result<()> {
@@ -370,6 +371,12 @@ mod tests {
         .unwrap();
 
         let s = load_device_settings(&paths, 0x1532, 0x026b).unwrap();
+        // A corrupt file names itself.
+        let other = device_config_path(&paths, 0x1532, 0x0001);
+        fs::write(&other, "version = [").unwrap();
+        let err = load_device_settings(&paths, 0x1532, 0x0001).unwrap_err();
+        assert!(format!("{err:#}").contains("1532_0001.toml"), "{err:#}");
+        fs::remove_file(&other).unwrap();
         assert_eq!(
             get_setting(&s, SettingKey::Brightness),
             Some(&SettingValue::Int(40))

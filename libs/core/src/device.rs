@@ -2,7 +2,7 @@
 
 use crate::catalog::{SettingMeta, SettingsMap};
 use crate::remap::DeviceRemaps;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,8 +51,20 @@ pub struct DeviceSnapshot {
     pub connected: bool,
     pub batteries: Vec<BatteryState>,
     pub settings: SettingsMap,
+    /// Controls this build cannot read (a newer daemon's keys) or draw (an
+    /// inverted range) are skipped, so one bad control never hides the whole
+    /// state or crashes the UI.
+    #[serde(deserialize_with = "known_controls")]
     pub controls: Vec<SettingMeta>,
     pub last_error: Option<String>,
+}
+
+fn known_controls<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SettingMeta>, D::Error> {
+    Ok(Vec::<serde_json::Value>::deserialize(d)?
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<SettingMeta>(v).ok())
+        .filter(|m| m.min.zip(m.max).is_none_or(|(lo, hi)| lo <= hi))
+        .collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -84,4 +96,37 @@ pub struct HubState {
     /// Host-side button remaps, keyed by device in `remaps.device_id`.
     #[serde(default)]
     pub remaps: Vec<DeviceRemaps>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::SettingKey;
+
+    #[test]
+    fn unknown_control_keys_are_skipped_not_fatal() {
+        let snap = DeviceSnapshot {
+            id: DeviceId {
+                vendor_id: 1,
+                product_id: 2,
+                instance: "x".into(),
+            },
+            kind: DeviceKind::Mouse,
+            name: "m".into(),
+            connected: true,
+            batteries: vec![],
+            settings: Default::default(),
+            controls: vec![
+                SettingMeta::slider(SettingKey::Dpi, "DPI", 100.0, 1000.0, 1.0),
+                SettingMeta::toggle(SettingKey::AngleSnapping, "Snap"),
+                SettingMeta::slider(SettingKey::Brightness, "Bad", 100.0, 0.0, 1.0),
+            ],
+            last_error: None,
+        };
+        let json = serde_json::to_string(&snap)
+            .unwrap()
+            .replace("\"key\":\"dpi\"", "\"key\":\"from_the_future\"");
+        let back: DeviceSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.controls, snap.controls[1..2]);
+    }
 }

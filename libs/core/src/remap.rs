@@ -115,10 +115,11 @@ pub const MIN_INTERVAL_MS: u32 = 10;
 pub const MAX_INTERVAL_MS: u32 = 10_000;
 
 /// Codes the daemon's virtual device can emit: keyboard and consumer keys plus
-/// mouse buttons. Joystick / gamepad / tablet `BTN_*` ranges stay out so udev
-/// doesn't classify the virtual device as one of those.
+/// mouse buttons (the whole `BTN_MOUSE` block: hid-input puts buttons 9-16
+/// at 0x118..=0x11f). Joystick / gamepad / tablet `BTN_*` ranges stay out so
+/// udev doesn't classify the virtual device as one of those.
 pub fn emittable(code: u16) -> bool {
-    matches!(code, 1..=0xff | 0x110..=0x117 | 0x160..=0x2bf) && !(0x220..=0x223).contains(&code)
+    matches!(code, 1..=0xff | 0x110..=0x11f | 0x160..=0x2bf) && !(0x220..=0x223).contains(&code)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -406,6 +407,8 @@ mod tests {
             .validate()
             .is_ok());
         assert!(!emittable(0x221) && emittable(KEY_A) && emittable(0x117));
+        // Mouse buttons 9-16, forwarded from grabbed many-button mice.
+        assert!(emittable(0x118) && emittable(0x11f));
     }
 
     const KEY_A: u16 = 30;
