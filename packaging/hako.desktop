@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Hako
+Comment=Unified peripheral control panel
+Exec=hako
+Icon=hako
+StartupWMClass=hako
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;

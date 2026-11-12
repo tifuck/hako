@@ -1,0 +1,720 @@
+//! Daemon hub: adapters, discovery, IPC dispatch.
+
+use crate::drivers::{self, DeviceAdapter, DriverCtx, EventTx, Model, PlaceholderAdapter};
+use crate::hid::HidDeviceInfo;
+use crate::remap::RemapEngine;
+use crate::worker::DeviceHandle;
+use anyhow::{Context, Result};
+use hako_audio::AudioService;
+use hako_core::catalog::{SettingKey, SettingValue};
+use hako_core::config::{
+    list_profiles, load_app_config, load_profile, save_profile, settings_from_profile_device,
+    update_app_config, AppConfig, ConfigPaths, ProfileFile, TomlSetting,
+};
+use hako_core::device::{AudioSummary, DaemonHealth, DeviceId, DeviceKind, HubState};
+use hako_core::ipc::{
+    AppSettings, IpcRequest, IpcResponse, Method, ProfileNameParams, SetParams, SnapshotParams,
+};
+use hako_core::protocol::AdapterEvent;
+use hako_core::remap::{CancelCaptureParams, ClearRemapParams, SetRemapParams, StartCaptureParams};
+use hako_core::VERSION;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, Mutex};
+use tracing::{info, warn};
+
+/// Log levels `config.toml` may name.
+pub const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
+/// Discovery period; also the first retry delay for a model that failed to open.
+pub const DISCOVERY_PERIOD: Duration = Duration::from_secs(3);
+/// Longest wait between attempts to open a model that keeps failing.
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Every hidraw node.
+type Present = Vec<HidDeviceInfo>;
+type Opened = Vec<(&'static Model, Box<dyn DeviceAdapter>)>;
+
+pub struct DaemonHub {
+    pub paths: ConfigPaths,
+    pub audio: Arc<AudioService>,
+    /// Never held across an await or device I/O (workers own the devices).
+    devices: std::sync::Mutex<HashMap<String, DeviceHandle>>,
+    events: EventTx,
+    started: Instant,
+    last_profile_applied: Mutex<bool>,
+    remap: RemapEngine,
+    /// Models whose last open failed, keyed by (vid, first pid):
+    /// (consecutive failures, next attempt).
+    retry: std::sync::Mutex<HashMap<(u16, u16), (u32, Instant)>>,
+    /// Last rescan of each connected `multi` model (receivers).
+    rescanned: std::sync::Mutex<HashMap<(u16, u16), Instant>>,
+}
+
+impl DaemonHub {
+    pub fn new(paths: ConfigPaths) -> Self {
+        let (events, _) = broadcast::channel(64);
+        let remap = RemapEngine::start(paths.clone(), events.clone());
+        let audio = AudioService::new();
+        // ChatMix is not up yet, so this only records the preference.
+        let _ = audio.set_chatmix_default(
+            load_app_config(&paths).map_or(true, |c| c.chatmix_set_default_sink),
+        );
+        Self {
+            paths,
+            audio: Arc::new(audio),
+            devices: std::sync::Mutex::new(HashMap::new()),
+            events,
+            started: Instant::now(),
+            last_profile_applied: Mutex::new(false),
+            remap,
+            retry: std::sync::Mutex::new(HashMap::new()),
+            rescanned: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<AdapterEvent> {
+        self.events.subscribe()
+    }
+
+    pub async fn discover_once(&self) {
+        let Ok(Ok(present)) = tokio::task::spawn_blocking(present_nodes).await else {
+            warn!("hidraw enumeration failed; skipping discovery");
+            return;
+        };
+        // Unplugged or replugged: none of the nodes the adapter was opened on
+        // is left (a replug between two passes brings new ones). Drop it so the
+        // device is reopened fresh (adapters keep dead fds otherwise).
+        let gone: Vec<DeviceId> = {
+            let mut map = self.devices.lock().unwrap();
+            let mut gone = Vec::new();
+            map.retain(|_, h| {
+                let alive = model_nodes(h.model, &present)
+                    .iter()
+                    .any(|sys| h.nodes.contains(sys));
+                if !alive {
+                    gone.push(h.snapshot().id);
+                }
+                alive
+            });
+            gone
+        };
+        for id in gone {
+            info!("{} unplugged", id.key());
+            let _ = self.events.send(AdapterEvent::Disconnected(id));
+        }
+
+        // Skipped: models with a live adapter (receivers only until their
+        // rescan is due), and failing ones still backing off.
+        let now = Instant::now();
+        let connected: Vec<(&'static Model, DeviceId)> = self
+            .handles()
+            .iter()
+            .map(|h| (h.model, h.snapshot()))
+            .filter(|(_, s)| s.connected)
+            .map(|(m, s)| (m, s.id))
+            .collect();
+        let mut skip: Vec<&'static Model> = Vec::new();
+        {
+            let mut rescanned = self.rescanned.lock().unwrap();
+            for (m, _) in &connected {
+                let due = m.multi
+                    && rescanned
+                        .get(&retry_key(m))
+                        .is_none_or(|&at| now >= at + drivers::RESCAN);
+                if due {
+                    rescanned.insert(retry_key(m), now);
+                } else if !skip.iter().any(|s| s.same(m)) {
+                    skip.push(m);
+                }
+            }
+            rescanned.retain(|k, _| connected.iter().any(|(m, _)| retry_key(m) == *k));
+            let retry = self.retry.lock().unwrap();
+            skip.extend(
+                all_models(&present)
+                    .filter(|m| retry.get(&retry_key(m)).is_some_and(|&(_, at)| now < at)),
+            );
+        }
+        let ctx = DriverCtx {
+            paths: self.paths.clone(),
+            audio: self.audio.clone(),
+            open: Vec::new(),
+            vendor_id: 0,
+        };
+
+        let snapshot = present.clone();
+        let (discovered, attempted) = tokio::task::spawn_blocking(move || {
+            discover_blocking(ctx, &skip, &connected, &snapshot)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            warn!("discover join: {e}");
+            Default::default()
+        });
+
+        {
+            let mut retry = self.retry.lock().unwrap();
+            for (model, ok) in attempted {
+                if ok {
+                    retry.remove(&retry_key(model));
+                } else {
+                    let (n, at) = retry.entry(retry_key(model)).or_insert((0, now));
+                    *n += 1;
+                    *at = now
+                        + DISCOVERY_PERIOD
+                            .saturating_mul(1 << (*n).min(5))
+                            .min(MAX_BACKOFF);
+                }
+            }
+        }
+
+        let mut map = self.devices.lock().unwrap();
+        // Reopened models replace their stale placeholders / dead adapters
+        // (once per model: a receiver may return several devices).
+        for (model, _) in &discovered {
+            map.retain(|_, h| !h.model.same(model) || h.snapshot().connected);
+        }
+        for (model, a) in discovered {
+            let snap = a.snapshot();
+            if matches!(snap.kind, DeviceKind::Mouse | DeviceKind::Keyboard) && snap.connected {
+                self.remap
+                    .attach(snap.id.clone(), snap.kind, model.remap_pids(&snap.id));
+            }
+            let nodes = model_nodes(model, &present);
+            let handle =
+                DeviceHandle::spawn(model, a, self.events.clone(), nodes, self.paths.clone());
+            let snap = handle.snapshot();
+            map.insert(snap.id.key(), handle);
+            let _ = self.events.send(AdapterEvent::Connected(snap));
+        }
+    }
+
+    fn handles(&self) -> Vec<DeviceHandle> {
+        self.devices.lock().unwrap().values().cloned().collect()
+    }
+
+    /// The connection that started a capture went away: stop listening.
+    pub fn end_capture(&self, device_id: DeviceId) {
+        if let Ok(snap) = self.remap.cancel_capture(device_id, false) {
+            let _ = self.events.send(AdapterEvent::RemapsUpdated(snap));
+        }
+    }
+
+    fn app_settings(&self, cfg: &AppConfig) -> AppSettings {
+        AppSettings {
+            log_level: if cfg.log_level.is_empty() {
+                "info".into()
+            } else {
+                cfg.log_level.clone()
+            },
+            chatmix_set_default_sink: cfg.chatmix_set_default_sink,
+            aux_set_default_sink: cfg.aux.set_default_sink,
+            aux_auto_enable: cfg.aux.auto_enable,
+            aux_effects: cfg.aux.effects.clone(),
+            config_dir: self.paths.root.display().to_string(),
+            theme: cfg.theme.clone(),
+            check_updates: cfg.check_updates,
+        }
+    }
+
+    /// Save first, then apply live (blocking: pw-* subprocesses, audio lock).
+    /// `reconfigure_aux` keeps the running chain when the new one fails.
+    fn set_config(&self, s: AppSettings) -> Result<AppSettings> {
+        let (cfg, ()) = update_app_config(&self.paths, |cfg| {
+            if !s.log_level.is_empty() {
+                cfg.log_level = s.log_level.clone();
+            }
+            cfg.chatmix_set_default_sink = s.chatmix_set_default_sink;
+            cfg.aux.set_default_sink = s.aux_set_default_sink;
+            cfg.aux.auto_enable = s.aux_auto_enable;
+            cfg.aux.effects = s.aux_effects.clone();
+            cfg.theme = s.theme.clone();
+            cfg.check_updates = s.check_updates;
+            Ok(())
+        })?;
+        self.audio
+            .set_chatmix_default(cfg.chatmix_set_default_sink)
+            .context("saved, but the default sink could not follow")?;
+        if self.audio.aux_active() {
+            self.audio
+                .reconfigure_aux(&cfg.aux, &cfg.aux.effects)
+                .context("saved, but AUX could not apply it")?;
+        }
+        Ok(self.app_settings(&cfg))
+    }
+
+    pub async fn maybe_apply_last_profile(&self) {
+        let mut applied = self.last_profile_applied.lock().await;
+        if *applied {
+            return;
+        }
+        let cfg = load_app_config(&self.paths).unwrap_or_default();
+        if let Some(name) = cfg.last_profile {
+            if let Err(error) = self.apply_profile(&name, true).await {
+                warn!("apply last profile {name}: {error}");
+            }
+        }
+        *applied = true;
+    }
+
+    pub async fn hub_state(&self) -> HubState {
+        let (cfg, config_error) = match load_app_config(&self.paths) {
+            Ok(cfg) => (cfg, None),
+            Err(e) => (AppConfig::default(), Some(format!("{e:#}"))),
+        };
+        let profiles = list_profiles(&self.paths).unwrap_or_default();
+        let devices: Vec<_> = self.handles().iter().map(DeviceHandle::snapshot).collect();
+        // Device threads hold the audio lock across pw-* subprocesses.
+        let audio = tokio::task::block_in_place(|| AudioSummary {
+            chatmix_active: self.audio.chatmix_active(),
+            aux_active: self.audio.aux_active(),
+            aux_processing_active: self.audio.aux_processing_active(),
+            last_error: self.audio.last_error(),
+            default_sink: None,
+        });
+        HubState {
+            health: DaemonHealth {
+                version: VERSION.into(),
+                uptime_secs: self.started.elapsed().as_secs(),
+                adapter_count: devices.len(),
+                last_error: config_error,
+            },
+            last_profile: cfg.last_profile,
+            profiles,
+            audio,
+            remaps: self.remap.snapshots(),
+            devices,
+        }
+    }
+
+    pub async fn handle(&self, req: IpcRequest) -> IpcResponse {
+        let id = req.id.clone();
+        match req.method {
+            Method::Ping => {
+                IpcResponse::ok(id, serde_json::json!({"pong": true, "version": VERSION}))
+            }
+            Method::Status | Method::Health => {
+                let st = self.hub_state().await;
+                IpcResponse::ok(id, st.health)
+            }
+            Method::GetState => IpcResponse::ok(id, self.hub_state().await),
+            Method::ListDevices => {
+                let list: Vec<_> = self
+                    .handles()
+                    .iter()
+                    .map(|h| {
+                        let d = h.snapshot();
+                        serde_json::json!({
+                            "id": d.id,
+                            "kind": d.kind,
+                            "name": d.name,
+                            "connected": d.connected,
+                        })
+                    })
+                    .collect();
+                IpcResponse::ok(id, list)
+            }
+            Method::GetSnapshot => {
+                let want = if req.params.is_null() {
+                    None
+                } else {
+                    match serde_json::from_value::<SnapshotParams>(req.params) {
+                        Ok(p) => p.device_id,
+                        Err(e) => return IpcResponse::err(id, "invalid_value", e.to_string()),
+                    }
+                };
+                let handles = self.handles();
+                let devices = handles.iter().map(DeviceHandle::snapshot);
+                match want {
+                    Some(want) => match devices.into_iter().find(|d| d.id == want) {
+                        Some(d) => IpcResponse::ok(id, d),
+                        None => IpcResponse::err(id, "not_found", "device not found"),
+                    },
+                    None => IpcResponse::ok(id, devices.collect::<Vec<_>>()),
+                }
+            }
+            Method::Set => match serde_json::from_value::<SetParams>(req.params) {
+                Ok(p) => match self.set(p.device_id, p.key, p.value).await {
+                    Ok(snap) => {
+                        let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
+                        IpcResponse::ok(id, snap)
+                    }
+                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                },
+                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+            },
+            Method::ListProfiles => {
+                let names = list_profiles(&self.paths).unwrap_or_default();
+                let cfg = load_app_config(&self.paths).unwrap_or_default();
+                IpcResponse::ok(
+                    id,
+                    serde_json::json!({"profiles": names, "last_profile": cfg.last_profile}),
+                )
+            }
+            Method::ApplyProfile => match serde_json::from_value::<ProfileNameParams>(req.params) {
+                Ok(p) => match self.apply_profile(&p.name, false).await {
+                    Ok(()) => IpcResponse::ok(id, serde_json::json!({"applied": p.name})),
+                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                },
+                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+            },
+            Method::SaveProfile => match serde_json::from_value::<ProfileNameParams>(req.params) {
+                Ok(p) => match self.save_profile(&p.name).await {
+                    Ok(()) => IpcResponse::ok(id, serde_json::json!({"saved": p.name})),
+                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                },
+                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+            },
+            Method::ResetAudio => {
+                // pactl / pw-* subprocesses: keep them off the async runtime.
+                let audio = self.audio.clone();
+                let reset = tokio::task::spawn_blocking(move || audio.reset_all())
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("reset task: {e}")));
+                match reset {
+                    Ok(()) => IpcResponse::ok(id, serde_json::json!({"reset": true})),
+                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                }
+            }
+            Method::GetConfig => match load_app_config(&self.paths) {
+                Ok(cfg) => IpcResponse::ok(id, self.app_settings(&cfg)),
+                Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
+            },
+            Method::SetConfig => match serde_json::from_value::<AppSettings>(req.params) {
+                Ok(s) => {
+                    if let Err(e) = validate_settings(&s) {
+                        return IpcResponse::err(id, "invalid_value", e);
+                    }
+                    match tokio::task::block_in_place(|| self.set_config(s)) {
+                        Ok(saved) => IpcResponse::ok(id, saved),
+                        Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
+                    }
+                }
+                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+            },
+            Method::GetRemaps => {
+                match serde_json::from_value::<SnapshotParams>(req.params)
+                    .ok()
+                    .and_then(|p| p.device_id)
+                {
+                    Some(dev) => match self.remap.snapshot(&dev) {
+                        Ok(snap) => IpcResponse::ok(id, snap),
+                        Err(e) => IpcResponse::err(id, "not_found", e.to_string()),
+                    },
+                    None => IpcResponse::ok(id, self.remap.snapshots()),
+                }
+            }
+            Method::SetRemap => match serde_json::from_value::<SetRemapParams>(req.params) {
+                Ok(p) => match self.remap.set_binding(p.device_id, p.binding) {
+                    Ok(snap) => {
+                        let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
+                        IpcResponse::ok(id, snap)
+                    }
+                    Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                },
+                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+            },
+            Method::ClearRemap => match serde_json::from_value::<ClearRemapParams>(req.params) {
+                Ok(p) => match self.remap.clear_binding(p.device_id, p.source) {
+                    Ok(snap) => {
+                        let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
+                        IpcResponse::ok(id, snap)
+                    }
+                    Err(e) => IpcResponse::err(id, "io", e.to_string()),
+                },
+                Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+            },
+            Method::StartCapture => {
+                match serde_json::from_value::<StartCaptureParams>(req.params) {
+                    Ok(p) => match self.remap.start_capture(p.device_id, p.role, p.source) {
+                        Ok(snap) => {
+                            let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
+                            IpcResponse::ok(id, snap)
+                        }
+                        Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                    },
+                    Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                }
+            }
+            Method::CancelCapture => {
+                match serde_json::from_value::<CancelCaptureParams>(req.params) {
+                    Ok(p) => match self.remap.cancel_capture(p.device_id, p.keep) {
+                        Ok(snap) => {
+                            let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
+                            IpcResponse::ok(id, snap)
+                        }
+                        Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                    },
+                    Err(e) => IpcResponse::err(id, "invalid_value", e.to_string()),
+                }
+            }
+            // The connection loop turns its connection into an event stream
+            // before requests reach the hub.
+            Method::SubscribeEvents => IpcResponse::err(
+                id,
+                "invalid_value",
+                "SubscribeEvents is handled by the connection",
+            ),
+        }
+    }
+
+    async fn set(
+        &self,
+        device_id: DeviceId,
+        key: SettingKey,
+        value: SettingValue,
+    ) -> Result<hako_core::DeviceSnapshot> {
+        let handle = self.devices.lock().unwrap().get(&device_id.key()).cloned();
+        handle
+            .ok_or_else(|| anyhow::anyhow!("device offline"))?
+            .set(key, value)
+            .await
+    }
+
+    /// `startup`: the automatic re-apply at daemon start, which skips devices
+    /// in save-to-device mode (their stored state is already on the device;
+    /// re-applying would write onboard memory at every boot).
+    async fn apply_profile(&self, name: &str, startup: bool) -> Result<()> {
+        let profile = load_profile(&self.paths, name)?;
+        let mut failures = Vec::new();
+        for h in self.handles() {
+            let saving = h
+                .snapshot()
+                .settings
+                .get(SettingKey::SaveToDevice.as_str())
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if startup && saving {
+                info!(
+                    "{}: in save-to-device mode, startup profile skipped",
+                    h.model.name
+                );
+                continue;
+            }
+            // The device's own stem, else any PID of its model (receiver vs. wired path).
+            let m = h.model;
+            let own = h.snapshot().id.config_stem();
+            let Some(dev_map) = profile.devices.get(&own).or_else(|| {
+                m.product_ids.iter().find_map(|pid| {
+                    profile
+                        .devices
+                        .get(&format!("{:04x}_{pid:04x}", m.vendor_id))
+                })
+            }) else {
+                continue;
+            };
+            let controls = h.snapshot().controls;
+            for (k, v) in settings_from_profile_device(dev_map) {
+                let result = match SettingKey::parse(&k) {
+                    // Profiles re-apply at every start: never onboard memory
+                    // writes (flash wear) or the opt-in that allows them.
+                    Some(key)
+                        if key == SettingKey::OnboardWrites
+                            || controls.iter().any(|c| c.key == key && c.persistent) =>
+                    {
+                        continue
+                    }
+                    Some(key) => h.set(key, v).await.map(|_| ()),
+                    None => Err(anyhow::anyhow!("unknown setting")),
+                };
+                if let Err(error) = result {
+                    failures.push(format!("{} {k}: {error}", m.name));
+                }
+            }
+            let _ = self.events.send(AdapterEvent::Updated(h.snapshot()));
+        }
+        if !failures.is_empty() {
+            anyhow::bail!("profile partially applied: {}", failures.join("; "));
+        }
+        set_last_profile(&self.paths, name)?;
+        info!("applied profile {name}");
+        Ok(())
+    }
+
+    async fn save_profile(&self, name: &str) -> Result<()> {
+        let mut devices = std::collections::BTreeMap::new();
+        for h in self.handles() {
+            let snap = h.snapshot();
+            // Only what ApplyProfile can write back (no read-only or stale keys).
+            let m: std::collections::BTreeMap<_, _> = snap
+                .settings
+                .iter()
+                .filter(|(k, _)| {
+                    snap.controls.iter().any(|c| {
+                        c.key.as_str() == k.as_str()
+                            && !c.read_only
+                            && !c.persistent
+                            && c.blocked.is_none()
+                            && c.key != SettingKey::OnboardWrites
+                    })
+                })
+                .map(|(k, v)| (k.clone(), TomlSetting::from(v)))
+                .collect();
+            if !m.is_empty() {
+                devices.insert(snap.id.config_stem(), m);
+            }
+        }
+        let profile = ProfileFile {
+            version: 1,
+            name: name.to_string(),
+            devices,
+        };
+        save_profile(&self.paths, &profile)?;
+        set_last_profile(&self.paths, name)
+    }
+
+    pub async fn shutdown(&self) {
+        let handles: Vec<_> = self
+            .devices
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, h)| h)
+            .collect();
+        let acks: Vec<_> = handles.iter().map(DeviceHandle::shutdown).collect();
+        tokio::task::spawn_blocking(move || {
+            // ponytail: shared 2 s budget; a wedged device is abandoned, not joined.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            for ack in acks {
+                let _ = ack.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+            }
+        })
+        .await
+        .ok();
+        let _ = self.audio.reset_all();
+        self.remap.shutdown();
+        let _ = self.events.send(AdapterEvent::ShuttingDown);
+    }
+}
+
+fn set_last_profile(paths: &ConfigPaths, name: &str) -> Result<()> {
+    update_app_config(paths, |cfg| {
+        cfg.last_profile = Some(name.to_string());
+        Ok(())
+    })
+    .map(drop)
+}
+
+/// Settings checks that are the caller's fault (`invalid_value`).
+fn validate_settings(s: &AppSettings) -> Result<(), String> {
+    s.aux_effects.validate()?;
+    if !s.log_level.is_empty() && !LOG_LEVELS.contains(&s.log_level.as_str()) {
+        return Err(format!(
+            "log level must be one of {}",
+            LOG_LEVELS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn retry_key(m: &Model) -> (u16, u16) {
+    (m.vendor_id, m.product_ids[0])
+}
+
+/// sysfs paths of `model`'s nodes in `present`.
+fn model_nodes(model: &Model, present: &Present) -> Vec<PathBuf> {
+    present
+        .iter()
+        .filter(|d| d.vendor_id == model.vendor_id && model.product_ids.contains(&d.product_id))
+        .map(|d| d.sys.clone())
+        .collect()
+}
+
+fn present_nodes() -> Result<Present> {
+    crate::hid::enumerate_hidraw()
+}
+
+/// Every table model, then a runtime-probed model for each present VID:PID
+/// no table lists.
+fn all_models(present: &Present) -> impl Iterator<Item = &'static Model> + '_ {
+    let mut unlisted: Vec<(u16, u16)> = present
+        .iter()
+        .map(|d| (d.vendor_id, d.product_id))
+        .filter(|&(v, p)| {
+            !drivers::models().any(|m| m.vendor_id == v && m.product_ids.contains(&p))
+        })
+        .collect();
+    unlisted.sort_unstable();
+    unlisted.dedup();
+    drivers::models().chain(unlisted.into_iter().filter_map(move |(v, p)| {
+        let nodes: Vec<&HidDeviceInfo> = present
+            .iter()
+            .filter(|d| d.vendor_id == v && d.product_id == p)
+            .collect();
+        drivers::fallback_model(&nodes)
+    }))
+}
+
+/// Blocking discovery body (called from spawn_blocking): open every present
+/// model not in `skip`; failures become placeholders. Also returns every
+/// model tried and whether it yielded a device. `connected` lists the open
+/// devices a rescanned `multi` model must not return again.
+fn discover_blocking(
+    mut ctx: DriverCtx,
+    skip: &[&'static Model],
+    connected: &[(&'static Model, DeviceId)],
+    present: &Present,
+) -> (Opened, Vec<(&'static Model, bool)>) {
+    let mut out = Vec::new();
+    let mut attempted = Vec::new();
+    for model in all_models(present) {
+        if skip.iter().any(|m| m.same(model)) {
+            continue;
+        }
+        let Some(pid) = model.product_ids.iter().copied().find(|&pid| {
+            present
+                .iter()
+                .any(|d| d.vendor_id == model.vendor_id && d.product_id == pid)
+        }) else {
+            continue;
+        };
+        ctx.vendor_id = model.vendor_id;
+        ctx.open = connected
+            .iter()
+            .filter(|(m, _)| m.same(model))
+            .map(|(_, id)| id.clone())
+            .collect();
+        let rescan = !ctx.open.is_empty();
+        match (model.open)(pid, &ctx) {
+            Ok(adapters) => {
+                // A receiver with nothing reachable backs off like a failure;
+                // a rescan that finds nothing new is fine.
+                attempted.push((model, rescan || !adapters.is_empty()));
+                out.extend(adapters.into_iter().map(|a| (model, a)));
+            }
+            Err(e) if rescan => warn!("{} rescan: {e}", model.name),
+            Err(e) => {
+                warn!("{}: {e}", model.name);
+                attempted.push((model, false));
+                let placeholder = PlaceholderAdapter::permission_denied(
+                    DeviceId {
+                        vendor_id: model.vendor_id,
+                        product_id: pid,
+                        instance: "pending".into(),
+                    },
+                    model.kind,
+                    model.name,
+                    &e,
+                );
+                out.push((model, Box::new(placeholder) as Box<dyn DeviceAdapter>));
+            }
+        }
+    }
+    (out, attempted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_validation_rejects_unknown_log_levels() {
+        let mut s = AppSettings::default();
+        assert!(validate_settings(&s).is_ok());
+        s.log_level = "loud".into();
+        assert!(validate_settings(&s).is_err());
+        s.log_level = String::new();
+        assert!(validate_settings(&s).is_ok());
+    }
+}

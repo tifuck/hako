@@ -1,0 +1,16 @@
+[Unit]
+Description=Hako device daemon
+After=pipewire.service pipewire-pulse.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hakod
+# Ensure pactl/pw-link are found (user service has a minimal PATH)
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=2
+
+
+[Install]
+WantedBy=default.target

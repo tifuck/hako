@@ -1,0 +1,62 @@
+name: Release
+
+# Push a tag vX.Y.Z (matching the workspace version) to build and publish.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    # Oldest supported runner: the binaries need its glibc (2.35) or newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System deps (egui/winit)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: Tag matches workspace version
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml v$v"; exit 1; }
+      - run: scripts/check-public.sh
+      - run: cargo test --workspace --locked
+      - name: Build
+        # Embeds owner/repo so installed builds know where to look for updates.
+        env:
+          HAKO_REPO: ${{ github.repository }}
+        run: cargo build --release --locked --workspace
+      - name: Smoke test binaries
+        run: |
+          target/release/hakod --version
+          target/release/hako --version
+          if ldd target/release/hako target/release/hakod | grep 'not found'; then exit 1; fi
+      - name: Package
+        run: |
+          name="hako-${GITHUB_REF_NAME#v}-x86_64-linux"
+          d="dist/$name"
+          mkdir -p "$d/bin"
+          cp target/release/hakod target/release/hako "$d/bin/"
+          cp --parents scripts/install-user.sh scripts/fix-hidraw-perms.sh \
+            packaging/hako.desktop packaging/systemd/hakod.service \
+            udev/70-hako.rules client/assets/icon.png "$d/"
+          cp README.md LICENSE NOTICE "$d/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS)
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+            --title "Hako $GITHUB_REF_NAME" --generate-notes --verify-tag

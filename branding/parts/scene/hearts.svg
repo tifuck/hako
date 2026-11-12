@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+<g fill="#FF4D6D">
+<path transform="translate(21 30) rotate(-15)" d="M0 4.6C-7 -.2 -6.2 -5 -2.9 -5C-1.2 -5 -.3 -3.9 0 -3C.3 -3.9 1.2 -5 2.9 -5C6.2 -5 7 -.2 0 4.6Z"/>
+<path transform="translate(99 27) rotate(12) scale(.8)" d="M0 4.6C-7 -.2 -6.2 -5 -2.9 -5C-1.2 -5 -.3 -3.9 0 -3C.3 -3.9 1.2 -5 2.9 -5C6.2 -5 7 -.2 0 4.6Z"/>
+<path transform="translate(13 62) rotate(10) scale(.55)" d="M0 4.6C-7 -.2 -6.2 -5 -2.9 -5C-1.2 -5 -.3 -3.9 0 -3C.3 -3.9 1.2 -5 2.9 -5C6.2 -5 7 -.2 0 4.6Z"/>
+<path transform="translate(106 60) rotate(-12) scale(.6)" d="M0 4.6C-7 -.2 -6.2 -5 -2.9 -5C-1.2 -5 -.3 -3.9 0 -3C.3 -3.9 1.2 -5 2.9 -5C6.2 -5 7 -.2 0 4.6Z"/>
+<path transform="translate(102 92) rotate(8) scale(.7)" d="M0 4.6C-7 -.2 -6.2 -5 -2.9 -5C-1.2 -5 -.3 -3.9 0 -3C.3 -3.9 1.2 -5 2.9 -5C6.2 -5 7 -.2 0 4.6Z"/>
+<path transform="translate(17 91) rotate(-8) scale(.65)" d="M0 4.6C-7 -.2 -6.2 -5 -2.9 -5C-1.2 -5 -.3 -3.9 0 -3C.3 -3.9 1.2 -5 2.9 -5C6.2 -5 7 -.2 0 4.6Z"/>
+</g>
+</svg>

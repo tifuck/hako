@@ -1,0 +1,115 @@
+# [group.name] makes out/pip-<name>.svg; the group is its heading in gallery.html.
+# Anything left out falls back to:
+#   pose = "stand"   face = "default"   wear = ["tuft"]   scene = ""
+#   bg = "none"      shape = "rounded"  (or "circle", "square")
+# pose / face / wear / scene name files in parts/. wear is drawn in the order listed.
+
+# --- Base: transparent, nothing added. Start from these. ---
+
+[base.base]
+
+[base.base-plain]          # no tuft: the blank to draw hats on
+wear = []
+
+[base.base-wink]
+face = "wink"
+
+[base.base-happy]
+face = "happy"
+
+[base.base-sleepy]
+face = "sleepy"
+
+[base.base-wave]
+pose = "wave"
+
+[base.base-cheer]
+pose = "cheer"
+face = "happy"
+
+# --- Icon colours ---
+
+[icons.icon]
+bg = "#FFC94D"
+
+[icons.icon-coral]
+bg = "#FF7A6B"
+
+[icons.icon-sky]
+bg = "#A8DEFF"
+
+[icons.icon-mint]
+bg = "#B9F3D0"
+
+[icons.icon-violet]
+bg = "#C9BEFF"
+
+[icons.icon-night]
+bg = "#1E1B4B"
+
+[icons.avatar]             # round, for profile pictures
+bg = "#FFC94D"
+shape = "circle"
+
+# --- Everyday ---
+
+[everyday.headset]
+wear = ["headset"]
+bg = "#FF7A6B"
+
+[everyday.scarf]
+pose = "wave"
+wear = ["tuft", "scarf-rgb"]
+bg = "#B9F3D0"
+
+[everyday.shades]
+wear = ["tuft", "shades"]
+bg = "#7DD3FC"
+
+# --- Events ---
+
+[events.winter]
+wear = ["hat-bobble"]
+scene = "snow"
+bg = "#A8DEFF"
+
+[events.christmas]
+face = "happy"
+wear = ["hat-santa"]
+scene = "snow"
+bg = "#1F7A5C"
+
+[events.new-year]
+pose = "cheer"
+face = "happy"
+wear = ["hat-party", "bowtie"]
+scene = "confetti"
+bg = "#1E1B4B"
+
+[events.valentines]
+face = "love"
+wear = ["tuft", "bowtie"]
+scene = "hearts"
+bg = "#FFC2D4"
+
+[events.easter]
+face = "happy"
+wear = ["ears-bunny"]
+bg = "#C4B5FD"
+
+[events.halloween]
+face = "wink"
+wear = ["hat-witch"]
+scene = "stars"
+bg = "#FF8A3D"
+
+[events.black-friday]
+wear = ["tuft", "shades", "tag-sale"]
+bg = "#111318"
+
+[events.birthday]
+pose = "cheer"
+face = "happy"
+wear = ["hat-party"]
+scene = "confetti"
+bg = "#FFC94D"

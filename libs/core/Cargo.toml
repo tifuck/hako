@@ -1,0 +1,15 @@
+[package]
+name = "hako-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hako shared types: settings catalog, IPC messages, config"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+tokio = { workspace = true }
+

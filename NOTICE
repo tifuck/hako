@@ -1,0 +1,110 @@
+Hako
+========
+
+This project reimplements userspace protocols informed by public reverse
+engineering, vendor documentation and open-source projects. No source code
+from the projects below is included; they were consulted for device IDs,
+packet layouts and behaviour only. Per-protocol citations live in each
+driver's module documentation under daemon/src/drivers/<vendor>/.
+
+Protocol references (not vendored):
+- OpenRazer (GPL-2.0) and the uchroma protocol notes - Razer report layout,
+  transaction ids, per-model features
+- Solaar (GPL-2.0), libratbag (MIT), Logitech cpg-docs, openlogi.org -
+  Logitech HID++ 1.0/2.0 features and receiver pairing
+- HeadsetControl (GPL-3.0) - SteelSeries, HyperX and Logitech headset commands
+- rivalcfg (WTFPL) - SteelSeries mouse commands
+- OpenRGB (GPL-2.0) - SteelSeries Apex, HyperX, ASUS Aura and Corsair lighting
+  layouts and device IDs
+- HyperHeadset (MIT), ngenuity-linux-cli, santeri3700 Pulsefire Dart notes
+  (CC0) - HyperX headset and mouse protocols
+- G-Helper (GPL-3.0), rog-mouse-battery, pelta-control - ASUS ROG mouse and
+  headset protocols
+- G-Helper (GPL-3.0) PeripheralsProvider, Keyboard and Headset models,
+  libratbag (MIT) asus driver - ASUS Omni receiver pairing, mouse debounce
+  and DPI stages, ROG keyboard battery, ROG headset lighting and sidetone
+- ckb-next (GPL-2.0) and its corsair-protocol docs, OpenLinkHub, Linux
+  hid-corsair-void (GPL-2.0), HaloBattery, hs80-battery - Corsair NXP / Bragi
+  and headset protocols
+- QMK firmware (GPL-2.0) quantum/via.h, quantum/via.c (current and 0.14-0.19
+  tags), tmk_core/protocol/usb_descriptor.c; the-via/app (GPL-3.0)
+  src/utils/keyboard-api.ts and the-via/reader (GPL-3.0) common menus;
+  vial-qmk (GPL-2.0) quantum/via.h / via.c - VIA raw HID command layout,
+  lighting channels and value ids
+- HeadsetControl (GPL-3.0) - Corsair Void lights / sidetone and Bragi headset
+  property behaviour
+- HeadsetControl (GPL-3.0), zoneout (MIT), OpenInzone (GPL-3.0) - Sony INZONE
+  and PULSE 3D headset protocols
+- HeadsetControl (GPL-3.0) - Audeze Maxwell / Maxwell 2 headset protocol
+- OpenRGB (GPL-2.0) RoccatController, HeadsetControl (GPL-3.0) roccat_elo_*,
+  libratbag (MIT) driver-roccat*.c - ROCCAT / Turtle Beach mouse, keyboard
+  and headset layouts and device IDs
+- PlasmaNGenuity (MIT), HyperX Saga Control (MIT) - HyperX Pulsefire Dart
+  heartbeat and Pulsefire Saga Pro protocol
+- OpenRazer (GPL-2.0) razerkraken driver - Razer Kraken headset LED reports
+- HeadsetControl (GPL-3.0) - Razer BlackShark V2 Pro (PlayStation) dongle
+  framing and battery read
+- OpenRazer (GPL-2.0) VARSTORE usage and razer_get_active_varstore, freenapse
+  (MIT) src/lighting.rs / src/protocol.rs / FEATURES.md, OpenRGB (GPL-2.0)
+  RazerController storage flags, uchroma protocol reference, razercfg
+  (GPL-2.0) hw_deathadder_chroma.c - Razer storage byte and onboard profile
+  slots (docs/onboard-writes/razer.md)
+- mxw (MIT), glorious-gui (MIT), glorious-i2 (MIT), glorious-i2-battery
+  (GPL-2.0), OpenRGB (GPL-2.0) SinowealthControllerDetect.cpp - Glorious
+  wireless mouse battery reports and device IDs
+- Linux hid-logitech-hidpp / hid-logitech-dj (GPL-2.0), OpenRGB (GPL-2.0),
+  HeadsetControl (GPL-3.0) Centurion / G930 / Zone - Logitech device IDs,
+  receiver children, keyboard lighting features and headset protocols
+- Linux-Arctis-Manager (GPL-3.0) device configs - SteelSeries headset IDs and
+  capability cross-checks
+- apex-analog (MIT) - SteelSeries Apex Pro Gen 3 actuation command
+- Linux-Arctis-7-Plus-ChatMix (GPL-3.0), nova7wireless-chatmix-linux,
+  Arctis-Nova-7-Chatmix (MIT), Arctis Sound Manager docs - which SteelSeries
+  headsets need host-side ChatMix, and their PipeWire sink names
+- OpenRGB (GPL-2.0) CoolerMasterController, libcmmk (LGPL-3.0) - Cooler
+  Master mouse and keyboard lighting layouts and device IDs
+- OpenRGB (GPL-2.0) RedragonController, mouse_m908 (GPL-3.0) - Redragon
+  mouse device IDs and onboard-memory layout research (nothing is written)
+- OpenRGB (GPL-2.0) MSIVigorController, MSIClutchController - MSI Vigor GK30
+  and Clutch GM11 device IDs and lighting layout research (nothing is written)
+- libratbag (MIT) src/hidpp20.c, src/driver-hidpp20.c, data/devices; Solaar
+  (GPL-2.0) hidpp20.py OnboardProfiles and settings_templates.py; OpenLogi
+  docs (MIT / Apache-2.0) 0x8070 / 0x8071 / 0x8310; OpenRGB (GPL-2.0)
+  LogitechHIDPP20Controller; HeadsetControl (GPL-3.0) Centurion equalizers;
+  pro2-linux (MIT) protocol notes - Logitech onboard-memory write research
+  (docs/onboard-writes/logitech.md)
+- QMK firmware (GPL-2.0) quantum/backlight/backlight.c, quantum/rgb_matrix/
+  rgb_matrix.c; the-via/app (GPL-3.0) src/store/menusSlice.ts; vial-gui
+  (GPL-2.0) protocol/keyboard_comm.py, protocol/constants.py,
+  editor/rgb_configurator.py - VIA lighting save command and which VIA
+  lighting writes reach EEPROM
+- kats1123 maxwell-firmware-research PROTOCOL.md, HeadsetControl (GPL-3.0)
+  pull requests #577 and #591 - Audeze Maxwell RACE command families and
+  headset storage (research for docs/onboard-writes/audeze.md; nothing new is
+  written)
+- ckb-next (GPL-2.0) bragi_proto.h / device_bragi.c / dpi_bragi.c /
+  led_bragi.c / profile_*.c, OpenLinkHub (GPL-3.0) src/devices/*,
+  HeadsetControl (GPL-3.0) corsair_virtuoso_xt.hpp - Corsair Bragi onboard
+  poll rate, angle snapping and headset brightness writes, and the per-model
+  research behind the blocked ones (docs/onboard-writes/corsair.md)
+- Linux hid-roccat-koneplus / hid-roccat-common (GPL-2.0), roccat-tools
+  (GPL-2.0) koneplus / konepure, Eruption (GPL-3.0) roccat_kone_xtd.rs -
+  ROCCAT Kone XTD / Pure profile-settings layout, checksum and write status
+- libratbag (MIT) driver-sinowealth.c, gloriousctl (EUPL-1.2), magnificent
+  model_o_minus.rs, OpenRGB (GPL-2.0) SinowealthController - Glorious Model
+  O / D wired configuration block and debounce command
+- HeadsetControl (GPL-3.0), Linux-Arctis-Manager (GPL-3.0) device configs,
+  proposed Linux hid-steelseries patch series (GPL-2.0) - SteelSeries headset
+  save-to-flash commands and Arctis Nova 7 Gen 2 settings read-back
+- rivalcfg (WTFPL), libratbag (MIT) driver-steelseries.c, OpenRGB (GPL-2.0)
+  SteelSeriesMouseController - SteelSeries mouse save commands
+- libratbag (MIT) src/asus.c, src/driver-asus.c; G-Helper (GPL-3.0)
+  AsusMouse.cs, AsusKeyboard.cs; OpenRGB (GPL-2.0) AsusAuraMouseController,
+  AsusAuraKeyboardController - ASUS `50 03` / `50 55` onboard-profile save
+- ngenuity-linux-cli docs/protocol/universal.md and cli.py, HyperX Saga
+  Control (MIT) protocol.py - HyperX universal-protocol onboard slot 1 (DPI
+  table, brightness)
+
+Linux-Arctis-Manager (GPL-3.0) application source is not copied.
+No proprietary SteelSeries GG / Razer Synapse / Logitech G HUB / Corsair iCUE /
+HyperX NGENUITY / ASUS Armoury Crate code is included.

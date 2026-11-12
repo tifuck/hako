@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "libs/core",
+    "libs/ui",
+    "libs/audio",
+    "daemon",
+    "client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Hako"]
+
+[workspace.dependencies]
+hako-core = { path = "libs/core" }
+hako-ui = { path = "libs/ui" }
+hako-audio = { path = "libs/audio" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "fs", "signal", "process"] }
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.31", default-features = true }
+egui = "0.31"

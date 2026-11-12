@@ -1,0 +1,617 @@
+//! Razer keyboards and mice over the 90-byte Razer feature report
+//! (`protocol.rs`). Sources: OpenRazer (<https://github.com/openrazer/openrazer>,
+//! GPL; cited for IDs and byte layouts only, no code copied) and the uchroma
+//! protocol reference; per-file notes name the exact files.
+//!
+//! - Huntsman V2 TKL (below): its own adapter, hidraw with usbfs fallback.
+//! - Everything else: one generic adapter (`device.rs`) driven by the per-model
+//!   table in `models.rs`.
+//! - Headsets: `kraken.rs`.
+//!
+//! Huntsman V2 TKL lighting via OpenRazer protocol.
+//!
+//! OpenRazer kernel driver uses USB control transfers:
+//!   SET_REPORT / GET_REPORT Feature (wValue 0x300) with **wIndex = 0x03**
+//!   (interface 3, a vendor-only collection with no key input).
+//!
+//! Preferred path: hidraw on interface 3. usbhid turns HIDIOC\[SG\]FEATURE with
+//! report id 0 into exactly that control transfer, so no kernel driver has to
+//! be detached. Fallback: usbfs control transfers (claims interface 3), for
+//! when interface 3 has no hidraw node (e.g. left unbound by a crashed daemon).
+//!
+//! Onboard memory: brightness (0x0f/0x04) and effect (0x0f/0x02) go out with
+//! VARSTORE (profile 1), as OpenRazer sends them for this PID, on every open
+//! (restore) and every change, so the keyboard keeps the last lighting across
+//! power cycles. These bytes are frozen (hardware-verified) and predate the
+//! onboard-memory opt-in; docs/onboard-writes/razer.md has the details.
+
+mod device;
+mod kraken;
+mod models;
+mod protocol;
+
+use crate::drivers::{DeviceAdapter, Model};
+use crate::hid::{find_hidraw, find_usb_device_path, HidrawDevice, UsbDevice};
+use anyhow::{bail, Context, Result};
+use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
+use hako_core::config::{get_setting, merge_setting, ConfigPaths};
+use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
+use protocol::{check_response, make_report, Effect as KbEffectKind, BACKLIGHT_LED, VARSTORE};
+use tracing::{info, warn};
+
+const VID: u16 = 0x1532;
+const PID: u16 = 0x026b;
+
+/// OpenRazer report_index for Huntsman V2 TKL (USB interface number / wIndex).
+const REPORT_IFACE: u16 = 0x03;
+
+/// Transaction id OpenRazer uses for lighting on HUNTSMAN_V2_TENKEYLESS.
+const TXN_LED: u8 = 0x1f;
+/// Transaction id for device-mode / firmware (standard) commands.
+const TXN_STD: u8 = 0xff;
+
+/// HID feature buffer = report id 0 + 90-byte Razer report.
+const FEATURE_LEN: usize = 91;
+
+const HUNTSMAN_V2_TKL: Model = Model {
+    vendor_id: VID,
+    product_ids: &[PID],
+    kind: DeviceKind::Keyboard,
+    name: "Razer Huntsman V2 TKL",
+    // usbfs control-transfer fallback when interface 3 has no hidraw node.
+    usbfs: true,
+    multi: false,
+    open: |_, ctx| {
+        Ok(vec![
+            Box::new(RazerKeyboardAdapter::try_open(ctx.paths.clone())?) as Box<dyn DeviceAdapter>,
+        ])
+    },
+};
+
+/// Huntsman V2 TKL first, then one entry per row of `models::SPECS`, then the
+/// headsets of `kraken::MODELS`.
+pub const MODELS: &[Model] = &ALL_MODELS;
+
+const MODEL_COUNT: usize = 1 + models::SPECS.len() + kraken::MODELS.len();
+
+const ALL_MODELS: [Model; MODEL_COUNT] = {
+    let mut out = [HUNTSMAN_V2_TKL; MODEL_COUNT];
+    let mut i = 0;
+    while i < models::SPECS.len() {
+        let s = &models::SPECS[i];
+        out[i + 1] = Model {
+            vendor_id: VID,
+            product_ids: s.pids,
+            kind: s.kind,
+            name: s.name,
+            usbfs: false,
+            multi: false,
+            open: device::open,
+        };
+        i += 1;
+    }
+    let mut j = 0;
+    while j < kraken::MODELS.len() {
+        let m = &kraken::MODELS[j];
+        out[i + 1 + j] = Model {
+            vendor_id: m.vendor_id,
+            product_ids: m.product_ids,
+            kind: m.kind,
+            name: m.name,
+            usbfs: m.usbfs,
+            multi: m.multi,
+            open: m.open,
+        };
+        j += 1;
+    }
+    out
+};
+
+enum Transport {
+    Usb { dev: UsbDevice, iface: u16 },
+    Hidraw(HidrawDevice),
+}
+
+impl Transport {
+    fn set_feature(&mut self, report: &[u8; 90]) -> Result<()> {
+        match self {
+            Transport::Usb { dev, iface } => {
+                let mut buf = *report;
+                dev.hid_set_feature(*iface, &mut buf)
+            }
+            Transport::Hidraw(dev) => {
+                let mut buf = [0u8; FEATURE_LEN];
+                buf[1..].copy_from_slice(report);
+                dev.set_feature(&mut buf)
+            }
+        }
+    }
+
+    fn get_feature(&mut self) -> Result<[u8; 90]> {
+        let mut resp = [0u8; 90];
+        match self {
+            Transport::Usb { dev, iface } => dev.hid_get_feature(*iface, &mut resp)?,
+            Transport::Hidraw(dev) => {
+                // buf[0] = report id in, report data comes back at buf[1..].
+                let mut buf = [0u8; FEATURE_LEN];
+                dev.get_feature(&mut buf)?;
+                resp.copy_from_slice(&buf[1..]);
+            }
+        }
+        Ok(resp)
+    }
+
+    /// OpenRazer razer_send_payload: SET request, short wait, GET response,
+    /// then require matching class/cmd and status busy (0x01) or ok (0x02).
+    fn transact(&mut self, report: &[u8; 90]) -> Result<[u8; 90]> {
+        self.set_feature(report)?;
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let resp = self.get_feature()?;
+        check_response(report, &resp)?;
+        Ok(resp)
+    }
+}
+
+/// How often the hardware brightness (changed with Fn keys) is read back.
+const BRIGHTNESS_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub struct RazerKeyboardAdapter {
+    id: DeviceId,
+    transport: Option<Transport>,
+    settings: SettingsMap,
+    last_error: Option<String>,
+    paths: ConfigPaths,
+    last_poll: std::time::Instant,
+}
+
+impl RazerKeyboardAdapter {
+    pub fn try_open(paths: ConfigPaths) -> Result<Self> {
+        let (transport, instance) = open_transport()?;
+
+        let id = DeviceId {
+            vendor_id: VID,
+            product_id: PID,
+            instance,
+        };
+        let mut settings = hako_core::config::load_device_settings(&paths, VID, PID)?;
+        defaults(&mut settings);
+        let mut a = Self {
+            id,
+            transport: Some(transport),
+            settings,
+            last_error: None,
+            paths,
+            last_poll: std::time::Instant::now(),
+        };
+
+        // Normal (firmware) mode, as razer_kbd_probe does. Driver mode (0x03)
+        // hands Fn/media keys to the OpenRazer daemon, which we don't run; this
+        // also recovers a keyboard left in driver mode by earlier builds.
+        if let Err(e) = a.send(TXN_STD, 0x00, 0x04, &[0x00, 0x00]) {
+            warn!("razer normal mode: {e}");
+            a.last_error = Some(format!("device mode: {e}"));
+        }
+
+        // Read live brightness so the slider reflects hardware.
+        if let Ok(Some(br)) = a.read_brightness_pct() {
+            merge_setting(
+                &mut a.settings,
+                SettingKey::Brightness,
+                SettingValue::Int(br as i64),
+            );
+        }
+        // Re-apply saved effect/color to hardware (restore across reboot).
+        if let Err(e) = a.apply_all() {
+            warn!("razer restore on open: {e}");
+            a.last_error = Some(e.to_string());
+        }
+
+        let via = match &a.transport {
+            Some(Transport::Usb { dev, iface }) => {
+                format!("usb {} iface={iface}", dev.path.display())
+            }
+            Some(Transport::Hidraw(h)) => format!("hidraw {}", h.path.display()),
+            None => "none".into(),
+        };
+        info!("Razer keyboard open via {via}");
+        Ok(a)
+    }
+
+    fn send(&mut self, txn: u8, class: u8, cmd: u8, args: &[u8]) -> Result<()> {
+        self.send_get(txn, class, cmd, args)?;
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        Ok(())
+    }
+
+    fn send_get(&mut self, txn: u8, class: u8, cmd: u8, args: &[u8]) -> Result<[u8; 90]> {
+        let report = make_report(txn, class, cmd, args);
+        self.transport
+            .as_mut()
+            .context("no device")?
+            .transact(&report)
+    }
+
+    fn set_brightness_pct(&mut self, pct: u8) -> Result<()> {
+        let wire = ((pct.min(100) as u16) * 255 / 100) as u8;
+        self.send(TXN_LED, 0x0f, 0x04, &[VARSTORE, BACKLIGHT_LED, wire])
+    }
+
+    fn read_brightness_pct(&mut self) -> Result<Option<u8>> {
+        let resp = self.send_get(TXN_LED, 0x0f, 0x84, &[VARSTORE, BACKLIGHT_LED, 0x00])?;
+        // arguments[2] = brightness (status already checked by transact)
+        if resp[5] >= 3 {
+            let wire = resp[10]; // arg[2]
+            return Ok(Some(((wire as u16) * 100 / 255).min(100) as u8));
+        }
+        Ok(None)
+    }
+
+    fn apply_all(&mut self) -> Result<()> {
+        let br = get_setting(&self.settings, SettingKey::Brightness)
+            .and_then(|v| v.as_int())
+            .unwrap_or(80) as u8;
+        self.set_brightness_pct(br)?;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let effect = KbEffectKind::from_str(
+            get_setting(&self.settings, SettingKey::Effect)
+                .and_then(|v| v.as_str())
+                .unwrap_or("static"),
+        );
+        let r = get_setting(&self.settings, SettingKey::ColorR)
+            .and_then(|v| v.as_int())
+            .unwrap_or(0) as u8;
+        let g = get_setting(&self.settings, SettingKey::ColorG)
+            .and_then(|v| v.as_int())
+            .unwrap_or(120) as u8;
+        let b = get_setting(&self.settings, SettingKey::ColorB)
+            .and_then(|v| v.as_int())
+            .unwrap_or(255) as u8;
+        let speed = get_setting(&self.settings, SettingKey::Speed)
+            .and_then(|v| v.as_str())
+            .unwrap_or("medium")
+            .to_string();
+        let direction = get_setting(&self.settings, SettingKey::Direction)
+            .and_then(|v| v.as_str())
+            .unwrap_or("left")
+            .to_string();
+        let args = kb_effect_args(effect, r, g, b, &speed, &direction);
+        self.send(TXN_LED, 0x0f, 0x02, &args)?;
+        Ok(())
+    }
+
+    fn persist(&self) -> Result<()> {
+        hako_core::config::save_device_settings(&self.paths, VID, PID, &self.settings)
+    }
+}
+
+fn open_transport() -> Result<(Transport, String)> {
+    // Probe = GET firmware version (read-only, works in any device mode).
+    let probe = make_report(TXN_STD, 0x00, 0x81, &[0x00, 0x00]);
+    let mut errs = Vec::new();
+
+    // 1) Preferred: hidraw on interface 3 (usbhid stays bound).
+    match find_hidraw(VID, PID, Some(u32::from(REPORT_IFACE))) {
+        Ok(info) => match HidrawDevice::open(&info.path) {
+            Ok(dev) => {
+                let mut t = Transport::Hidraw(dev);
+                match t.transact(&probe) {
+                    Ok(_) => return Ok((t, info.path.display().to_string())),
+                    Err(e) => errs.push(format!("{}: {e}", info.path.display())),
+                }
+            }
+            Err(e) => errs.push(e.to_string()),
+        },
+        Err(e) => errs.push(format!("hidraw iface {REPORT_IFACE}: {e}")),
+    }
+
+    // 2) Fallback: usbfs control transfers; claim interface 3 (detaches usbhid
+    //    if bound, else SET_REPORT is EBUSY).
+    match find_usb_device_path(VID, PID).and_then(|p| UsbDevice::open(&p).map(|d| (p, d))) {
+        Ok((path, mut dev)) => {
+            if let Err(e) = dev.claim_interface(REPORT_IFACE) {
+                warn!("USB claim iface {REPORT_IFACE} failed: {e}");
+            }
+            let mut t = Transport::Usb {
+                dev,
+                iface: REPORT_IFACE,
+            };
+            match t.transact(&probe) {
+                Ok(_) => return Ok((t, path.display().to_string())),
+                Err(e) => errs.push(format!("{}: {e}", path.display())),
+            }
+        }
+        Err(e) => errs.push(e.to_string()),
+    }
+
+    bail!("no Razer control path ({})", errs.join("; "))
+}
+
+fn defaults(s: &mut SettingsMap) {
+    for (k, v) in [
+        (SettingKey::Brightness, SettingValue::Int(80)),
+        (SettingKey::ColorR, SettingValue::Int(0)),
+        (SettingKey::ColorG, SettingValue::Int(120)),
+        (SettingKey::ColorB, SettingValue::Int(255)),
+        (SettingKey::Effect, SettingValue::Text("static".into())),
+        (SettingKey::Speed, SettingValue::Text("medium".into())),
+        (SettingKey::Direction, SettingValue::Text("left".into())),
+    ] {
+        s.entry(k.as_str().into()).or_insert(v);
+    }
+}
+
+/// Wave direction byte. OpenRazer passes the userspace value (WAVE_DIRS 1/2)
+/// through unchanged for HUNTSMAN_V2_TENKEYLESS: 1 = left, 2 = right.
+fn kb_wave_dir(direction: &str) -> u8 {
+    protocol::wave_dir(direction, false)
+}
+
+/// Argument bytes for the extended-matrix effect command (class 0x0f, cmd 0x02).
+/// VARSTORE kept from the original driver: this keyboard's wire bytes are frozen.
+fn kb_effect_args(
+    effect: KbEffectKind,
+    r: u8,
+    g: u8,
+    b: u8,
+    speed: &str,
+    direction: &str,
+) -> Vec<u8> {
+    protocol::effect_args(
+        VARSTORE,
+        BACKLIGHT_LED,
+        effect,
+        [r, g, b],
+        speed,
+        kb_wave_dir(direction),
+    )
+}
+
+fn controls(effect: KbEffectKind) -> Vec<SettingMeta> {
+    use SettingKey::*;
+    let effect_opts = vec![
+        SettingOption::text("off", "Off"),
+        SettingOption::text("static", "Static"),
+        SettingOption::text("spectrum", "Spectrum"),
+        SettingOption::text("wave", "Wave"),
+        SettingOption::text("reactive", "Reactive"),
+        SettingOption::text("breathing", "Breathing"),
+        SettingOption::text("starlight", "Starlight"),
+    ];
+    let speed_opts = vec![
+        SettingOption::text("slow", "Slow"),
+        SettingOption::text("medium", "Medium"),
+        SettingOption::text("fast", "Fast"),
+    ];
+    let dir_opts = vec![
+        SettingOption::text("left", "Left"),
+        SettingOption::text("right", "Right"),
+    ];
+    let has_speed = matches!(
+        effect,
+        KbEffectKind::Wave | KbEffectKind::Reactive | KbEffectKind::Starlight
+    );
+    let has_color = matches!(
+        effect,
+        KbEffectKind::Static
+            | KbEffectKind::Breathing
+            | KbEffectKind::Reactive
+            | KbEffectKind::Starlight
+    );
+    // Canonical order: Effect -> Brightness -> Direction -> Speed -> Color.
+    // Everything is always listed (profiles may set it); irrelevant ones hidden.
+    vec![
+        SettingMeta::dropdown(Effect, "Effect", effect_opts),
+        SettingMeta::slider(Brightness, "Brightness", 0.0, 100.0, 1.0).unit("%"),
+        SettingMeta::dropdown(Direction, "Direction", dir_opts)
+            .hidden(effect != KbEffectKind::Wave),
+        SettingMeta::dropdown(Speed, "Speed", speed_opts).hidden(!has_speed),
+        SettingMeta::color(ColorR, "Red").hidden(!has_color),
+        SettingMeta::color(ColorG, "Green").hidden(!has_color),
+        SettingMeta::color(ColorB, "Blue").hidden(!has_color),
+    ]
+}
+
+impl DeviceAdapter for RazerKeyboardAdapter {
+    fn id(&self) -> &DeviceId {
+        &self.id
+    }
+
+    fn snapshot(&self) -> DeviceSnapshot {
+        DeviceSnapshot {
+            id: self.id.clone(),
+            kind: DeviceKind::Keyboard,
+            name: "Razer Huntsman V2 TKL".into(),
+            connected: self.transport.is_some(),
+            batteries: vec![],
+            settings: self.settings.clone(),
+            controls: controls(KbEffectKind::from_str(
+                get_setting(&self.settings, SettingKey::Effect)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("static"),
+            )),
+            last_error: self.last_error.clone(),
+        }
+    }
+
+    fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+        let before = self.settings.clone();
+        merge_setting(&mut self.settings, key, value);
+        if let Err(e) = self.apply_all() {
+            // Not applied: keep the UI and the file on the old value.
+            self.settings = before;
+            self.last_error = Some(e.to_string());
+            return Err(e);
+        }
+        self.last_error = None;
+        self.persist()
+    }
+
+    fn tick(&mut self) -> Result<()> {
+        if self.last_poll.elapsed() < BRIGHTNESS_POLL {
+            return Ok(());
+        }
+        self.last_poll = std::time::Instant::now();
+        if let Ok(Some(br)) = self.read_brightness_pct() {
+            let cur = get_setting(&self.settings, SettingKey::Brightness)
+                .and_then(|v| v.as_int())
+                .unwrap_or(-1);
+            if cur != br as i64 {
+                merge_setting(
+                    &mut self.settings,
+                    SettingKey::Brightness,
+                    SettingValue::Int(br as i64),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        self.transport = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kb_effect_args_match_wire_tables() {
+        // Static red: 01 05 01 00 00 01 FF 00 00
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Static, 0xFF, 0x00, 0x00, "medium", "left"),
+            vec![0x01, 0x05, 0x01, 0x00, 0x00, 0x01, 0xFF, 0x00, 0x00]
+        );
+        // Off: 01 05 00 00 00 00
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Off, 0, 0, 0, "medium", "left"),
+            vec![0x01, 0x05, 0x00, 0x00, 0x00, 0x00]
+        );
+        // Spectrum: 01 05 03 00 00 00
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Spectrum, 0, 0, 0, "medium", "left"),
+            vec![0x01, 0x05, 0x03, 0x00, 0x00, 0x00]
+        );
+        // Wave left: 01 05 04 01 28 00 ; right dir byte = 0x02
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Wave, 0, 0, 0, "medium", "left"),
+            vec![0x01, 0x05, 0x04, 0x01, 0x28, 0x00]
+        );
+        assert_eq!(kb_wave_dir("right"), 0x02);
+        // Reactive fast green: 01 05 05 00 01 01 00 FF 00
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Reactive, 0x00, 0xFF, 0x00, "fast", "left"),
+            vec![0x01, 0x05, 0x05, 0x00, 0x01, 0x01, 0x00, 0xFF, 0x00]
+        );
+        // Breathing single blue: 01 05 02 01 00 01 00 00 FF
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Breathing, 0x00, 0x00, 0xFF, "medium", "left"),
+            vec![0x01, 0x05, 0x02, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF]
+        );
+        // Starlight slow white: 01 05 07 00 03 01 FF FF FF
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Starlight, 0xFF, 0xFF, 0xFF, "slow", "left"),
+            vec![0x01, 0x05, 0x07, 0x00, 0x03, 0x01, 0xFF, 0xFF, 0xFF]
+        );
+    }
+
+    #[test]
+    fn report_layout_and_response_check() {
+        // Get brightness: 00 1f 0000 00 03 0f 84 010500 ... crc
+        let r = make_report(TXN_LED, 0x0f, 0x84, &[VARSTORE, BACKLIGHT_LED, 0x00]);
+        assert_eq!(
+            &r[..11],
+            &[0x00, 0x1f, 0, 0, 0, 0x03, 0x0f, 0x84, 0x01, 0x05, 0x00]
+        );
+        assert_eq!(r[88], 0x03 ^ 0x0f ^ 0x84 ^ 0x01 ^ 0x05);
+
+        let mut resp = r;
+        resp[0] = 0x02;
+        assert!(check_response(&r, &resp).is_ok());
+        resp[0] = 0x01; // busy counts as success upstream
+        assert!(check_response(&r, &resp).is_ok());
+        resp[0] = 0x05;
+        assert!(check_response(&r, &resp).is_err());
+        resp[0] = 0x02;
+        resp[7] = 0x81;
+        assert!(check_response(&r, &resp).is_err());
+    }
+
+    /// Full frames this keyboard sends, as literal bytes (hand-computed XOR),
+    /// so moving the builders into protocol.rs cannot change the wire format.
+    #[test]
+    fn huntsman_frames_are_byte_identical() {
+        fn literal(head: &[u8], crc: u8) -> [u8; 90] {
+            let mut f = [0u8; 90];
+            f[..head.len()].copy_from_slice(head);
+            f[88] = crc;
+            f
+        }
+        // Normal device mode (open): 00 ff 0000 00 02 00 04 0000
+        assert_eq!(
+            make_report(TXN_STD, 0x00, 0x04, &[0x00, 0x00]),
+            literal(&[0, 0xff, 0, 0, 0, 0x02, 0x00, 0x04], 0x06)
+        );
+        // Firmware probe: 00 ff 0000 00 02 00 81 0000
+        assert_eq!(
+            make_report(TXN_STD, 0x00, 0x81, &[0x00, 0x00]),
+            literal(&[0, 0xff, 0, 0, 0, 0x02, 0x00, 0x81], 0x83)
+        );
+        // Brightness 80 % -> 0xcc: 00 1f 0000 00 03 0f 04 01 05 cc
+        assert_eq!(
+            make_report(TXN_LED, 0x0f, 0x04, &[VARSTORE, BACKLIGHT_LED, 0xcc]),
+            literal(
+                &[0, 0x1f, 0, 0, 0, 0x03, 0x0f, 0x04, 0x01, 0x05, 0xcc],
+                0xc0
+            )
+        );
+        // Default static colour (0,120,255): 00 1f 0000 00 09 0f 02 010501000001 0078ff
+        let args = kb_effect_args(KbEffectKind::Static, 0, 120, 255, "medium", "left");
+        assert_eq!(
+            make_report(TXN_LED, 0x0f, 0x02, &args),
+            literal(
+                &[
+                    0, 0x1f, 0, 0, 0, 0x09, 0x0f, 0x02, 0x01, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00,
+                    0x78, 0xff
+                ],
+                0x87
+            )
+        );
+        // Wave right and Starlight medium keep their bytes too.
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Wave, 0, 0, 0, "medium", "right"),
+            vec![0x01, 0x05, 0x04, 0x02, 0x28, 0x00]
+        );
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Starlight, 1, 2, 3, "medium", "left"),
+            vec![0x01, 0x05, 0x07, 0x00, 0x02, 0x01, 1, 2, 3]
+        );
+        assert_eq!(
+            kb_effect_args(KbEffectKind::Reactive, 1, 2, 3, "slow", "left"),
+            vec![0x01, 0x05, 0x05, 0x00, 0x04, 0x01, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn huntsman_v2_tkl_stays_first_and_unchanged() {
+        let m = &MODELS[0];
+        assert_eq!((m.vendor_id, m.product_ids), (0x1532, &[0x026b][..]));
+        assert_eq!(m.name, "Razer Huntsman V2 TKL");
+        assert!(m.usbfs);
+        assert_eq!(MODELS.len(), 1 + models::SPECS.len() + kraken::MODELS.len());
+        assert!(MODELS[1..].iter().all(|m| !m.usbfs && m.vendor_id == VID));
+    }
+
+    /// Read-only: GET brightness through hidraw on interface 3.
+    /// Needs usbhid bound to iface 3 (daemon not holding it via usbfs).
+    #[test]
+    #[ignore]
+    fn hw_hidraw_iface3_get_brightness() {
+        let info = find_hidraw(VID, PID, Some(3)).expect("hidraw iface 3");
+        let mut t = Transport::Hidraw(HidrawDevice::open(&info.path).unwrap());
+        let req = make_report(TXN_LED, 0x0f, 0x84, &[VARSTORE, BACKLIGHT_LED, 0x00]);
+        let resp = t.transact(&req).expect("transact");
+        eprintln!("resp {:02x?}", &resp[..12]);
+    }
+}

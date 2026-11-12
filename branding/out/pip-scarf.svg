@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+<rect width="120" height="120" rx="30" fill="#B9F3D0"/>
+<circle cx="60" cy="62" r="46" fill="#fff" opacity="0.25"/>
+<ellipse cx="60" cy="104" rx="27" ry="4" opacity=".18"/>
+<ellipse cx="48" cy="100" rx="9" ry="4.5" fill="#FFA726"/>
+<ellipse cx="72" cy="100" rx="9" ry="4.5" fill="#FFA726"/>
+<ellipse cx="29" cy="72" rx="6.5" ry="14" fill="#1E293B" transform="rotate(18 29 72)"/>
+<ellipse cx="96" cy="54" rx="6.5" ry="13.5" fill="#1E293B" transform="rotate(38 96 54)"/>
+<g fill="none" stroke="#1E293B" stroke-width="3.6" stroke-linecap="round"><path d="M60 36Q57 27 52 26"/><path d="M60 36Q61 26 65 23"/><path d="M60 36Q66 29 71 29"/></g>
+<ellipse cx="60" cy="67" rx="31" ry="34" fill="#1E293B"/>
+<ellipse cx="42" cy="45" rx="7" ry="3.2" fill="#fff" opacity=".14" transform="rotate(-38 42 45)"/>
+<circle cx="49" cy="60" r="13" fill="#fff"/>
+<circle cx="71" cy="60" r="13" fill="#fff"/>
+<ellipse cx="60" cy="77" rx="21" ry="22" fill="#fff"/>
+<ellipse cx="49" cy="61" rx="5" ry="6" fill="#1F1B2E"/><circle cx="50.7" cy="58.8" r="1.9" fill="#fff"/><circle cx="47.4" cy="63.3" r=".9" fill="#fff" opacity=".8"/>
+<ellipse cx="71" cy="61" rx="5" ry="6" fill="#1F1B2E"/><circle cx="72.7" cy="58.8" r="1.9" fill="#fff"/><circle cx="69.4" cy="63.3" r=".9" fill="#fff" opacity=".8"/>
+<ellipse cx="45.5" cy="70" rx="4.4" ry="2.6" fill="#FF7A9A" opacity=".5"/>
+<ellipse cx="74.5" cy="70" rx="4.4" ry="2.6" fill="#FF7A9A" opacity=".5"/>
+<path d="M55.5 66.5h9l-4.5 5.5z" fill="#FFA726" stroke="#FFA726" stroke-width="2.5" stroke-linejoin="round"/>
+<defs><linearGradient id="scarf-rgb" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#FF5A8A"/><stop offset=".35" stop-color="#FFD166"/><stop offset=".7" stop-color="#5EEAD4"/><stop offset="1" stop-color="#818CF8"/></linearGradient></defs>
+<rect x="68" y="88" width="10.5" height="18" rx="3.2" fill="#7C83F5" transform="rotate(-10 73 97)"/>
+<path d="M31.5 77Q60 90 88.5 77L90 86Q60 100.5 30 86Z" fill="url(#scarf-rgb)" stroke="url(#scarf-rgb)" stroke-width="2" stroke-linejoin="round"/>
+</svg>

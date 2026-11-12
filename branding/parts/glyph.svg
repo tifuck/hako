@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+<defs><mask id="glyph-cut"><rect width="120" height="120" fill="#fff"/><circle cx="49" cy="60" r="13" fill="#000"/><circle cx="71" cy="60" r="13" fill="#000"/><ellipse cx="60" cy="77" rx="21" ry="22" fill="#000"/></mask></defs>
+<g fill="currentColor">
+<ellipse cx="48" cy="100" rx="9" ry="4.5"/>
+<ellipse cx="72" cy="100" rx="9" ry="4.5"/>
+<ellipse cx="29" cy="72" rx="6.5" ry="14" transform="rotate(18 29 72)"/>
+<ellipse cx="91" cy="72" rx="6.5" ry="14" transform="rotate(-18 91 72)"/>
+<ellipse cx="60" cy="67" rx="31" ry="34" mask="url(#glyph-cut)"/>
+<ellipse cx="49" cy="61" rx="5" ry="6"/>
+<ellipse cx="71" cy="61" rx="5" ry="6"/>
+<path d="M55.5 66.5h9l-4.5 5.5z" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
+</g>
+<g fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round"><path d="M60 36Q57 27 52 26"/><path d="M60 36Q61 26 65 23"/><path d="M60 36Q66 29 71 29"/></g>
+</svg>
