@@ -14,3 +14,5 @@ egui_extras = { workspace = true }
 # Offscreen wgpu rendering for the #[ignore]d snapshot tests.
 egui_kittest = { version = "0.31", features = ["wgpu", "snapshot"] }
 serde_json = { workspace = true }
+# Crops and tiles the README screenshots (already pulled in by egui_kittest).
+image = { version = "0.25", default-features = false, features = ["png"] }

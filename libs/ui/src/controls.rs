@@ -457,6 +457,14 @@ fn color_row(
                 .animate_bool_with_time(resp.id, resp.hovered() || active, 0.12);
             ui.painter()
                 .circle_filled(r.center(), 7.0 + grow * 2.0, col);
+            // A hairline so white stays visible on light themes.
+            if !pal().dark {
+                ui.painter().circle_stroke(
+                    r.center(),
+                    7.0 + grow * 2.0,
+                    Stroke::new(1.0_f32, pal().border_hi),
+                );
+            }
             if active {
                 ui.painter()
                     .circle_stroke(r.center(), 11.0, Stroke::new(1.5_f32, pal().text));

@@ -709,6 +709,18 @@ fn shoot_app(
     setup: impl FnOnce(&egui::Context),
     script: impl FnOnce(&mut egui_kittest::Harness<'_>),
 ) {
+    let image = render_app(size, app, setup, script);
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/audit");
+    std::fs::create_dir_all(&dir).unwrap();
+    image.save(dir.join(format!("{name}.png"))).unwrap();
+}
+
+fn render_app(
+    size: [f32; 2],
+    app: HakoAppUi,
+    setup: impl FnOnce(&egui::Context),
+    script: impl FnOnce(&mut egui_kittest::Harness<'_>),
+) -> image::RgbaImage {
     let mut app = app;
     let mut setup = Some(setup);
     let mut out = Vec::new();
@@ -725,10 +737,7 @@ fn shoot_app(
     harness.run_steps(8);
     script(&mut harness);
     harness.run_steps(12);
-    let image = harness.render().expect("offscreen render");
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/audit");
-    std::fs::create_dir_all(&dir).unwrap();
-    image.save(dir.join(format!("{name}.png"))).unwrap();
+    harness.render().expect("offscreen render")
 }
 
 /// Every page and tab, for visual review. `HAKO_UI_STATE` / `HAKO_UI_CONFIG`
@@ -888,4 +897,136 @@ fn dpi_snap_stays_inside_the_device_range() {
     assert_eq!(snap_dpi(45000.0, 100.0, 45000.0, 50.0), 45000.0);
     assert_eq!(snap_dpi(50.0, 50.0, 18000.0, 50.0), 50.0);
     assert_eq!(snap_dpi(1649.0, 100.0, 26000.0, 50.0), 1600.0);
+}
+
+// ── README screenshots ───────────────────────────────────────────
+
+/// Bottom of the page content: the last row right of the rail that differs
+/// from the page background, plus a margin.
+fn content_height(img: &image::RgbaImage) -> u32 {
+    let (w, h) = img.dimensions();
+    let bg = *img.get_pixel(w - 4, h - 4);
+    let last = (0..h)
+        .rev()
+        .find(|&y| (240..w - 4).any(|x| *img.get_pixel(x, y) != bg))
+        .unwrap_or(h);
+    (last + 28).min(h)
+}
+
+/// The README screenshots, rendered from a live daemon: point `HAKO_UI_STATE`
+/// and `HAKO_UI_CONFIG` at dumps of `GetState` / `GetConfig` and run
+/// `cargo test -p hako-ui snapshot_readme -- --ignored`. Writes `docs/screenshots/`.
+#[test]
+#[ignore = "needs a GPU (wgpu) and a live daemon dump"]
+fn snapshot_readme() {
+    let read = |var: &str| {
+        let path = std::env::var(var).unwrap_or_else(|_| panic!("set {var}"));
+        std::fs::read_to_string(path).unwrap()
+    };
+    let mut state: HubState = serde_json::from_str(&read("HAKO_UI_STATE")).unwrap();
+    let settings: AppSettings = serde_json::from_str(&read("HAKO_UI_CONFIG")).unwrap();
+    // Staged where a live setup is sparse: line-in on so its chain shows,
+    // sample bindings on the keyboard, no leftover device warnings.
+    for d in &mut state.devices {
+        d.last_error = None;
+        if d.settings.contains_key(SettingKey::AuxEnabled.as_str()) {
+            d.settings.insert(
+                SettingKey::AuxEnabled.as_str().into(),
+                SettingValue::Bool(true),
+            );
+        }
+    }
+    state.audio.aux_active = true;
+    state.audio.last_error = None;
+    let find = |k: DeviceKind| {
+        state
+            .devices
+            .iter()
+            .find(|d| d.kind == k)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {k:?} in the dump"))
+    };
+    let (kb, mouse, headset) = (
+        find(DeviceKind::Keyboard),
+        find(DeviceKind::Mouse),
+        find(DeviceKind::Headset),
+    );
+    state
+        .remaps
+        .retain(|r| r.device_id.as_ref() != Some(&kb.id));
+    state.remaps.push(DeviceRemaps {
+        device_id: Some(kb.id.clone()),
+        bindings: sample_bindings(DeviceKind::Keyboard),
+        grabbed: true,
+        ..Default::default()
+    });
+
+    let page = |d: &DeviceSnapshot, tab: Tab, selected: u16, theme: &str, height: f32| {
+        let i = tabs_for(d).iter().position(|t| *t == tab).unwrap();
+        let key = d.id.key();
+        let app = HakoAppUi {
+            state: Some(state.clone()),
+            selected: Some(d.id.clone()),
+            daemon_error: None,
+            settings: Some(AppSettings {
+                theme: theme.into(),
+                ..settings.clone()
+            }),
+            ..Default::default()
+        };
+        render_app(
+            [1180.0, height],
+            app,
+            move |ctx| {
+                ctx.data_mut(|m| {
+                    m.insert_temp(egui::Id::new(("tab", key.clone())), i);
+                    m.insert_temp(egui::Id::new(("bind_selected", key)), selected);
+                })
+            },
+            |_| {},
+        )
+    };
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/screenshots");
+    let save = |name: &str, img: image::RgbaImage, height: Option<u32>| {
+        let h = height.unwrap_or_else(|| content_height(&img));
+        let img = image::imageops::crop_imm(&img, 0, 0, img.width(), h).to_image();
+        image::DynamicImage::ImageRgba8(img)
+            .to_rgb8()
+            .save(dir.join(format!("{name}.png")))
+            .unwrap();
+    };
+    save("hero", page(&kb, Tab::Bindings, 57, "onyx", 1700.0), None);
+    save("lighting", page(&kb, Tab::Lighting, 0, "onyx", 900.0), None);
+    save(
+        "mouse-performance",
+        page(&mouse, Tab::Performance, 0, "onyx", 900.0),
+        None,
+    );
+    save(
+        "mouse-buttons",
+        page(&mouse, Tab::Bindings, 0, "onyx", 900.0),
+        Some(712),
+    );
+    save(
+        "chatmix",
+        page(&headset, Tab::Audio, 0, "onyx", 900.0),
+        None,
+    );
+    save(
+        "line-in",
+        page(&headset, Tab::LineIn, 0, "onyx", 1200.0),
+        None,
+    );
+
+    // The same page in every theme, half size, two by two.
+    let (w, h, gap) = (590, 350, 10);
+    let mut grid =
+        image::RgbaImage::from_pixel(w * 2 + gap, h * 2 + gap, image::Rgba([5, 5, 6, 255]));
+    for (i, t) in theme::THEMES.iter().enumerate() {
+        let shot = page(&kb, Tab::Lighting, 0, t.id, 700.0);
+        let small = image::imageops::resize(&shot, w, h, image::imageops::FilterType::Lanczos3);
+        let (x, y) = ((i as u32 % 2) * (w + gap), (i as u32 / 2) * (h + gap));
+        image::imageops::overlay(&mut grid, &small, x.into(), y.into());
+    }
+    save("themes", grid, Some(h * 2 + gap));
 }

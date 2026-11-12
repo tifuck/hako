@@ -24,7 +24,7 @@ Lighting, DPI, key bindings, macros, ChatMix and line-in, without a single vendo
 
 <br>
 
-<img src="docs/screenshots/hero.png" alt="hako key bindings page for a Razer Huntsman V2 TKL: a drawn keyboard with remapped keys highlighted and a list of five assignments" width="900">
+<img src="docs/screenshots/hero.png" alt="hako key bindings page for a Razer Huntsman V2 TKL: a drawn keyboard with remapped keys highlighted, the Space key set to hold-repeat in the editor, the action library and six assignments" width="900">
 
 </div>
 
@@ -117,13 +117,13 @@ allow them for that device.
 
 ### Lighting that survives everything
 
-<img src="docs/screenshots/lighting.png" alt="Lighting page with effect tiles and brightness and colour controls" width="100%">
+<img src="docs/screenshots/lighting.png" alt="Lighting page: animated effect tiles, brightness in the card header and colour swatches with a custom picker" width="100%">
 
 - Pick an effect from live preview tiles: **off, static, spectrum, wave,
   reactive, breathing, starlight**, plus ripple, pulse, cycle and rainbow on
   devices that have them.
 - Brightness, speed and direction where the effect supports them; colour from
-  swatches or any hex value.
+  swatches or a full colour picker.
 - Settings are **re-applied on every reconnect**: unplug, resume from suspend,
   switch the receiver, and the lighting comes back as you left it.
 - Every control is declared by the device's driver, so you only ever see what
@@ -131,10 +131,10 @@ allow them for that device.
 
 ### Mice, dialled in
 
-<img src="docs/screenshots/mouse-performance.png" alt="Mouse performance page with an 800 DPI slider, DPI presets and polling rate options" width="100%">
+<img src="docs/screenshots/mouse-performance.png" alt="Mouse performance page: 800 DPI with a slider and reference marks, and polling rate options" width="100%">
 
-- **DPI** with a slider and one-click presets, and up to five **DPI stages**
-  on mice that cycle through them.
+- **DPI**: type an exact value, drag the number, or use the slider and its
+  reference marks; up to five **DPI stages** on mice that cycle through them.
 - **Polling rate** from 125 Hz up to 8000 Hz on mice that support it.
 - **Angle snapping**, **lift-off distance** and **click debounce** where the
   firmware exposes them.
@@ -166,7 +166,7 @@ allow them for that device.
 
 ### Headsets with the controls you were promised
 
-<img src="docs/screenshots/chatmix.png" alt="Headset audio page with the ChatMix game and chat levels and two battery gauges" width="100%">
+<img src="docs/screenshots/chatmix.png" alt="Headset audio page: the ChatMix balance between game and chat, microphone controls and two battery gauges" width="100%">
 
 - **Battery** for the headset, and for the hot-swap spare on the Arctis Nova
   Pro Wireless.
@@ -174,7 +174,7 @@ allow them for that device.
   depending on the model.
 - **Audio**: EQ presets and bands, volume limiter, voice prompts, Bluetooth
   call volume and power-on behaviour.
-- **Power**: auto-off timer and wireless range.
+- **Power** (on the Device tab): auto-off timer and wireless range.
 - **ChatMix** creates two real PipeWire outputs, `Hako_Game` and `Hako_Chat`.
   Route games to one and Discord to the other, and the dial on the headset
   balances them.

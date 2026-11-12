@@ -1699,6 +1699,7 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "hako-core",
+ "image",
  "serde_json",
 ]
 
