@@ -95,7 +95,7 @@ impl DaemonHub {
         // (its teardown, e.g. AUX, must run before a replugged device is
         // reopened below) so the device is reopened fresh.
         let gone: Vec<DeviceHandle> = {
-            let mut map = self.devices.lock().unwrap();
+            let mut map = lock(&self.devices);
             let mut gone = Vec::new();
             map.retain(|_, h| {
                 let alive = model_nodes(h.model, &present)
@@ -127,7 +127,7 @@ impl DaemonHub {
             .collect();
         let mut skip: Vec<&'static Model> = Vec::new();
         {
-            let mut rescanned = self.rescanned.lock().unwrap();
+            let mut rescanned = lock(&self.rescanned);
             for (m, _) in &connected {
                 let due = m.multi
                     && rescanned
@@ -140,7 +140,7 @@ impl DaemonHub {
                 }
             }
             rescanned.retain(|k, _| connected.iter().any(|(m, _)| retry_key(m) == *k));
-            let retry = self.retry.lock().unwrap();
+            let retry = lock(&self.retry);
             skip.extend(
                 all_models(&present)
                     .filter(|m| retry.get(&retry_key(m)).is_some_and(|&(_, at)| now < at)),
@@ -164,7 +164,7 @@ impl DaemonHub {
         });
 
         {
-            let mut retry = self.retry.lock().unwrap();
+            let mut retry = lock(&self.retry);
             for (model, ok) in attempted {
                 if ok {
                     retry.remove(&retry_key(model));
@@ -190,7 +190,7 @@ impl DaemonHub {
                 DeviceHandle::spawn(model, a, self.events.clone(), nodes, self.paths.clone())
             })
             .collect();
-        let mut map = self.devices.lock().unwrap();
+        let mut map = lock(&self.devices);
         // Reopened models replace their stale placeholders / dead adapters
         // (once per model: a receiver may return several devices).
         for h in &handles {
@@ -204,7 +204,7 @@ impl DaemonHub {
     }
 
     fn handles(&self) -> Vec<DeviceHandle> {
-        self.devices.lock().unwrap().values().cloned().collect()
+        lock(&self.devices).values().cloned().collect()
     }
 
     /// The connection that started a capture went away: stop listening.
@@ -504,7 +504,7 @@ impl DaemonHub {
         key: SettingKey,
         value: SettingValue,
     ) -> Result<hako_core::DeviceSnapshot> {
-        let handle = self.devices.lock().unwrap().get(&device_id.key()).cloned();
+        let handle = lock(&self.devices).get(&device_id.key()).cloned();
         handle
             .ok_or_else(|| Refused::new("not_found", "device offline"))?
             .set(key, value)
@@ -520,8 +520,8 @@ impl DaemonHub {
         let skip_aux = startup && !load_app_config(&self.paths).is_ok_and(|c| c.aux.auto_enable);
         let mut failures = Vec::new();
         for h in self.handles() {
-            let saving = h
-                .snapshot()
+            let snap = h.snapshot();
+            let saving = snap
                 .settings
                 .get(SettingKey::SaveToDevice.as_str())
                 .and_then(|v| v.as_bool())
@@ -535,7 +535,7 @@ impl DaemonHub {
             }
             // The device's own stem, else any PID of its model (receiver vs. wired path).
             let m = h.model;
-            let own = h.snapshot().id.config_stem();
+            let own = snap.id.config_stem();
             let Some(dev_map) = profile.devices.get(&own).or_else(|| {
                 m.product_ids.iter().find_map(|pid| {
                     profile
@@ -545,7 +545,13 @@ impl DaemonHub {
             }) else {
                 continue;
             };
-            let controls = h.snapshot().controls;
+            // Offline (placeholder / unplugged) devices are skipped like
+            // absent ones: the rest of the profile still applies.
+            if !snap.connected {
+                info!("{}: not connected, profile skipped", m.name);
+                continue;
+            }
+            let controls = snap.controls;
             for (k, v) in settings_from_profile_device(dev_map) {
                 let result = match SettingKey::parse(&k) {
                     Some(key) if profile_skips(key, &controls, skip_aux) => continue,
@@ -599,13 +605,7 @@ impl DaemonHub {
     }
 
     pub async fn shutdown(&self) {
-        let handles: Vec<_> = self
-            .devices
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(_, h)| h)
-            .collect();
+        let handles: Vec<_> = lock(&self.devices).drain().map(|(_, h)| h).collect();
         stop_all(&handles).await;
         if let Err(e) = self.audio.reset_all() {
             warn!("audio teardown: {e:#}");
@@ -630,6 +630,12 @@ async fn stop_all(handles: &[DeviceHandle]) {
     })
     .await
     .ok();
+}
+
+/// A panic elsewhere must not take every later request down with it: the
+/// guarded maps stay consistent between statements.
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 fn set_last_profile(paths: &ConfigPaths, name: &str) -> Result<()> {
@@ -799,5 +805,69 @@ mod tests {
         assert!(profile_skips(SettingKey::SaveToDevice, &controls, false));
         assert!(profile_skips(SettingKey::OnboardWrites, &controls, false));
         assert!(!profile_skips(SettingKey::Dpi, &controls, true));
+    }
+
+    #[tokio::test]
+    async fn offline_devices_do_not_fail_a_profile() {
+        let root = std::env::temp_dir().join(format!("hako-offline-{}", std::process::id()));
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        paths.ensure().unwrap();
+        let model = drivers::models().next().unwrap();
+        let id = DeviceId {
+            vendor_id: model.vendor_id,
+            product_id: model.product_ids[0],
+            instance: "pending".into(),
+        };
+        let profile = ProfileFile {
+            version: 1,
+            name: "p".into(),
+            devices: [(
+                id.config_stem(),
+                [("dpi".to_string(), TomlSetting::Int(800))].into(),
+            )]
+            .into(),
+        };
+        save_profile(&paths, &profile).unwrap();
+        // Built by hand: `new` would touch the session's PipeWire graph.
+        let (events, _) = broadcast::channel(8);
+        let hub = DaemonHub {
+            paths: paths.clone(),
+            audio: Arc::new(AudioService::new()),
+            devices: Default::default(),
+            remap: RemapEngine::start(paths.clone(), events.clone()),
+            events,
+            started: Instant::now(),
+            last_profile_applied: Mutex::new(false),
+            retry: Default::default(),
+            rescanned: Default::default(),
+        };
+        let placeholder = PlaceholderAdapter::permission_denied(
+            id.clone(),
+            model.kind,
+            model.name,
+            &anyhow::anyhow!("gone"),
+        );
+        let h = DeviceHandle::spawn(
+            model,
+            Box::new(placeholder),
+            hub.events.clone(),
+            Vec::new(),
+            paths.clone(),
+        );
+        lock(&hub.devices).insert(id.key(), h);
+
+        hub.apply_profile("p", false).await.unwrap();
+        assert_eq!(
+            load_app_config(&paths).unwrap().last_profile.as_deref(),
+            Some("p")
+        );
+        hub.remap.shutdown();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

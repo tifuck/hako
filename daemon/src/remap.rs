@@ -20,11 +20,12 @@ use hako_core::remap::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::fd::AsRawFd;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{broadcast, mpsc};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 const VIRTUAL_NAME: &str = "hako remap";
 const KEY_ESC: u16 = 1;
@@ -144,7 +145,7 @@ impl RemapEngine {
     /// Register a mouse or keyboard (idempotent; a reconnect keeps its bindings).
     /// `pids` are the driver model's PIDs, so any enumeration path is one device.
     pub fn attach(&self, id: DeviceId, kind: DeviceKind, pids: Vec<u16>) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = lock(&self.inner);
         let g = &mut *guard;
         let idx = match g
             .devices
@@ -202,12 +203,12 @@ impl RemapEngine {
     }
 
     pub fn snapshots(&self) -> Vec<DeviceRemaps> {
-        let g = self.inner.lock().unwrap();
+        let g = lock(&self.inner);
         g.devices.iter().map(DevState::snapshot).collect()
     }
 
     pub fn snapshot(&self, id: &DeviceId) -> Result<DeviceRemaps> {
-        let g = self.inner.lock().unwrap();
+        let g = lock(&self.inner);
         Ok(g.devices[g.find(id)?].snapshot())
     }
 
@@ -229,7 +230,7 @@ impl RemapEngine {
         id: &DeviceId,
         edit: impl FnOnce(&mut HashMap<u16, RemapBinding>),
     ) -> Result<DeviceRemaps> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = lock(&self.inner);
         let g = &mut *guard;
         let idx = g.find(id)?;
         let d = &mut g.devices[idx];
@@ -257,7 +258,7 @@ impl RemapEngine {
         if role == CaptureRole::Target && source.is_none() {
             anyhow::bail!("target capture needs a source button");
         }
-        let mut g = self.inner.lock().unwrap();
+        let mut g = lock(&self.inner);
         let idx = g.find(&device_id)?;
         // One listening session at a time: others stop (and say so).
         for (i, d) in g.devices.iter_mut().enumerate() {
@@ -284,7 +285,7 @@ impl RemapEngine {
 
     /// Stop listening. For a record session `keep` stores the take in `recorded`.
     pub fn cancel_capture(&self, device_id: DeviceId, keep: bool) -> Result<DeviceRemaps> {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = lock(&self.inner);
         let idx = g.find(&device_id)?;
         let d = &mut g.devices[idx];
         if d.capturing.take() == Some(CaptureRole::Record) {
@@ -303,6 +304,12 @@ impl RemapEngine {
     pub fn shutdown(&self) {
         let _ = self.tx.send(Cmd::Shutdown);
     }
+}
+
+/// The engine state, also after a panic while it was held (the remap thread
+/// survives panics, and `GetState` reads it on every poll).
+fn lock(inner: &Mutex<EngineInner>) -> MutexGuard<'_, EngineInner> {
+    inner.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// `id` is the same physical device as a model with these PIDs (instance and
@@ -425,60 +432,85 @@ struct Worker {
 impl Worker {
     fn run(mut self, mut rx: mpsc::UnboundedReceiver<Cmd>) {
         loop {
-            while let Ok(cmd) = rx.try_recv() {
-                match cmd {
-                    Cmd::Shutdown => {
+            match catch_unwind(AssertUnwindSafe(|| self.step(&mut rx))) {
+                Ok(true) => {}
+                Ok(false) => return,
+                // A bug in one pass must not end remapping until the daemon
+                // restarts: let go of input and the session, then carry on.
+                Err(_) => {
+                    error!("remap thread panicked; releasing grabs");
+                    if let Some(sess) = self.session.take() {
+                        self.update(sess.idx, |d| {
+                            d.capturing = None;
+                            d.capture_source = None;
+                            d.last_error = Some("Listening stopped after an internal error".into());
+                        });
+                    }
+                    self.ungrab_all();
+                    // ponytail: fixed pause so a panic that repeats every pass
+                    // cannot spin; nothing is lost, commands queue meanwhile.
+                    std::thread::sleep(OPEN_RETRY);
+                }
+            }
+        }
+    }
+
+    /// One pass: queued commands, then input. False after `Shutdown`.
+    fn step(&mut self, rx: &mut mpsc::UnboundedReceiver<Cmd>) -> bool {
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                Cmd::Shutdown => {
+                    self.session = None;
+                    self.ungrab_all();
+                    return false;
+                }
+                Cmd::Attach {
+                    idx,
+                    id,
+                    kind,
+                    pids,
+                    bindings,
+                } => {
+                    if idx == self.slots.len() {
+                        self.slots.push(Slot {
+                            id,
+                            kind,
+                            pids,
+                            bindings: HashMap::new(),
+                            nodes: Vec::new(),
+                            paths: Vec::new(),
+                            retry: Instant::now(),
+                        });
+                    } else if self.slots[idx].id != id || self.slots[idx].kind != kind {
+                        self.ungrab(idx);
+                        self.slots[idx].id = id;
+                        self.slots[idx].kind = kind;
+                        self.slots[idx].retry = Instant::now();
+                    }
+                    self.set_bindings(idx, bindings);
+                }
+                Cmd::SetBindings { idx, bindings } => self.set_bindings(idx, bindings),
+                Cmd::StartCapture { idx } => {
+                    // Never steal input while the user is choosing keys.
+                    self.ungrab_all();
+                    self.session = Some(Session::open(idx, &self.slots[idx]));
+                }
+                Cmd::CancelCapture { idx } => {
+                    if self.session.as_ref().is_some_and(|s| s.idx == idx) {
                         self.session = None;
-                        self.ungrab_all();
-                        return;
-                    }
-                    Cmd::Attach {
-                        idx,
-                        id,
-                        kind,
-                        pids,
-                        bindings,
-                    } => {
-                        if idx == self.slots.len() {
-                            self.slots.push(Slot {
-                                id,
-                                kind,
-                                pids,
-                                bindings: HashMap::new(),
-                                nodes: Vec::new(),
-                                paths: Vec::new(),
-                                retry: Instant::now(),
-                            });
-                        } else if self.slots[idx].id != id || self.slots[idx].kind != kind {
-                            self.ungrab(idx);
-                            self.slots[idx].id = id;
-                            self.slots[idx].kind = kind;
-                            self.slots[idx].retry = Instant::now();
-                        }
-                        self.set_bindings(idx, bindings);
-                    }
-                    Cmd::SetBindings { idx, bindings } => self.set_bindings(idx, bindings),
-                    Cmd::StartCapture { idx } => {
-                        // Never steal input while the user is choosing keys.
-                        self.ungrab_all();
-                        self.session = Some(Session::open(idx, &self.slots[idx]));
-                    }
-                    Cmd::CancelCapture { idx } => {
-                        if self.session.as_ref().is_some_and(|s| s.idx == idx) {
-                            self.session = None;
-                        }
                     }
                 }
             }
-
-            self.sync_grabs();
-            self.wait();
-            self.read_slots();
-            self.read_session();
-            self.expire_session();
-            self.mapper.tick(Instant::now());
-            self.flush();
         }
+
+        self.sync_grabs();
+        self.wait();
+        self.read_slots();
+        self.read_session();
+        self.expire_session();
+        self.mapper.tick(Instant::now());
+        self.flush();
+        true
     }
 
     fn set_bindings(&mut self, idx: usize, bindings: HashMap<u16, RemapBinding>) {
@@ -549,10 +581,8 @@ impl Worker {
                     first.display(),
                     blocked.len()
                 );
-                let changed = self.inner.lock().unwrap().devices[idx]
-                    .last_error
-                    .as_deref()
-                    != Some(msg.as_str());
+                let changed =
+                    lock(&self.inner).devices[idx].last_error.as_deref() != Some(msg.as_str());
                 if changed {
                     self.update(idx, |d| d.last_error = Some(msg));
                 }
@@ -680,7 +710,7 @@ impl Worker {
 
     fn update(&self, idx: usize, f: impl FnOnce(&mut DevState)) {
         let snap = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = lock(&self.inner);
             f(&mut g.devices[idx]);
             g.devices[idx].snapshot()
         };
@@ -782,7 +812,7 @@ impl Worker {
         let kind = self.slots[idx].kind;
         let key = EvdevKey(code);
         let inner = self.inner.clone();
-        let mut guard = inner.lock().unwrap();
+        let mut guard = lock(&inner);
         let g = &mut *guard;
         let d = &mut g.devices[idx];
         // The API may have cancelled before our Cancel command arrives.

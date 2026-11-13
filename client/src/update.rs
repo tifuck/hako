@@ -10,7 +10,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const REPO: Option<&str> = option_env!("HAKO_REPO");
 const DEB_BIN: &str = "/usr/bin/hako";
@@ -34,6 +34,8 @@ pub struct Release {
 pub struct Ready {
     pub version: String,
     file: PathBuf,
+    /// SHA-256 the download was verified against.
+    sum: String,
 }
 
 /// Where this build updates from: `(owner/repo, installed hako path)`.
@@ -140,6 +142,7 @@ pub fn download(rel: &Release) -> Result<Ready> {
     Ok(Ready {
         version: rel.version.clone(),
         file,
+        sum: want,
     })
 }
 
@@ -148,52 +151,66 @@ pub fn download(rel: &Release) -> Result<Ready> {
 /// failure so the user can retry.
 pub fn install(ready: &Ready) -> Result<Option<String>> {
     let dir = ready.file.parent().context("bad download path")?;
-    let res = install_file(&ready.file, dir);
+    let res = install_file(&ready.file, &ready.sum, dir);
     if res.is_ok() {
         let _ = std::fs::remove_dir_all(dir);
     }
     res
 }
 
-fn install_file(file: &Path, dir: &Path) -> Result<Option<String>> {
+fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
     let name = file
         .file_name()
         .and_then(|n| n.to_str())
         .context("bad download name")?;
+    // The download folder is the user's: anything running as them could swap
+    // the file after `download` checked it. Root only gets these checked
+    // bytes over stdin, never a path to read.
+    let data = std::fs::read(file)?;
+    check_sum(&data, sum)?;
     if name.ends_with(".deb") {
         // apt installs rules and units and restarts the daemons (postinst).
-        run(Command::new("pkexec")
-            .args(["apt-get", "install", "-y", "--allow-downgrades"])
-            .arg(file))
+        run_input(
+            Command::new("pkexec").args(["sh", "-c"]).arg(
+                "t=$(mktemp -d) && cat > \"$t/hako.deb\" && apt-get install -y --allow-downgrades \"$t/hako.deb\"; s=$?; rm -rf \"$t\"; exit $s",
+            ),
+            &data,
+        )
         .context("install was cancelled or failed")?;
         return Ok(None);
     }
-    run(Command::new("tar").arg("-xzf").arg(file).arg("-C").arg(dir))?;
-    let root = dir.join(name.trim_end_matches(".tar.gz"));
+    run_input(
+        Command::new("tar").args(["-xzf", "-", "-C"]).arg(dir),
+        &data,
+    )?;
+    let root = name.trim_end_matches(".tar.gz");
     // Rules first, so the restarted daemon opens devices with the new access.
-    let warn = update_udev(&root.join("udev/70-hako.rules"));
+    let rules = run_input(
+        Command::new("tar")
+            .args(["-xzOf", "-"])
+            .arg(format!("{root}/udev/70-hako.rules")),
+        &data,
+    );
+    let warn = rules.ok().and_then(|r| update_udev(&r));
     run(Command::new("bash")
-        .arg(root.join("scripts/install-user.sh"))
+        .arg(dir.join(root).join("scripts/install-user.sh"))
         .env("HAKO_SKIP_UDEV", "1"))
     .context("install failed")?;
     Ok(warn)
 }
 
 /// The device rules live in /etc: ask through polkit, only when they changed.
-fn update_udev(new: &Path) -> Option<String> {
-    let fresh = std::fs::read(new).ok()?;
-    if std::fs::read(UDEV_RULES).ok().as_deref() == Some(fresh.as_slice()) {
+fn update_udev(fresh: &[u8]) -> Option<String> {
+    if std::fs::read(UDEV_RULES).ok().as_deref() == Some(fresh) {
         return None;
     }
-    let ok = Command::new("pkexec")
-        .args(["sh", "-c"])
-        .arg(format!(
-            "install -m 644 \"$1\" {UDEV_RULES} && udevadm control --reload-rules && udevadm trigger"
-        ))
-        .arg("sh")
-        .arg(new)
-        .status()
-        .is_ok_and(|s| s.success());
+    let ok = run_input(
+        Command::new("pkexec").args(["sh", "-c"]).arg(format!(
+            "install -m 644 /dev/stdin {UDEV_RULES} && udevadm control --reload-rules && udevadm trigger"
+        )),
+        fresh,
+    )
+    .is_ok();
     (!ok).then(|| {
         format!(
             "New device rules were not installed. Run: hakod --udev-rules | sudo tee {UDEV_RULES} && sudo udevadm control --reload-rules && sudo udevadm trigger"
@@ -228,13 +245,42 @@ fn curl() -> Command {
 
 /// Run to completion; stdout on success, stderr as the error.
 fn run(cmd: &mut Command) -> Result<Vec<u8>> {
-    let out = cmd
-        .output()
+    run_input(cmd, &[])
+}
+
+/// [`run`] with `input` as stdin, written from another thread so a child
+/// filling its stdout pipe cannot deadlock.
+fn run_input(cmd: &mut Command, input: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("cannot run {:?}", cmd.get_program()))?;
+    let mut stdin = child.stdin.take().context("no stdin")?;
+    let (out, wrote) = std::thread::scope(|s| {
+        let writer = s.spawn(move || stdin.write_all(input));
+        (child.wait_with_output(), writer.join())
+    });
+    let out = out?;
     if !out.status.success() {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
+    // A child that exits early must not pass as having read all of `input`.
+    wrote
+        .map_err(|_| anyhow::anyhow!("stdin writer panicked"))?
+        .with_context(|| format!("cannot feed {:?}", cmd.get_program()))?;
     Ok(out.stdout)
+}
+
+/// Fails unless `data` still hashes to `want`, the sum `download` verified.
+fn check_sum(data: &[u8], want: &str) -> Result<()> {
+    let got = String::from_utf8(run_input(&mut Command::new("sha256sum"), data)?)?;
+    if got.split_whitespace().next() != Some(want) {
+        bail!("checksum mismatch, the download changed since it was verified");
+    }
+    Ok(())
 }
 
 /// `remote` > `local`, comparing dotted numbers; on a tie a release beats a
@@ -285,6 +331,13 @@ mod tests {
         );
         assert_eq!(expected_sum(sums, "other.tar.gz").as_deref(), Some("cd34"));
         assert_eq!(expected_sum(sums, "missing.tar.gz"), None);
+    }
+
+    #[test]
+    fn changed_download_fails_the_sum_check() {
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(check_sum(b"abc", abc).is_ok());
+        assert!(check_sum(b"abd", abc).is_err());
     }
 
     #[test]

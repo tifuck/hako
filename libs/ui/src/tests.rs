@@ -217,7 +217,7 @@ fn renders_every_device_tab_without_panicking() {
     let ctx = egui::Context::default();
     let state = sample_state();
     for d in &state.devices {
-        for tab in 0..tabs_for(d).len() {
+        for tab in tabs_for(d) {
             let mut app = HakoAppUi {
                 state: Some(state.clone()),
                 selected: Some(d.id.clone()),
@@ -234,7 +234,7 @@ fn renders_every_device_tab_without_panicking() {
             assert!(
                 out.iter()
                     .all(|c| !matches!(c, UiCommand::Set { .. } | UiCommand::SetRemap { .. })),
-                "{:?} tab {tab} emitted {out:?}",
+                "{:?} tab {tab:?} emitted {out:?}",
                 d.kind
             );
         }
@@ -280,7 +280,7 @@ fn onboard_memory_gate_renders_and_needs_confirmation() {
     state.devices = vec![d.clone()];
     let ctx = egui::Context::default();
     assert_eq!(tabs_for(&d).last(), Some(&Tab::Device));
-    for tab in 0..tabs_for(&d).len() {
+    for tab in tabs_for(&d) {
         let mut app = HakoAppUi {
             state: Some(state.clone()),
             selected: Some(d.id.clone()),
@@ -300,7 +300,7 @@ fn onboard_memory_gate_renders_and_needs_confirmation() {
         }
         assert!(
             out.iter().all(|c| !matches!(c, UiCommand::Set { .. })),
-            "tab {tab} emitted {out:?}"
+            "tab {tab:?} emitted {out:?}"
         );
     }
 }
@@ -317,6 +317,80 @@ fn tabs_follow_the_device_kind_and_end_with_device() {
     );
     // Microphone folds into Audio, power into Device.
     assert_eq!(tabs(DeviceKind::Headset), [Audio, LineIn, Device]);
+}
+
+/// Drafts hold while commands are in flight, then give way to the daemon's
+/// value even when it never matched (refused or clamped write).
+#[test]
+fn drafts_fall_back_to_the_daemon_value_once_answered() {
+    let st = sample_state();
+    let kb = st.devices[0].clone();
+    let slider = egui::Id::new(("hako_draft", kb.id.key(), SettingKey::Brightness.as_str()));
+    let color = egui::Id::new(("color_draft", kb.id.key()));
+    let sent = egui::Id::new(("color_sent", kb.id.key()));
+    let ctx = egui::Context::default();
+    ctx.data_mut(|m| {
+        m.insert_temp(egui::Id::new(("tab", kb.id.key())), Tab::Lighting);
+        m.insert_temp(slider, 20.0_f32);
+        m.insert_temp(color, [1_u8, 2, 3]);
+        m.insert_temp(sent, [1_u8, 2, 3]);
+    });
+    let mut app = HakoAppUi {
+        state: Some(st),
+        selected: Some(kb.id.clone()),
+        daemon_error: None,
+        pending: true,
+        ..Default::default()
+    };
+    let drafts = || {
+        ctx.data(|m| {
+            (
+                m.get_temp::<f32>(slider),
+                m.get_temp::<[u8; 3]>(color),
+                m.get_temp::<[u8; 3]>(sent),
+            )
+        })
+    };
+    let mut out = Vec::new();
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    assert_eq!(drafts(), (Some(20.0), Some([1, 2, 3]), Some([1, 2, 3])));
+    app.pending = false;
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    assert_eq!(drafts(), (None, None, None));
+    assert!(out.is_empty(), "{out:?}");
+}
+
+/// The open page is remembered by what it is, not its position.
+#[test]
+fn selected_tab_survives_pages_coming_and_going() {
+    let mut st = sample_state();
+    let id = st.devices[1].id.clone();
+    let ctx = egui::Context::default();
+    ctx.data_mut(|m| m.insert_temp(egui::Id::new(("tab", id.key())), Tab::Lighting));
+    let shown = |st: &HubState| {
+        let mut app = HakoAppUi {
+            state: Some(st.clone()),
+            selected: Some(id.clone()),
+            daemon_error: None,
+            ..Default::default()
+        };
+        let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut Vec::new()));
+        ctx.data(|m| m.get_temp::<(egui::Id, f64)>(egui::Id::new("page_transition")))
+            .unwrap()
+            .0
+    };
+    let page = |t: Tab| egui::Id::new((id.key(), t));
+    assert_eq!(shown(&st), page(Tab::Lighting));
+    // Performance disappears: Lighting moves from index 2 to 1.
+    st.devices[1]
+        .controls
+        .retain(|m| !matches!(m.key, SettingKey::Dpi | SettingKey::ReportRate));
+    assert_eq!(shown(&st), page(Tab::Lighting));
+    // Lighting disappears: the first page takes over.
+    st.devices[1]
+        .controls
+        .retain(|m| m.key.group() != SettingGroup::Lighting);
+    assert_eq!(shown(&st), page(Tab::Bindings));
 }
 
 #[test]
@@ -453,13 +527,8 @@ fn bind_state(kind: DeviceKind, name: &str, remaps: DeviceRemaps) -> (HubState, 
 
 /// Open `id` on its bindings tab with `selected` picked (0 = nothing).
 fn bind_app(ctx: &egui::Context, st: &HubState, id: &DeviceId, selected: u16) -> HakoAppUi {
-    let d = st.devices.iter().find(|d| &d.id == id).unwrap();
     ctx.data_mut(|m| {
-        let bindings = tabs_for(d)
-            .iter()
-            .position(|t| *t == Tab::Bindings)
-            .unwrap();
-        m.insert_temp(egui::Id::new(("tab", id.key())), bindings);
+        m.insert_temp(egui::Id::new(("tab", id.key())), Tab::Bindings);
         m.insert_temp(egui::Id::new(("bind_selected", id.key())), selected);
     });
     HakoAppUi {
@@ -765,7 +834,7 @@ fn snapshot_audit_gallery() {
     };
     for d in &state.devices {
         let tabs = tabs_for(d);
-        for (i, tab) in tabs.iter().enumerate() {
+        for &tab in &tabs {
             let name = format!(
                 "{:?}_{}",
                 d.kind,
@@ -778,7 +847,7 @@ fn snapshot_audit_gallery() {
                     &format!("{name}{suffix}"),
                     size,
                     app(&state, Some(d.id.clone())),
-                    |ctx| ctx.data_mut(|m| m.insert_temp(tab_id, i)),
+                    |ctx| ctx.data_mut(|m| m.insert_temp(tab_id, tab)),
                     |_| {},
                 );
             }
@@ -841,9 +910,9 @@ fn snapshot_audit_gallery() {
             |_| {},
         );
         for d in &state.devices {
-            let last = tabs_for(d).len() - 1;
+            let tabs = tabs_for(d);
             let tab_id = egui::Id::new(("tab", d.id.key()));
-            for (tab, label) in [(0, "main"), (last, "last")] {
+            for (tab, label) in [(tabs[0], "main"), (tabs[tabs.len() - 1], "last")] {
                 shoot_app(
                     &format!("theme_{}_{:?}_{label}", t.id, d.kind).to_lowercase(),
                     [1180.0, 1100.0],
@@ -876,13 +945,13 @@ fn snapshot_audit_gallery() {
         )
     };
     mem.devices = vec![onboard.clone()];
-    for (i, _) in tabs_for(&onboard).iter().enumerate() {
+    for (i, tab) in tabs_for(&onboard).into_iter().enumerate() {
         let tab_id = egui::Id::new(("tab", onboard.id.key()));
         shoot_app(
             &format!("memory_gate_tab{i}"),
             SHOT,
             app(&mem, Some(onboard.id.clone())),
-            |ctx| ctx.data_mut(|m| m.insert_temp(tab_id, i)),
+            |ctx| ctx.data_mut(|m| m.insert_temp(tab_id, tab)),
             |_| {},
         );
     }
@@ -962,7 +1031,6 @@ fn snapshot_readme() {
     });
 
     let page = |d: &DeviceSnapshot, tab: Tab, selected: u16, theme: &str, height: f32| {
-        let i = tabs_for(d).iter().position(|t| *t == tab).unwrap();
         let key = d.id.key();
         let app = HakoAppUi {
             state: Some(state.clone()),
@@ -979,7 +1047,7 @@ fn snapshot_readme() {
             app,
             move |ctx| {
                 ctx.data_mut(|m| {
-                    m.insert_temp(egui::Id::new(("tab", key.clone())), i);
+                    m.insert_temp(egui::Id::new(("tab", key.clone())), tab);
                     m.insert_temp(egui::Id::new(("bind_selected", key)), selected);
                 })
             },

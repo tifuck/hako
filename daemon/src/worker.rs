@@ -262,6 +262,15 @@ fn run(
     let mut next_tick = Instant::now() + adapter.tick_interval();
     loop {
         match rx.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
+            // The caller timed out and was told the write failed: it must
+            // not land on the device later.
+            Ok(Cmd::Set { key, reply, .. }) if reply.is_closed() => {
+                info!(
+                    "{}: dropped {} nobody waits for",
+                    adapter.id().key(),
+                    key.as_str()
+                );
+            }
             Ok(Cmd::Set { key, value, reply }) => {
                 let result = set_checked(adapter.as_mut(), &mut gate, key, value);
                 publish(gate.view(adapter.as_ref()));
@@ -394,6 +403,7 @@ fn set_checked(
 mod tests {
     use super::*;
     use hako_core::device::{DeviceId, DeviceKind};
+    use tokio::sync::broadcast;
 
     /// A device with one ordinary and one onboard-memory control.
     struct Fake {
@@ -443,18 +453,21 @@ mod tests {
         fn shutdown(&mut self) {}
     }
 
-    #[test]
-    fn onboard_writes_need_the_owners_opt_in() {
-        let root = std::env::temp_dir().join(format!("hako-gate-{}", std::process::id()));
+    fn temp_paths(tag: &str) -> ConfigPaths {
+        let root = std::env::temp_dir().join(format!("hako-{tag}-{}", std::process::id()));
         let paths = ConfigPaths {
             config_toml: root.join("config.toml"),
             devices_dir: root.join("devices"),
             profiles_dir: root.join("profiles"),
             remaps_dir: root.join("remaps"),
-            root: root.clone(),
+            root,
         };
         paths.ensure().unwrap();
-        let mut a = Fake {
+        paths
+    }
+
+    fn fake() -> Fake {
+        Fake {
             id: DeviceId {
                 vendor_id: 0x1234,
                 product_id: 0x5678,
@@ -462,7 +475,14 @@ mod tests {
             },
             writes: vec![],
             saving: false,
-        };
+        }
+    }
+
+    #[test]
+    fn onboard_writes_need_the_owners_opt_in() {
+        let paths = temp_paths("gate");
+        let root = paths.root.clone();
+        let mut a = fake();
         let mut gate = Gate::load(paths.clone(), a.id.config_stem());
         let int = |v| SettingValue::Int(v);
 
@@ -520,6 +540,31 @@ mod tests {
         assert!(!a.saving, "revoking the opt-in leaves save mode");
         assert!(!Gate::load(paths, a.id.config_stem()).allowed);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_set_whose_caller_gave_up_is_not_written() {
+        let paths = temp_paths("stale-set");
+        let a = fake();
+        let stem = a.id.config_stem();
+        let gate = Gate::load(paths.clone(), stem.clone());
+        let shared = Arc::new(Mutex::new(gate.view(&a)));
+        let (tx, rx) = mpsc::channel();
+        let (reply, gave_up) = oneshot::channel();
+        drop(gave_up);
+        // The opt-in is the one write visible from outside the worker.
+        tx.send(Cmd::Set {
+            key: SettingKey::OnboardWrites,
+            value: SettingValue::Bool(true),
+            reply,
+        })
+        .unwrap();
+        let (ack, done) = mpsc::channel();
+        tx.send(Cmd::Shutdown(ack)).unwrap();
+        run(Box::new(a), gate, rx, shared, broadcast::channel(4).0);
+        done.recv().unwrap();
+        assert!(!Gate::load(paths.clone(), stem).allowed);
+        let _ = std::fs::remove_dir_all(paths.root);
     }
 
     #[test]

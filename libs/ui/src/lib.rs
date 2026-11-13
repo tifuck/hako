@@ -79,6 +79,9 @@ pub struct HakoAppUi {
     pub show_settings: bool,
     /// Newer release found by the client's update check.
     pub update: Option<widgets::UpdateOffer>,
+    /// Commands sent but not yet answered (with the state after them);
+    /// controls keep their local drafts until then.
+    pub pending: bool,
 }
 
 impl Default for HakoAppUi {
@@ -92,6 +95,7 @@ impl Default for HakoAppUi {
             settings: None,
             show_settings: false,
             update: None,
+            pending: false,
         }
     }
 }
@@ -111,6 +115,7 @@ impl HakoAppUi {
     pub fn ui(&mut self, ctx: &egui::Context, out: &mut Vec<UiCommand>) {
         theme::set(self.settings.as_ref().map_or("", |s| s.theme.as_str()));
         theme::apply(ctx);
+        controls::set_pending(ctx, self.pending);
         self.ensure_selection();
         self.top_bar(ctx, out);
         self.rail(ctx);
@@ -429,7 +434,7 @@ fn valid_profile_name(name: &str) -> bool {
 
 /// A device page. Setting groups are sections inside a page; related groups
 /// share one (microphone sits with audio, power with device memory).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Tab {
     Performance,
     Lighting,
@@ -525,19 +530,21 @@ impl HakoAppUi {
         let tabs = tabs_for(d);
         let labels: Vec<&str> = tabs.iter().map(|t| t.label(d.kind)).collect();
         let tab_id = egui::Id::new(("tab", d.id.key()));
+        // Kept as a `Tab`: pages come and go with the device's controls.
         let mut tab = ui
             .ctx()
-            .data(|m| m.get_temp::<usize>(tab_id))
-            .unwrap_or(0)
-            .min(tabs.len() - 1);
-        if let Some(i) = tab_bar(ui, tab_id, &labels, tab) {
-            tab = i;
+            .data(|m| m.get_temp::<Tab>(tab_id))
+            .filter(|t| tabs.contains(t))
+            .unwrap_or(tabs[0]);
+        let active = tabs.iter().position(|t| *t == tab).unwrap_or(0);
+        if let Some(i) = tab_bar(ui, tab_id, &labels, active) {
+            tab = tabs[i];
             ui.ctx().data_mut(|m| m.insert_temp(tab_id, tab));
         }
         ui.add_space(theme::SPACE_LG);
         widgets::page_transition(ui, (d.id.key(), tab));
 
-        match tabs[tab] {
+        match tab {
             Tab::Bindings if d.kind == DeviceKind::Mouse => {
                 bindings::mouse_page(ui, d, remaps, out)
             }

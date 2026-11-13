@@ -105,6 +105,29 @@ fn draft_id(d: &DeviceSnapshot, key: SettingKey) -> egui::Id {
     egui::Id::new(("hako_draft", d.id.key(), key.as_str()))
 }
 
+fn pending_id() -> egui::Id {
+    egui::Id::new("hako_pending")
+}
+
+/// Set by the app each frame: commands are on their way to the daemon.
+pub(crate) fn set_pending(ctx: &egui::Context, pending: bool) {
+    ctx.data_mut(|m| m.insert_temp(pending_id(), pending));
+}
+
+/// A draft has had its answer: nothing is held with the pointer, no command
+/// is in flight and none for `d` was queued this frame. Dropping it then shows
+/// the daemon's value, including a refused or clamped one.
+fn settled(ui: &Ui, d: &DeviceSnapshot, out: &[UiCommand]) -> bool {
+    !ui.input(|i| i.pointer.any_down())
+        && !ui
+            .ctx()
+            .data(|m| m.get_temp::<bool>(pending_id()))
+            .unwrap_or(false)
+        && !out
+            .iter()
+            .any(|c| matches!(c, UiCommand::Set { device_id, .. } if *device_id == d.id))
+}
+
 fn is_int(meta: &SettingMeta) -> bool {
     let whole = |o: Option<f64>| o.is_none_or(|v| v.fract() == 0.0);
     whole(meta.step) && whole(meta.min) && whole(meta.max)
@@ -190,8 +213,7 @@ fn slider(
         };
         set(out, d, key, value);
     }
-    // Server caught up → drop the draft.
-    if !resp.dragged() && (v - server).abs() < if int { 0.51 } else { 0.02 } {
+    if settled(ui, d, out) {
         ui.ctx().data_mut(|m| m.remove_temp::<f32>(id));
     }
     widgets::knob(ui, &resp, widgets::fraction(v, min, max, dpi));
@@ -492,7 +514,7 @@ fn color_row(
             }
         }
     }
-    if [server.r(), server.g(), server.b()] == rgb {
+    if settled(ui, d, out) {
         ui.ctx().data_mut(|m| {
             m.remove_temp::<[u8; 3]>(draft_id);
             m.remove_temp::<[u8; 3]>(egui::Id::new(("color_sent", d.id.key())));

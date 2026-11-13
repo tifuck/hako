@@ -59,6 +59,8 @@ struct ClientState {
     error: Option<String>,
     /// Command outcomes waiting to be shown as toasts.
     notices: Vec<(Tone, String)>,
+    /// Daemon calls sent and not yet answered (with the state after them).
+    pending: usize,
     /// Newer release, downloaded and waiting for a restart.
     update: Option<update::Ready>,
     /// Looking for or downloading a release.
@@ -157,24 +159,30 @@ fn main() -> Result<()> {
                                     }
                                     ClientCmd::Call(m, p, f) => (m, p, f),
                                 };
-                                let Some(resp) = call(&mut stream, method, params).await else { break };
-                                {
-                                    let mut s = state_bg.lock().unwrap();
-                                    if resp.ok {
-                                        if let Some(done) = feedback.done {
-                                            s.notices.push((Tone::Ok, done));
-                                        }
-                                        if method == Method::SetConfig {
-                                            if let Some(cfg) = resp.result.and_then(|r| serde_json::from_value(r).ok()) {
-                                                s.settings = Some(cfg);
+                                let alive = match call(&mut stream, method, params).await {
+                                    Some(resp) => {
+                                        {
+                                            let mut s = state_bg.lock().unwrap();
+                                            if resp.ok {
+                                                if let Some(done) = feedback.done {
+                                                    s.notices.push((Tone::Ok, done));
+                                                }
+                                                if method == Method::SetConfig {
+                                                    if let Some(cfg) = resp.result.and_then(|r| serde_json::from_value(r).ok()) {
+                                                        s.settings = Some(cfg);
+                                                    }
+                                                }
+                                            } else {
+                                                let why = resp.error.map_or_else(|| "no reason given".into(), |e| e.message);
+                                                s.notices.push((Tone::Error, format!("{}: {why}", feedback.failed)));
                                             }
                                         }
-                                    } else {
-                                        let why = resp.error.map_or_else(|| "no reason given".into(), |e| e.message);
-                                        s.notices.push((Tone::Error, format!("{}: {why}", feedback.failed)));
+                                        refresh(&mut stream, &state_bg).await
                                     }
-                                }
-                                if !refresh(&mut stream, &state_bg).await {
+                                    None => false,
+                                };
+                                state_bg.lock().unwrap().pending -= 1;
+                                if !alive {
                                     break;
                                 }
                             }
@@ -239,6 +247,7 @@ impl eframe::App for App {
             let mut st = self.state.lock().unwrap();
             self.ui.state = st.hub.clone();
             self.ui.daemon_error = st.error.clone();
+            self.ui.pending = st.pending > 0;
             // Adopt server settings until the user starts editing, so a late
             // GetConfig doesn't clobber an in-progress edit.
             if self.ui.settings.is_none() || st.error.is_some() {
@@ -363,6 +372,9 @@ impl eframe::App for App {
                     continue;
                 }
             };
+            if matches!(cmd, ClientCmd::Call(..)) {
+                self.state.lock().unwrap().pending += 1;
+            }
             let _ = self.cmd_tx.send(cmd);
         }
         ctx.request_repaint_after(Duration::from_millis(250));
@@ -609,7 +621,12 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
                     }
                 }
             }
-            EventKind::RemapCaptured | EventKind::Error | EventKind::DaemonShuttingDown => {}
+            EventKind::Error => {
+                if let Some(msg) = ev.payload.get("message").and_then(|m| m.as_str()) {
+                    s.notices.push((Tone::Error, msg.to_string()));
+                }
+            }
+            EventKind::RemapCaptured | EventKind::DaemonShuttingDown => {}
         }
     }
 }
