@@ -6,7 +6,7 @@
 
 use hako_core::catalog::{SettingGroup, SettingKey, SettingMeta, SettingValue};
 use hako_core::device::{DeviceKind, DeviceSnapshot, HubState};
-use hako_core::ipc::AppSettings;
+use hako_core::ipc::{AppSettings, MeterTargetSpec};
 use hako_core::remap::{CaptureRole, DeviceRemaps, EvdevKey, RemapBinding};
 use hako_core::DeviceId;
 
@@ -87,6 +87,11 @@ pub struct HakoAppUi {
     /// Commands sent but not yet answered (with the state after them);
     /// controls keep their local drafts until then.
     pub pending: bool,
+    /// Meters the visible page shows, set by `ui` each frame; the client
+    /// streams them only while this is non-empty.
+    pub meter_targets: Vec<MeterTargetSpec>,
+    /// Latest peaks for `meter_targets`, in order (linear, L/R).
+    pub meter_levels: Vec<[f32; 2]>,
 }
 
 impl Default for HakoAppUi {
@@ -101,6 +106,8 @@ impl Default for HakoAppUi {
             show_settings: false,
             update: None,
             pending: false,
+            meter_targets: Vec::new(),
+            meter_levels: Vec::new(),
         }
     }
 }
@@ -121,6 +128,7 @@ impl HakoAppUi {
         theme::set(self.settings.as_ref().map_or("", |s| s.theme.as_str()));
         theme::apply(ctx);
         controls::set_pending(ctx, self.pending);
+        self.meter_targets.clear();
         self.ensure_selection();
         self.top_bar(ctx, out);
         self.rail(ctx);
@@ -163,6 +171,18 @@ impl HakoAppUi {
             }
             None => {}
         }
+        if ctx.input(|i| i.viewport().minimized == Some(true)) {
+            self.meter_targets.clear();
+        }
+    }
+
+    /// Meter for the `i`th of `meter_targets` (silent until frames arrive).
+    fn meter_row(&self, ui: &mut egui::Ui, label: &str, i: usize) {
+        let levels = self.meter_levels.get(i).copied().unwrap_or_default();
+        widgets::row(ui, label, None, |ui| {
+            let w = theme::SLIDER_W + theme::VALUE_W + ui.spacing().item_spacing.x;
+            widgets::stereo_meter(ui, ("meter", label), levels, w);
+        });
     }
 
     // ── Top bar ──────────────────────────────────────────────────
@@ -572,6 +592,14 @@ impl HakoAppUi {
             .state
             .as_ref()
             .is_some_and(|s| s.audio.aux_processing_active);
+        if on {
+            // "After processing" only means something while a chain runs;
+            // without one the output is the headset's whole mix.
+            self.meter_targets.push(MeterTargetSpec::AuxInput);
+            if processing {
+                self.meter_targets.push(MeterTargetSpec::AuxOutput);
+            }
+        }
         widgets::section(
             ui,
             "Line-in monitor",
@@ -590,6 +618,10 @@ impl HakoAppUi {
                     .filter_map(|k| controls::meta(d, *k))
                     .collect();
                 controls::rows(ui, d, &m, out);
+                if on {
+                    widgets::divider(ui);
+                    self.meter_row(ui, "Input", 0);
+                }
             },
         );
 
@@ -630,6 +662,11 @@ impl HakoAppUi {
                     {
                         ui.add_space(theme::SPACE_SM);
                         ui.colored_label(theme::pal().warn, err);
+                    }
+                    if processing {
+                        ui.add_space(theme::SPACE_SM);
+                        widgets::divider(ui);
+                        self.meter_row(ui, "After processing", 1);
                     }
                     if self.settings.as_ref() != Some(&draft) {
                         self.settings = Some(draft.clone());
@@ -686,6 +723,34 @@ impl HakoAppUi {
                     widgets::row(ui, "Resume line-in on connect", None, |ui| {
                         widgets::switch(ui, &mut draft.aux_auto_enable);
                     });
+                    widgets::divider(ui);
+                    widgets::row(
+                        ui,
+                        "Audio latency",
+                        Some("Lower values use more CPU and may crackle on slow systems"),
+                        |ui| {
+                            let label = |value: &str| {
+                                AUDIO_LATENCY_LABELS
+                                    .iter()
+                                    .find(|(v, _)| *v == value)
+                                    .map_or(value.to_string(), |(_, label)| label.to_string())
+                            };
+                            widgets::dropdown(
+                                "audio_latency",
+                                label(&draft.audio_latency),
+                                theme::DROPDOWN_W,
+                            )
+                            .show_ui(ui, |ui| {
+                                for (value, text) in AUDIO_LATENCY_LABELS {
+                                    ui.selectable_value(
+                                        &mut draft.audio_latency,
+                                        value.into(),
+                                        text,
+                                    );
+                                }
+                            });
+                        },
+                    );
                 });
             },
         );
@@ -1223,6 +1288,13 @@ fn empty_state(ui: &mut egui::Ui, connected: bool, daemon_error: &Option<String>
 
 /// Width of the profile dropdown (wide enough for the save field inside).
 const PROFILE_MENU_W: f32 = 232.0;
+
+/// `AppSettings::audio_latency` values (`hako_core::AUDIO_LATENCIES`) and their labels.
+const AUDIO_LATENCY_LABELS: [(&str, &str); 3] = [
+    ("low", "Low (2.7 ms)"),
+    ("balanced", "Balanced (5.3 ms)"),
+    ("safe", "Safe (10.7 ms)"),
+];
 
 /// Small heading inside a popup menu, inset to line up with its items.
 fn menu_heading(ui: &mut egui::Ui, text: &str) {

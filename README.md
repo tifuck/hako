@@ -315,7 +315,7 @@ gh attestation verify hako_*_amd64.deb --repo tifuck/Hako
 | | Needed for |
 |---|---|
 | Linux with **systemd** (user session) and **udev** | everything |
-| **PipeWire** with `pw-loopback`, `pw-link`, `pw-cli`, `wpctl` | ChatMix and line-in |
+| **PipeWire** (with `pw-loopback` and the `pipewire` binary) and **WirePlumber** | ChatMix and line-in |
 | `amixer` (alsa-utils) | line-in capture level |
 | [LSP plugins](https://lsp-plug.in/) (LADSPA), optional | line-in gate, compressor and EQ |
 | `curl`, `ssh-keygen` (openssh-client) | update checks and release signature check |
@@ -393,6 +393,7 @@ hakod --diagnose            # every HID device and which driver handles it
 hakod --list-devices        # the supported-device list
 hakod --udev-rules          # udev rules for every supported device
 hakod --reset-audio         # remove hako's audio nodes, restore the default output
+hakod --latency-test        # latency the AUX chain adds (software only, silent)
 hakod --log-level debug     # run in the foreground with verbose logs
 ```
 
@@ -442,6 +443,16 @@ adding yourself to the `input` group. The bindings page shows the exact error.
 ```bash
 hakod --reset-audio
 ```
+
+</details>
+
+<details>
+<summary><b>Line-in monitoring feels laggy</b></summary>
+
+`hakod --latency-test [--latency low|balanced|safe] [--seconds N]` runs the
+default AUX chain on private test nodes (nothing reaches a device) and prints
+the latency it adds over a direct link; it exits 1 if that is over one quantum
+or a link is async. Include its output in an issue.
 
 </details>
 

@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 license = "MIT"
 authors = ["hako"]
@@ -30,4 +30,6 @@ clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
 # SVG loader (resvg) for the logo, drawn from branding/parts at screen resolution.
+# PipeWire client (daemon audio engine only; the UI never links it).
+pipewire = "0.10.1"
 egui_extras = { version = "0.31", default-features = false, features = ["svg"] }

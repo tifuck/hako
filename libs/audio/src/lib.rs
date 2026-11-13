@@ -1,26 +1,52 @@
-//! PipeWire ChatMix + AUX helpers (no PulseAudio / pactl required).
+//! PipeWire ChatMix + AUX (line-in) on a native control plane (no PulseAudio,
+//! `pw-link`, `pw-cli` or `wpctl`).
+//!
+//! The `engine` module keeps one PipeWire connection on its own thread with a registry
+//! cache; node lookups, links, volumes, DSP parameters and the default sink go
+//! through it. Audio itself runs in child processes for crash isolation:
+//! `pw-loopback` (the ChatMix sinks) and `pipewire -c` (the AUX filter-chain).
+//! The line-in mixer controls use `amixer`.
+
+mod engine;
 
 use anyhow::{anyhow, bail, Context, Result};
+use engine::{engine, Direction, LinkHandle};
 use hako_core::{
     ipc::{AuxEffectChain, AuxEffectKind, EqBandKind},
     protocol::is_new_error,
     AuxConfig,
 };
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+pub mod latency;
+pub mod meters;
 
 pub const CHATMIX_GAME: &str = "Hako_Game";
 pub const CHATMIX_CHAT: &str = "Hako_Chat";
 
-const LSP_LADSPA: &str = "/usr/lib/ladspa/lsp-plugins-ladspa.so";
+/// `node.latency` in samples until `set_latency` (the "balanced" setting).
+const DEFAULT_LATENCY: u32 = 256;
+const LSP_LADSPA: &str = "lsp-plugins-ladspa.so";
+/// Searched after `$LADSPA_PATH`.
+const LADSPA_DIRS: [&str; 4] = [
+    "/usr/lib/ladspa",
+    "/usr/lib64/ladspa",
+    "/usr/lib/x86_64-linux-gnu/ladspa",
+    "/usr/local/lib/ladspa",
+];
 const AUX_DSP_SINK: &str = "Hako_AUX_DSP";
+/// How long a spawned node may take to show its ports.
+const NODE_WAIT: Duration = Duration::from_secs(4);
 const AUX_DSP_DESC: &str = "hako AUX Processing";
 /// LSP's UI default. Unset, PipeWire falls back to the LADSPA minimum (0 ms),
 /// which makes the gate/compressor detector follow raw peaks and chatter.
@@ -76,8 +102,8 @@ impl DefaultState {
 struct ChatMixState {
     game: Option<Child>,
     chat: Option<Child>,
-    /// (game, chat) node ids, valid while the children run.
-    ids: Option<(u32, u32)>,
+    /// The headset sink both loopbacks play into.
+    sink: Option<String>,
     /// Last volumes written, so repeated dial reports cost nothing.
     volumes: Option<(f32, f32)>,
 }
@@ -90,8 +116,12 @@ impl ChatMixState {
 
 #[derive(Debug)]
 struct AuxState {
+    /// `("node:port", "node:port")` of `handles`, for `aux_graph_intact`.
     links: Vec<(String, String)>,
+    handles: Vec<LinkHandle>,
     dsp: Option<Child>,
+    /// Capture source node name.
+    capture: String,
     sink: String,
     /// `None` marks a pending AUX that owns nothing yet; `heal_aux` builds it.
     alsa_card: Option<String>,
@@ -104,7 +134,9 @@ impl AuxState {
     fn pending(cfg: AuxConfig, chain: AuxEffectChain) -> Self {
         Self {
             links: Vec::new(),
+            handles: Vec::new(),
             dsp: None,
+            capture: String::new(),
             sink: String::new(),
             alsa_card: None,
             previous_input_source: None,
@@ -131,12 +163,82 @@ struct AudioState {
     /// Set by `reset_all` (the kill-switch): ChatMix stays down until
     /// `resume_chatmix`.
     chatmix_suppressed: bool,
+    /// `node.latency` of hako's nodes, in samples at 48 kHz.
+    latency: u32,
+}
+
+/// What status reads see: refreshed each time the audio lock is released,
+/// so `GetState` never waits on audio work in progress.
+#[derive(Debug, Clone, Default)]
+struct Status {
+    chatmix_active: bool,
+    aux_active: bool,
+    aux_processing_active: bool,
+    chatmix_error: Option<String>,
+    aux_error: Option<String>,
+    aux_capture: Option<String>,
+    aux_output: Option<String>,
+}
+
+impl Status {
+    fn of(state: &mut AudioState) -> Self {
+        reap_exited(&mut state.chatmix.game);
+        reap_exited(&mut state.chatmix.chat);
+        let (mut aux_processing_active, mut aux_capture, mut aux_output) = (false, None, None);
+        if let Some(aux) = state.aux.as_mut() {
+            reap_exited(&mut aux.dsp);
+            aux_processing_active = aux.dsp.is_some();
+            if aux.alsa_card.is_some() {
+                aux_capture = Some(aux.capture.clone());
+                aux_output = Some(if aux.dsp.is_some() {
+                    AUX_DSP_SINK.to_string()
+                } else {
+                    aux.sink.clone()
+                });
+            }
+        }
+        Self {
+            chatmix_active: state.chatmix.active(),
+            aux_active: state.aux.is_some(),
+            aux_processing_active,
+            chatmix_error: state.chatmix_error.clone(),
+            aux_error: state.aux_error.clone(),
+            aux_capture,
+            aux_output,
+        }
+    }
+}
+
+/// The audio lock; publishes a fresh `Status` when released.
+struct StateGuard<'a> {
+    state: MutexGuard<'a, AudioState>,
+    status: &'a Mutex<Status>,
+}
+
+impl Deref for StateGuard<'_> {
+    type Target = AudioState;
+    fn deref(&self) -> &AudioState {
+        &self.state
+    }
+}
+
+impl DerefMut for StateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut AudioState {
+        &mut self.state
+    }
+}
+
+impl Drop for StateGuard<'_> {
+    fn drop(&mut self) {
+        *self.status.lock().unwrap_or_else(PoisonError::into_inner) = Status::of(&mut self.state);
+    }
 }
 
 type ErrorHook = Box<dyn Fn(String) + Send + Sync>;
 
 pub struct AudioService {
     state: Mutex<AudioState>,
+    status: Mutex<Status>,
     on_error: OnceLock<ErrorHook>,
 }
 
@@ -153,7 +255,9 @@ impl AudioService {
                 aux_reported: None,
                 chatmix_set_default: true,
                 chatmix_suppressed: false,
+                latency: DEFAULT_LATENCY,
             }),
+            status: Mutex::new(Status::default()),
             on_error: OnceLock::new(),
         }
     }
@@ -179,50 +283,100 @@ impl AudioService {
         }
     }
 
-    fn state(&self) -> MutexGuard<'_, AudioState> {
-        self.state.lock().unwrap_or_else(|poisoned| {
+    fn state(&self) -> StateGuard<'_> {
+        let state = self.state.lock().unwrap_or_else(|poisoned| {
             let mut state = poisoned.into_inner();
             state.chatmix_error = Some("audio state mutex was poisoned; recovered state".into());
             state
-        })
+        });
+        StateGuard {
+            state,
+            status: &self.status,
+        }
+    }
+
+    /// The last published status, refreshed first when no audio work runs
+    /// (a child may have exited since).
+    fn status(&self) -> Status {
+        match self.state.try_lock() {
+            Ok(state) => drop(StateGuard {
+                state,
+                status: &self.status,
+            }),
+            Err(TryLockError::Poisoned(_)) => drop(self.state()),
+            Err(TryLockError::WouldBlock) => {}
+        }
+        self.status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub fn chatmix_active(&self) -> bool {
-        let mut state = self.state();
-        reap_exited(&mut state.chatmix.game);
-        reap_exited(&mut state.chatmix.chat);
-        state.chatmix.active()
+        self.status().chatmix_active
     }
 
     pub fn aux_active(&self) -> bool {
-        self.state().aux.is_some()
+        self.status().aux_active
     }
 
     pub fn aux_processing_active(&self) -> bool {
-        let mut state = self.state();
-        if let Some(aux) = state.aux.as_mut() {
-            reap_exited(&mut aux.dsp);
-            aux.dsp.is_some()
-        } else {
-            false
-        }
+        self.status().aux_processing_active
     }
 
     pub fn aux_dsp_active(&self) -> bool {
         self.aux_processing_active()
     }
 
+    /// `node.name` of the source AUX captures, while AUX is up.
+    pub fn aux_capture_node(&self) -> Option<String> {
+        self.status().aux_capture
+    }
+
+    /// `node.name` AUX plays into while up: the DSP node when processing is
+    /// on, else the sink.
+    pub fn aux_output_node(&self) -> Option<String> {
+        self.status().aux_output
+    }
+
     pub fn last_error(&self) -> Option<String> {
-        let state = self.state();
-        match (&state.chatmix_error, &state.aux_error) {
+        let status = self.status();
+        match (status.chatmix_error, status.aux_error) {
             (Some(c), Some(a)) => Some(format!("ChatMix: {c}; AUX: {a}")),
-            (c, a) => c.clone().or_else(|| a.clone()),
+            (c, a) => c.or(a),
         }
     }
 
     pub fn healthy(&self) -> bool {
-        let state = self.state();
-        state.chatmix_error.is_none() && state.aux_error.is_none()
+        let status = self.status();
+        status.chatmix_error.is_none() && status.aux_error.is_none()
+    }
+
+    /// `node.latency` (samples at 48 kHz) of the ChatMix loopbacks and the AUX
+    /// filter-chain. A change rebuilds whichever is up (a brief dropout).
+    pub fn set_latency(&self, samples: u32) -> Result<()> {
+        let mut state = self.state();
+        if state.latency == samples {
+            return Ok(());
+        }
+        state.latency = samples;
+        let mut result = Ok(());
+        if state.chatmix.active() {
+            let chatmix = restart_chatmix_locked(&mut state);
+            record_result(&mut state.chatmix_error, &chatmix);
+            result = chatmix;
+        }
+        if state
+            .aux
+            .as_ref()
+            .is_some_and(|aux| aux.alsa_card.is_some())
+        {
+            let aux = rebuild_aux_locked(&mut state);
+            record_result(&mut state.aux_error, &aux);
+            result = result.and(aux);
+        }
+        seen(&mut state);
+        result
     }
 
     /// Bring ChatMix up on the headset's playback sink: the first node name
@@ -271,18 +425,7 @@ impl AudioService {
         if !state.chatmix.active() || state.chatmix.volumes == Some((game, chat)) {
             return Ok(());
         }
-        let set = |(g, c): (u32, u32)| {
-            wpctl_set_volume(g, game)?;
-            wpctl_set_volume(c, chat)
-        };
-        let result = match state.chatmix.ids {
-            Some(ids) if set(ids).is_ok() => Ok(()),
-            // Ids unknown or stale: look them up once more.
-            _ => chatmix_ids().and_then(|ids| {
-                state.chatmix.ids = Some(ids);
-                set(ids)
-            }),
-        };
+        let result = set_chatmix_volumes_now(game, chat);
         state.chatmix.volumes = result.is_ok().then_some((game, chat));
         record_result(&mut state.chatmix_error, &result);
         self.report(&mut state);
@@ -319,7 +462,7 @@ impl AudioService {
         self.report(&mut state);
     }
 
-    /// PipeWire silently drops `pw-link` links when a node is recreated
+    /// PipeWire silently drops links when a node is recreated
     /// (suspend/resume, device replug, server restart), and the DSP process can
     /// exit. Rebuild the graph whenever any part of it is gone; on failure stay
     /// pending so the next call retries once the nodes are back.
@@ -331,15 +474,10 @@ impl AudioService {
         if aux_graph_intact(aux) {
             return;
         }
-        let (cfg, chain) = (aux.cfg.clone(), aux.chain.clone());
         if aux.alsa_card.is_some() {
             warn!("AUX graph broken; rebuilding");
-            let _ = aux_disable_locked(&mut state);
         }
-        let result = aux_enable_locked(&mut state, &cfg, &chain);
-        if result.is_err() {
-            state.aux = Some(AuxState::pending(cfg, chain));
-        }
+        let result = rebuild_aux_locked(&mut state);
         record_result(&mut state.aux_error, &result);
         self.report(&mut state);
     }
@@ -439,6 +577,7 @@ impl AudioService {
         state.chatmix_suppressed = true;
         let aux = aux_disable_locked(&mut state);
         let mut chatmix = destroy_chatmix_locked(&mut state);
+        kill_orphans_locked(&state);
         if let Some(original) = state.defaults.restore() {
             chatmix = chatmix.and(set_default_sink(&original));
         }
@@ -448,26 +587,42 @@ impl AudioService {
         aux.and(chatmix)
     }
 
-    /// After a crash the daemon no longer knows which AUX links it made, and
-    /// `pw-link` links outlive their creator: remove capture -> sink links
-    /// matching the AUX config. No-op while this service owns AUX, or when
-    /// either node is absent (nothing can be linked).
+    /// Kill ChatMix / AUX processes a crashed hakod left behind (they match
+    /// by name, so this also hits another running hakod's). No-op while this
+    /// instance owns any. Startup and the kill-switch only.
+    pub fn kill_orphans(&self) {
+        kill_orphans_locked(&self.state());
+    }
+
+    /// Versions before the native engine made AUX links with `pw-link`, which
+    /// outlive their creator: remove capture -> sink links matching the AUX
+    /// config. No-op while this service owns AUX, or when either node is
+    /// absent (nothing can be linked).
     pub fn remove_orphan_aux_links(&self, cfg: &AuxConfig) -> Result<()> {
         let state = self.state();
         if state.aux.is_some() {
             return Ok(());
         }
-        let (Ok(capture), Ok(sink)) = (
-            find_source_node_name(&cfg.capture_name_regex),
+        let (Ok((capture, mono)), Ok(sink)) = (
+            find_source_node(&cfg.capture_name_regex),
             find_sink_node_name(&cfg.sink_name_regex),
         ) else {
             return Ok(());
         };
-        let present = parse_links(&run_cmd("pw-link", &["-l"])?);
-        for link in stereo_links(&capture, &sink) {
-            if present.contains(&link) {
-                unlink_nodes(&link.0, &link.1)?;
-            }
+        let engine = engine()?;
+        let orphans: Vec<u32> = engine.with_graph(|graph| {
+            capture_links(&capture, mono, &sink)
+                .iter()
+                .filter_map(|(output, input)| {
+                    let (_, output) = graph_port(graph, output, Direction::Out)?;
+                    let (_, input) = graph_port(graph, input, Direction::In)?;
+                    Some(graph.links_between(output, input))
+                })
+                .flatten()
+                .collect()
+        });
+        for id in orphans {
+            engine.destroy(id)?;
         }
         Ok(())
     }
@@ -485,11 +640,21 @@ impl Drop for AudioService {
             .state
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Only what this instance owns; process-wide sweeps are `kill_orphans`.
         let _ = aux_disable_locked(state);
         let _ = destroy_chatmix_locked(state);
         if let Some(original) = state.defaults.restore() {
             let _ = set_default_sink(&original);
         }
+    }
+}
+
+fn kill_orphans_locked(state: &AudioState) {
+    let owns_dsp = state.aux.as_ref().is_some_and(|aux| aux.dsp.is_some());
+    if state.chatmix.game.is_none() && state.chatmix.chat.is_none() && !owns_dsp {
+        kill_loopback_orphan(CHATMIX_GAME);
+        kill_loopback_orphan(CHATMIX_CHAT);
+        kill_aux_dsp_orphan();
     }
 }
 
@@ -517,84 +682,95 @@ fn ensure_chatmix_locked(state: &mut AudioState, sink_regexes: &[&str]) -> Resul
     }
     let arctis = found?;
 
+    spawn_chatmix(state, &arctis)?;
+    if state.chatmix_set_default {
+        if let Err(error) = claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
+        {
+            cleanup_chatmix_children(&mut state.chatmix);
+            return Err(error);
+        }
+    }
+    info!("ChatMix sinks ready -> {arctis}");
+    Ok(())
+}
+
+/// Both loopbacks into `sink`, up once their nodes show their ports.
+fn spawn_chatmix(state: &mut AudioState, sink: &str) -> Result<()> {
     cleanup_chatmix_children(&mut state.chatmix);
-    let mut game = spawn_loopback(CHATMIX_GAME, "hako Game", &arctis)?;
-    let mut chat = match spawn_loopback(CHATMIX_CHAT, "hako Chat", &arctis) {
+    let mut game = spawn_loopback(CHATMIX_GAME, "hako Game", sink, state.latency)?;
+    let mut chat = match spawn_loopback(CHATMIX_CHAT, "hako Chat", sink, state.latency) {
         Ok(child) => child,
         Err(error) => {
             let _ = stop_child(&mut game);
             return Err(error);
         }
     };
-
-    let ready = wait_for_chatmix_nodes(&mut game, &mut chat)
-        .and_then(|()| chatmix_ids())
-        .and_then(|ids| {
-            if state.chatmix_set_default {
-                claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)?;
-            }
-            Ok(ids)
-        });
-    let ids = match ready {
-        Ok(ids) => ids,
-        Err(error) => {
-            let _ = stop_child(&mut game);
-            let _ = stop_child(&mut chat);
-            return Err(error);
-        }
-    };
-
+    if let Err(error) = wait_for_chatmix_nodes(&mut game, &mut chat) {
+        let _ = stop_child(&mut game);
+        let _ = stop_child(&mut chat);
+        return Err(error);
+    }
     state.chatmix = ChatMixState {
         game: Some(game),
         chat: Some(chat),
-        ids: Some(ids),
+        sink: Some(sink.to_string()),
         volumes: None,
     };
-    info!("ChatMix sinks ready -> {arctis}");
     Ok(())
 }
 
-fn chatmix_ids() -> Result<(u32, u32)> {
-    Ok((
-        resolve_node_id(CHATMIX_GAME)?,
-        resolve_node_id(CHATMIX_CHAT)?,
-    ))
+/// Respawn the loopbacks on the same sink (a new latency). The default-sink
+/// claim stays; WirePlumber's configured default is `Hako_Game` all along.
+fn restart_chatmix_locked(state: &mut AudioState) -> Result<()> {
+    let (Some(sink), volumes) = (state.chatmix.sink.clone(), state.chatmix.volumes) else {
+        return Ok(());
+    };
+    spawn_chatmix(state, &sink)?;
+    if let Some((game, chat)) = volumes {
+        set_chatmix_volumes_now(game, chat)?;
+        state.chatmix.volumes = volumes;
+    }
+    if state.defaults.held() == Some(CHATMIX_GAME) {
+        set_default_sink(CHATMIX_GAME)?;
+    }
+    info!(
+        "ChatMix rebuilt for latency {}",
+        node_latency(state.latency)
+    );
+    Ok(())
+}
+
+fn set_chatmix_volumes_now(game: f32, chat: f32) -> Result<()> {
+    set_node_volume(resolve_node_id(CHATMIX_GAME)?, game)?;
+    set_node_volume(resolve_node_id(CHATMIX_CHAT)?, chat)
 }
 
 fn destroy_chatmix_locked(state: &mut AudioState) -> Result<()> {
     let mut first_error = release_default(&mut state.defaults, DefaultOwner::ChatMix).err();
-    state.chatmix.ids = None;
+    state.chatmix.sink = None;
     state.chatmix.volumes = None;
     if let Some(mut child) = state.chatmix.game.take() {
         if let Err(error) = stop_child(&mut child) {
             first_error.get_or_insert(error);
         }
-    } else {
-        kill_loopback_orphan(CHATMIX_GAME);
     }
     if let Some(mut child) = state.chatmix.chat.take() {
         if let Err(error) = stop_child(&mut child) {
             first_error.get_or_insert(error);
         }
-    } else {
-        kill_loopback_orphan(CHATMIX_CHAT);
     }
     info!("ChatMix destroyed");
     first_error.map_or(Ok(()), Err)
 }
 
 fn cleanup_chatmix_children(chatmix: &mut ChatMixState) {
-    chatmix.ids = None;
+    chatmix.sink = None;
     chatmix.volumes = None;
-    if let Some(mut child) = chatmix.game.take() {
+    for mut child in [chatmix.game.take(), chatmix.chat.take()]
+        .into_iter()
+        .flatten()
+    {
         let _ = stop_child(&mut child);
-    } else {
-        kill_loopback_orphan(CHATMIX_GAME);
-    }
-    if let Some(mut child) = chatmix.chat.take() {
-        let _ = stop_child(&mut child);
-    } else {
-        kill_loopback_orphan(CHATMIX_CHAT);
     }
 }
 
@@ -604,10 +780,9 @@ fn aux_enable_locked(
     chain: &AuxEffectChain,
 ) -> Result<()> {
     chain.validate().map_err(anyhow::Error::msg)?;
-    let capture = find_source_node_name(&cfg.capture_name_regex)?;
+    let (capture, mono) = find_source_node(&cfg.capture_name_regex)?;
     let sink = find_sink_node_name(&cfg.sink_name_regex)?;
-    let capture_id = resolve_node_id(&capture)?;
-    let alsa_card = inspect_alsa_card(capture_id)?;
+    let alsa_card = node_alsa_card(&capture)?;
     let previous_input_source = current_input_source(&alsa_card).ok();
 
     let has_effects = chain.effects.iter().any(|effect| effect.enabled);
@@ -617,10 +792,26 @@ fn aux_enable_locked(
         .any(|effect| effect.enabled && !matches!(effect.kind, AuxEffectKind::Equalizer { .. }));
     let mut dsp = None;
     let destination = if has_effects {
-        if needs_lsp && !Path::new(LSP_LADSPA).exists() {
-            bail!("LSP LADSPA plugins not installed ({LSP_LADSPA})");
-        }
-        let config = generate_dsp_config(AUX_DSP_SINK, &sink, chain)?;
+        let lsp = if needs_lsp {
+            let dirs = ladspa_dirs(std::env::var_os("LADSPA_PATH").as_deref());
+            let Some(lsp) = find_lsp_ladspa(&dirs) else {
+                let searched: Vec<_> = dirs.iter().map(|dir| dir.display().to_string()).collect();
+                bail!(
+                    "LSP LADSPA plugins not installed ({LSP_LADSPA} not in {})",
+                    searched.join(", ")
+                );
+            };
+            Some(lsp)
+        } else {
+            None
+        };
+        let config = generate_dsp_config(
+            AUX_DSP_SINK,
+            Some(&sink),
+            chain,
+            state.latency,
+            lsp.as_deref(),
+        )?;
         let path = dsp_conf_path();
         std::fs::OpenOptions::new()
             .write(true)
@@ -639,7 +830,7 @@ fn aux_enable_locked(
             .stderr(Stdio::null())
             .spawn()
             .context("spawn PipeWire AUX filter graph")?;
-        if let Err(error) = wait_for_node(&mut child, AUX_DSP_SINK, PortDirection::Input) {
+        if let Err(error) = wait_for_node(&mut child, AUX_DSP_SINK) {
             let _ = stop_child(&mut child);
             return Err(error);
         }
@@ -649,14 +840,16 @@ fn aux_enable_locked(
         sink.clone()
     };
 
-    let pairs = stereo_links(&capture, &destination);
+    let pairs = capture_links(&capture, mono, &destination);
     let mut linked = Vec::new();
     for (source, destination) in &pairs {
-        if let Err(error) = link_nodes(source, destination) {
-            cleanup_aux_parts(&mut linked, &mut dsp);
-            return Err(error);
+        match link_ports(source, destination) {
+            Ok(handle) => linked.push(handle),
+            Err(error) => {
+                cleanup_aux_parts(&mut linked, &mut dsp);
+                return Err(error);
+            }
         }
-        linked.push((source.clone(), destination.clone()));
     }
 
     if let Err(error) = set_input_source(&alsa_card, "Line") {
@@ -683,8 +876,10 @@ fn aux_enable_locked(
 
     info!("AUX enabled {capture} -> {destination}");
     state.aux = Some(AuxState {
-        links: linked,
+        links: pairs,
+        handles: linked,
         dsp,
+        capture,
         sink,
         alsa_card: Some(alsa_card),
         previous_input_source,
@@ -697,28 +892,37 @@ fn aux_enable_locked(
 fn aux_disable_locked(state: &mut AudioState) -> Result<()> {
     let mut first_error = release_default(&mut state.defaults, DefaultOwner::Aux).err();
     if let Some(mut aux) = state.aux.take() {
-        for (source, destination) in aux.links.drain(..) {
-            if let Err(error) = unlink_nodes(&source, &destination) {
-                first_error.get_or_insert(error);
-            }
-        }
+        aux.handles.clear();
         if let Some(mut child) = aux.dsp.take() {
             if let Err(error) = stop_child(&mut child) {
                 first_error.get_or_insert(error);
             }
-        } else {
-            kill_aux_dsp_orphan();
         }
         if let (Some(card), Some(source)) = (aux.alsa_card.as_deref(), aux.previous_input_source) {
             if let Err(error) = set_input_source(card, &source) {
                 first_error.get_or_insert(error);
             }
         }
-    } else {
-        kill_aux_dsp_orphan();
     }
     info!("AUX disabled");
     first_error.map_or(Ok(()), Err)
+}
+
+/// Tear AUX down and build it again from its own config; on failure it stays
+/// pending so `heal_aux` retries.
+fn rebuild_aux_locked(state: &mut AudioState) -> Result<()> {
+    let Some(aux) = state.aux.as_ref() else {
+        return Ok(());
+    };
+    let (cfg, chain) = (aux.cfg.clone(), aux.chain.clone());
+    if aux.alsa_card.is_some() {
+        let _ = aux_disable_locked(state);
+    }
+    let result = aux_enable_locked(state, &cfg, &chain);
+    if result.is_err() {
+        state.aux = Some(AuxState::pending(cfg, chain));
+    }
+    result
 }
 
 fn aux_graph_intact(aux: &mut AuxState) -> bool {
@@ -731,10 +935,12 @@ fn aux_graph_intact(aux: &mut AuxState) -> bool {
         }
     }
     // Can't see the graph right now; don't thrash it.
-    let Ok(dump) = run_cmd("pw-link", &["-l"]) else {
+    let Some(present) = engine()
+        .ok()
+        .and_then(|engine| engine.with_graph(|graph| graph.connected.then(|| graph.link_names())))
+    else {
         return true;
     };
-    let present = parse_links(&dump);
     let mut expected = aux.links.clone();
     if aux.dsp.is_some() {
         for channel in ["FL", "FR"] {
@@ -748,24 +954,8 @@ fn aux_graph_intact(aux: &mut AuxState) -> bool {
         && current_input_source(card).is_ok_and(|source| source == "Line")
 }
 
-/// `pw-link -l` lists every output port followed by `  |-> input` lines.
-fn parse_links(dump: &str) -> HashSet<(String, String)> {
-    let mut links = HashSet::new();
-    let mut port = "";
-    for line in dump.lines() {
-        if let Some(input) = line.trim().strip_prefix("|-> ") {
-            links.insert((port.to_string(), input.trim().to_string()));
-        } else if !line.starts_with(char::is_whitespace) {
-            port = line.trim();
-        }
-    }
-    links
-}
-
-fn cleanup_aux_parts(links: &mut Vec<(String, String)>, dsp: &mut Option<Child>) {
-    for (source, destination) in links.drain(..) {
-        let _ = unlink_nodes(&source, &destination);
-    }
+fn cleanup_aux_parts(links: &mut Vec<LinkHandle>, dsp: &mut Option<Child>) {
+    links.clear();
     if let Some(mut child) = dsp.take() {
         let _ = stop_child(&mut child);
     }
@@ -808,23 +998,44 @@ fn user_moved_default(ours: &str, ours_exists: bool, current: Option<&str>) -> b
     ours_exists && current.is_some_and(|current| current != ours)
 }
 
+/// `node.latency` for `samples` at 48 kHz.
+fn node_latency(samples: u32) -> String {
+    format!("{samples}/48000")
+}
+
 /// `pw-loopback` capture / playback properties. Values are quoted: an
 /// unquoted space (`node.description=hako Game`) is a syntax error and
-/// pw-loopback exits 255.
-fn loopback_props(name: &str, description: &str, playback_target: &str) -> (String, String) {
+/// pw-loopback exits 255. WirePlumber links the playback side to its
+/// `node.target` (and again after the headset sink is recreated).
+fn loopback_props(
+    name: &str,
+    description: &str,
+    playback_target: &str,
+    latency: u32,
+) -> (String, String) {
+    let latency = node_latency(latency);
     (
         format!(
-            "media.class=Audio/Sink node.name=\"{}\" node.description=\"{}\" audio.position=[FL FR]",
+            "media.class=Audio/Sink node.name=\"{}\" node.description=\"{}\" audio.position=[FL FR] node.latency=\"{latency}\"",
             pw_escape(name),
             pw_escape(description)
         ),
-        format!("node.target=\"{}\"", pw_escape(playback_target)),
+        format!(
+            "node.target=\"{}\" node.latency=\"{latency}\"",
+            pw_escape(playback_target)
+        ),
     )
 }
 
-fn spawn_loopback(name: &str, description: &str, playback_target: &str) -> Result<Child> {
+fn spawn_loopback(
+    name: &str,
+    description: &str,
+    playback_target: &str,
+    latency: u32,
+) -> Result<Child> {
     kill_loopback_orphan(name);
-    let (capture_props, playback_props) = loopback_props(name, description, playback_target);
+    let (capture_props, playback_props) =
+        loopback_props(name, description, playback_target, latency);
     Command::new("pw-loopback")
         .args(["-n", name, "-i", &capture_props, "-o", &playback_props])
         .stdin(Stdio::null())
@@ -834,39 +1045,32 @@ fn spawn_loopback(name: &str, description: &str, playback_target: &str) -> Resul
         .with_context(|| format!("spawn pw-loopback for {name}"))
 }
 
+const PLAYBACK: [&str; 2] = ["playback_FL", "playback_FR"];
+
 fn wait_for_chatmix_nodes(game: &mut Child, chat: &mut Child) -> Result<()> {
-    for _ in 0..40 {
+    let ready = engine()?.wait_for(NODE_WAIT, |graph| {
         ensure_running(game, CHATMIX_GAME)?;
         ensure_running(chat, CHATMIX_CHAT)?;
-        let ports = run_cmd("pw-link", &["-i"]).unwrap_or_default();
-        if node_has_stereo_ports(&ports, CHATMIX_GAME, "playback_FL", "playback_FR")
-            && node_has_stereo_ports(&ports, CHATMIX_CHAT, "playback_FL", "playback_FR")
-        {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(100));
+        Ok([CHATMIX_GAME, CHATMIX_CHAT]
+            .iter()
+            .all(|node| graph.has_ports(node, Direction::In, &PLAYBACK)))
+    })?;
+    if !ready {
+        bail!("ChatMix nodes did not appear");
     }
-    bail!("ChatMix nodes did not appear")
+    Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum PortDirection {
-    Input,
-}
-
-fn wait_for_node(child: &mut Child, node: &str, direction: PortDirection) -> Result<()> {
-    let flag = match direction {
-        PortDirection::Input => "-i",
-    };
-    for _ in 0..40 {
+/// Wait for a sink `child` creates (its playback ports).
+fn wait_for_node(child: &mut Child, node: &str) -> Result<()> {
+    let ready = engine()?.wait_for(NODE_WAIT, |graph| {
         ensure_running(child, node)?;
-        let ports = run_cmd("pw-link", &[flag]).unwrap_or_default();
-        if node_has_stereo_ports(&ports, node, "playback_FL", "playback_FR") {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(100));
+        Ok(graph.has_ports(node, Direction::In, &PLAYBACK))
+    })?;
+    if !ready {
+        bail!("PipeWire node {node} did not appear");
     }
-    bail!("PipeWire node {node} did not appear")
+    Ok(())
 }
 
 fn ensure_running(child: &mut Child, name: &str) -> Result<()> {
@@ -902,15 +1106,23 @@ fn reap_exited(child: &mut Option<Child>) {
 }
 
 fn kill_loopback_orphan(name: &str) {
-    let _ = Command::new("pkill")
-        .args(["-f", &format!("^pw-loopback -n {name} ")])
-        .status();
+    pkill(&format!("^pw-loopback -n {name} "));
 }
 
 fn kill_aux_dsp_orphan() {
-    let _ = Command::new("pkill")
-        .args(["-f", r"^pipewire -c .*/hako-aux-dsp\.conf$"])
-        .status();
+    pkill(r"^pipewire -c .*/hako-aux-dsp\.conf$");
+}
+
+/// Signals every matching process of the user, a live hakod's children too.
+#[cfg(not(test))]
+fn pkill(pattern: &str) {
+    let _ = Command::new("pkill").args(["-f", pattern]).status();
+}
+
+/// Unit tests run next to the user's hakod: count instead of signalling.
+#[cfg(test)]
+fn pkill(_pattern: &str) {
+    tests::PKILLS.with(|count| count.set(count.get() + 1));
 }
 
 /// Next to the daemon socket: the per-user runtime dir, never a shared /tmp.
@@ -922,10 +1134,27 @@ fn db_to_gain(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
 
-/// One filter-chain node: LADSPA when `plugin` is set, else a PipeWire builtin.
+/// `$LADSPA_PATH` entries first, then the distributions' usual directories.
+fn ladspa_dirs(ladspa_path: Option<&OsStr>) -> Vec<PathBuf> {
+    ladspa_path
+        .map(|path| std::env::split_paths(path).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .chain(LADSPA_DIRS.iter().map(PathBuf::from))
+        .collect()
+}
+
+fn find_lsp_ladspa(dirs: &[PathBuf]) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join(LSP_LADSPA))
+        .find(|path| path.is_file())
+}
+
+/// One filter-chain node: the LSP LADSPA plugin when `lsp`, else a PipeWire builtin.
 struct DspNode {
     name: String,
-    plugin: Option<&'static str>,
+    lsp: bool,
     label: &'static str,
     controls: Vec<(&'static str, f32)>,
 }
@@ -943,7 +1172,7 @@ fn lsp_stage(name: String, label: &'static str, controls: Vec<(&'static str, f32
         outputs: [format!("{name}:Output L"), format!("{name}:Output R")],
         nodes: vec![DspNode {
             name,
-            plugin: Some(LSP_LADSPA),
+            lsp: true,
             label,
             controls,
         }],
@@ -1023,7 +1252,7 @@ fn dsp_stages(chain: &AuxEffectChain) -> Vec<DspStage> {
                         nodes: [left, right]
                             .map(|name| DspNode {
                                 name,
-                                plugin: None,
+                                lsp: false,
                                 label,
                                 controls: vec![
                                     ("Freq", band.freq_hz),
@@ -1040,7 +1269,15 @@ fn dsp_stages(chain: &AuxEffectChain) -> Vec<DspStage> {
     stages
 }
 
-fn generate_dsp_config(sink: &str, target: &str, chain: &AuxEffectChain) -> Result<String> {
+/// `lsp`: the LSP LADSPA library, needed when the chain has a gate or compressor.
+/// Without a `target` the playback side is never autoconnected (its owner links it).
+fn generate_dsp_config(
+    sink: &str,
+    target: Option<&str>,
+    chain: &AuxEffectChain,
+    latency: u32,
+    lsp: Option<&Path>,
+) -> Result<String> {
     chain.validate().map_err(anyhow::Error::msg)?;
     let stages = dsp_stages(chain);
     let (Some(first), Some(last)) = (stages.first(), stages.last()) else {
@@ -1049,13 +1286,15 @@ fn generate_dsp_config(sink: &str, target: &str, chain: &AuxEffectChain) -> Resu
 
     let mut nodes = String::new();
     for node in stages.iter().flat_map(|stage| &stage.nodes) {
-        let kind = match node.plugin {
-            Some(plugin) => format!(
+        let kind = if node.lsp {
+            let lsp = lsp.ok_or_else(|| anyhow!("LSP LADSPA plugins not installed"))?;
+            format!(
                 "type = ladspa name = \"{}\" plugin = \"{}\"",
                 pw_escape(&node.name),
-                pw_escape(plugin)
-            ),
-            None => format!("type = builtin name = \"{}\"", pw_escape(&node.name)),
+                pw_escape(&lsp.to_string_lossy())
+            )
+        } else {
+            format!("type = builtin name = \"{}\"", pw_escape(&node.name))
         };
         let controls: String = node
             .controls
@@ -1103,15 +1342,20 @@ context.modules = [
       }}
       audio.channels = 2
       audio.position = [ FL FR ]
-      capture.props = {{ node.name = "{sink}" media.class = Audio/Sink }}
-      playback.props = {{ node.name = "{sink}_out" node.target = "{target}" node.passive = true }}
+      capture.props = {{ node.name = "{sink}" media.class = Audio/Sink node.latency = "{latency}" }}
+      playback.props = {{ node.name = "{sink}_out" {route} node.passive = true node.latency = "{latency}" }}
     }}
   }}
 ]
 "#,
         description = pw_escape(AUX_DSP_DESC),
         sink = pw_escape(sink),
-        target = pw_escape(target),
+        route = match target {
+            Some(target) => format!("node.target = \"{}\"", pw_escape(target)),
+            None => "node.autoconnect = false node.dont-reconnect = true node.dont-fallback = true"
+                .to_string(),
+        },
+        latency = node_latency(latency),
     ))
 }
 
@@ -1130,21 +1374,21 @@ fn pw_escape(value: &str) -> String {
         .collect()
 }
 
-fn stereo_links(source: &str, sink: &str) -> Vec<(String, String)> {
-    vec![
-        (
-            format!("{source}:capture_FL"),
-            format!("{sink}:playback_FL"),
-        ),
-        (
-            format!("{source}:capture_FR"),
-            format!("{sink}:playback_FR"),
-        ),
-    ]
+/// Capture -> sink port pairs; a mono source feeds both channels.
+fn capture_links(source: &str, mono: bool, sink: &str) -> Vec<(String, String)> {
+    ["FL", "FR"]
+        .map(|channel| {
+            let capture = if mono { "MONO" } else { channel };
+            (
+                format!("{source}:capture_{capture}"),
+                format!("{sink}:playback_{channel}"),
+            )
+        })
+        .into()
 }
 
-/// Longest a PipeWire / ALSA tool may run: a hung server must not hold the
-/// audio lock (and with it GetState and daemon shutdown) forever.
+/// Longest `amixer` may run: a hung tool must not hold the audio lock (and
+/// with it daemon shutdown) forever.
 const CMD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `Command::output` that kills the child after `timeout`.
@@ -1203,75 +1447,54 @@ fn run_cmd(bin: &str, args: &[&str]) -> Result<String> {
 }
 
 fn current_default_sink() -> Result<String> {
-    let inspect = run_cmd("wpctl", &["inspect", "@DEFAULT_AUDIO_SINK@"])?;
-    inspect
-        .lines()
-        .find_map(|line| parse_quoted_property(line.trim(), "node.name"))
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| anyhow!("default sink has no node.name"))
+    engine()?
+        .with_graph(|graph| graph.default_sink.clone())
+        .ok_or_else(|| anyhow!("PipeWire reports no default sink"))
 }
 
 fn set_default_sink(name: &str) -> Result<()> {
-    let id = resolve_node_id(name)?;
-    run_cmd("wpctl", &["set-default", &id.to_string()]).map(|_| ())
+    resolve_node_id(name)?;
+    engine()?.set_default_sink(name)
 }
 
-fn wpctl_set_volume(id: u32, linear: f32) -> Result<()> {
-    run_cmd(
-        "wpctl",
-        &["set-volume", &id.to_string(), &format!("{linear:.3}")],
-    )
-    .map(|_| ())
+/// `wpctl set-volume <id> <linear>`: WirePlumber's cubic scale, applied to
+/// the `{:.3}` argument hako passed. Measured on a `hako-test-` node with
+/// pw-dump: 0.5 -> 0.125, 0.25 -> 0.015625, 0.8 -> 0.512, 0.123 -> 0.001861.
+fn wpctl_volume(linear: f32) -> f32 {
+    let linear = (linear.clamp(0.0, 1.0) * 1000.0).round() / 1000.0;
+    linear.powi(3)
+}
+
+/// `channelVolumes` of a ChatMix sink (stereo); mute is left alone.
+fn set_node_volume(id: u32, linear: f32) -> Result<()> {
+    engine()?.set_props(id, engine::volume_pod(wpctl_volume(linear), 2)?)
 }
 
 fn resolve_node_id(exact_name: &str) -> Result<u32> {
-    let dump = run_cmd("pw-cli", &["ls", "Node"])?;
-    let mut id = None;
-    for line in dump.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("id ") {
-            id = rest
-                .split(',')
-                .next()
-                .and_then(|value| value.trim().parse().ok());
-        } else if parse_quoted_property(trimmed, "node.name").as_deref() == Some(exact_name) {
-            return id.ok_or_else(|| anyhow!("node {exact_name} has no id"));
-        }
-    }
-    bail!("node id not found for {exact_name}")
+    engine()?
+        .with_graph(|graph| graph.node_id(exact_name))
+        .ok_or_else(|| anyhow!("node id not found for {exact_name}"))
 }
 
-fn inspect_alsa_card(node_id: u32) -> Result<String> {
-    let inspect = run_cmd("wpctl", &["inspect", &node_id.to_string()])?;
-    parse_alsa_card(&inspect).ok_or_else(|| anyhow!("no ALSA card for PipeWire node {node_id}"))
+/// The ALSA card behind a PipeWire node. Its info props (where the card is)
+/// may trail the node's appearance briefly.
+fn node_alsa_card(node: &str) -> Result<String> {
+    let mut card = None;
+    engine()?.wait_for(Duration::from_secs(1), |graph| {
+        card = graph
+            .node_id(node)
+            .and_then(|id| alsa_card(&graph.nodes[&id].props));
+        Ok(card.is_some())
+    })?;
+    card.ok_or_else(|| anyhow!("no ALSA card for PipeWire node {node}"))
 }
 
-fn parse_alsa_card(inspect: &str) -> Option<String> {
-    for key in ["api.alsa.card", "alsa.card"] {
-        for line in inspect.lines() {
-            if let Some(value) = parse_quoted_property(line.trim(), key) {
-                if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
-                    return Some(value);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn parse_quoted_property(line: &str, key: &str) -> Option<String> {
-    let (_, value) = line.split_once('=')?;
-    if line
-        .split_once('=')?
-        .0
-        .trim()
-        .trim_start_matches('*')
-        .trim()
-        != key
-    {
-        return None;
-    }
-    Some(value.trim().trim_matches('"').to_string())
+fn alsa_card(props: &HashMap<String, String>) -> Option<String> {
+    ["api.alsa.card", "alsa.card"]
+        .iter()
+        .filter_map(|key| props.get(*key))
+        .find(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
+        .cloned()
 }
 
 fn set_capture_percent(card: &str, percent: u8) -> Result<()> {
@@ -1338,102 +1561,102 @@ fn update_effect_parameters(aux: &mut AuxState, chain: &AuxEffectChain) -> Resul
         return Ok(());
     }
     let id = resolve_node_id(AUX_DSP_SINK)?;
-    run_cmd(
-        "pw-cli",
-        &["s", &id.to_string(), "Props", &effect_params(chain)],
-    )
-    .map(|_| ())
+    engine()?.set_props(id, engine::params_pod(&effect_params(chain))?)
 }
 
-fn effect_params(chain: &AuxEffectChain) -> String {
-    let mut params = String::from("{ params = [");
-    for node in dsp_stages(chain).iter().flat_map(|stage| &stage.nodes) {
-        for (port, value) in &node.controls {
-            params.push_str(&format!(
-                " \"{}\" {value}",
-                pw_escape(&format!("{}:{port}", node.name))
-            ));
-        }
-    }
-    params.push_str(" ] }");
-    params
+/// Every control as filter-chain `params`: `("node:port", value)`.
+fn effect_params(chain: &AuxEffectChain) -> Vec<(String, f32)> {
+    dsp_stages(chain)
+        .iter()
+        .flat_map(|stage| &stage.nodes)
+        .flat_map(|node| {
+            node.controls
+                .iter()
+                .map(|(port, value)| (format!("{}:{port}", node.name), *value))
+        })
+        .collect()
 }
 
-fn find_source_node_name(pattern: &str) -> Result<String> {
-    find_node_name(pattern, "-o", "capture_FL", "capture_FR", "source")
+/// A source (output `capture_FL` + `capture_FR`, or a mono `capture_MONO`)
+/// matching `pattern`: `(node name, mono)`.
+fn find_source_node(pattern: &str) -> Result<(String, bool)> {
+    let regex = Regex::new(pattern).context("bad source regex")?;
+    engine()?
+        .with_graph(|graph| {
+            pick_node(
+                &graph.port_names(Direction::Out),
+                &regex,
+                ["capture_FL", "capture_FR"],
+                Some("capture_MONO"),
+            )
+        })
+        .ok_or_else(|| {
+            anyhow!("no source matching /{pattern}/ with capture_FL/FR or capture_MONO ports")
+        })
 }
 
 fn find_sink_node_name(pattern: &str) -> Result<String> {
-    find_node_name(pattern, "-i", "playback_FL", "playback_FR", "sink")
+    let regex = Regex::new(pattern).context("bad sink regex")?;
+    engine()?
+        .with_graph(|graph| pick_node(&graph.port_names(Direction::In), &regex, PLAYBACK, None))
+        .map(|(node, _)| node)
+        .ok_or_else(|| anyhow!("no sink matching /{pattern}/ with playback_FL/playback_FR ports"))
 }
 
-fn find_node_name(
-    pattern: &str,
-    pw_link_flag: &str,
-    left: &str,
-    right: &str,
-    kind: &str,
-) -> Result<String> {
-    let regex = Regex::new(pattern).with_context(|| format!("bad {kind} regex"))?;
-    let ports = run_cmd("pw-link", &[pw_link_flag])?;
-    parse_stereo_node(&ports, &regex, left, right)
-        .ok_or_else(|| anyhow!("no {kind} matching /{pattern}/ with {left}/{right} ports"))
-}
-
-fn parse_stereo_node(ports: &str, regex: &Regex, left: &str, right: &str) -> Option<String> {
-    let mut candidates = Vec::new();
-    let mut found = HashSet::new();
-    for line in ports.lines() {
-        let port = line.trim();
-        let Some((node, channel)) = port.rsplit_once(':') else {
-            continue;
-        };
-        if regex.is_match(node) && (channel == left || channel == right) {
-            if !candidates.iter().any(|candidate| candidate == node) {
-                candidates.push(node.to_string());
-            }
-            found.insert((node.to_string(), channel.to_string()));
+/// The first node matching `regex` (in port order) with both `stereo`
+/// ports, or else its `mono` port: `(node, is_mono)`.
+fn pick_node(
+    ports: &[(&str, &str)],
+    regex: &Regex,
+    stereo: [&str; 2],
+    mono: Option<&str>,
+) -> Option<(String, bool)> {
+    let mut candidates: Vec<&str> = Vec::new();
+    for (node, _) in ports {
+        if regex.is_match(node) && !candidates.contains(node) {
+            candidates.push(node);
         }
     }
-    candidates.into_iter().find(|node| {
-        found.contains(&(node.clone(), left.to_string()))
-            && found.contains(&(node.clone(), right.to_string()))
+    let has = |node: &str, port: &str| ports.contains(&(node, port));
+    candidates.into_iter().find_map(|node| {
+        if stereo.iter().all(|port| has(node, port)) {
+            Some((node.to_string(), false))
+        } else if mono.is_some_and(|port| has(node, port)) {
+            Some((node.to_string(), true))
+        } else {
+            None
+        }
     })
 }
 
-fn node_has_stereo_ports(ports: &str, node: &str, left: &str, right: &str) -> bool {
-    let expected_left = format!("{node}:{left}");
-    let expected_right = format!("{node}:{right}");
-    let mut has_left = false;
-    let mut has_right = false;
-    for line in ports.lines().map(str::trim) {
-        has_left |= line == expected_left;
-        has_right |= line == expected_right;
-    }
-    has_left && has_right
+/// `node:port` in the cache: `(node id, port id)`.
+fn graph_port(graph: &engine::Graph, name: &str, direction: Direction) -> Option<(u32, u32)> {
+    let (node, port) = name.rsplit_once(':')?;
+    graph.port(node, port, direction)
 }
 
-fn link_nodes(source: &str, destination: &str) -> Result<()> {
-    let output = output_within(
-        Command::new("pw-link").args([source, destination]),
-        CMD_TIMEOUT,
-    )?;
-    if output.status.success() {
-        return Ok(());
+/// Link `output` to `input` (`node:port` names) for as long as the handle
+/// lives. A link someone else left there (an older hako's lingering
+/// `pw-link` link) is replaced by one this process owns.
+fn link_ports(output: &str, input: &str) -> Result<LinkHandle> {
+    let engine = engine()?;
+    let (ports, existing) = engine.with_graph(|graph| {
+        let ports =
+            graph_port(graph, output, Direction::Out).zip(graph_port(graph, input, Direction::In));
+        let existing = ports.map_or_else(Vec::new, |((_, out), (_, inp))| {
+            graph.links_between(out, inp)
+        });
+        (ports, existing)
+    });
+    let Some((out, inp)) = ports else {
+        bail!("link {output} -> {input}: port not found");
+    };
+    for id in existing {
+        let _ = engine.destroy(id);
     }
-    let error = String::from_utf8_lossy(&output.stderr).to_lowercase();
-    if error.contains("exist") {
-        return Ok(());
-    }
-    bail!("pw-link {source} -> {destination} failed: {}", error.trim())
-}
-
-fn unlink_nodes(source: &str, destination: &str) -> Result<()> {
-    match run_cmd("pw-link", &["-d", source, destination]) {
-        // Already gone (node recreated) is the state we wanted.
-        Err(error) if error.to_string().contains("No such file or directory") => Ok(()),
-        result => result.map(|_| ()),
-    }
+    engine
+        .link(out, inp)
+        .with_context(|| format!("link {output} -> {input}"))
 }
 
 #[cfg(test)]
@@ -1467,6 +1690,10 @@ mod tests {
         }
     }
 
+    fn lsp() -> Option<&'static Path> {
+        Some(Path::new("/usr/lib/ladspa/lsp-plugins-ladspa.so"))
+    }
+
     fn gate_eq_compressor() -> AuxEffectChain {
         chain(vec![
             effect("gate", true, AuxEffectKind::default_gate()),
@@ -1489,12 +1716,14 @@ mod tests {
     fn config_preserves_enabled_order_and_repeated_effects() {
         let config = generate_dsp_config(
             AUX_DSP_SINK,
-            "sink\"name",
+            Some("sink\"name"),
             &chain(vec![
                 effect("first-gate", true, AuxEffectKind::default_gate()),
                 effect("disabled", false, AuxEffectKind::default_compressor()),
                 effect("second-gate", true, AuxEffectKind::default_gate()),
             ]),
+            256,
+            lsp(),
         )
         .unwrap();
 
@@ -1506,14 +1735,27 @@ mod tests {
         assert!(config.contains("outputs = [ \"fx1:Output L\" \"fx1:Output R\" ]"));
         assert!(config.contains("node.name = \"Hako_AUX_DSP\" media.class"));
         assert!(config.contains("node.target = \"sink\\\"name\""));
-        assert!(!config.contains("node.latency"));
+        // Both sides of the filter-chain request the latency setting.
+        assert_eq!(config.matches("node.latency = \"256/48000\"").count(), 2);
+        assert!(config.contains("plugin = \"/usr/lib/ladspa/lsp-plugins-ladspa.so\""));
+        // Gate and compressor need the LSP library.
+        let gate = chain(vec![effect("gate", true, AuxEffectKind::default_gate())]);
+        assert!(generate_dsp_config(AUX_DSP_SINK, Some("t"), &gate, 256, None).is_err());
+        assert!(!config.contains("node.autoconnect"));
+
+        // Untargeted (the latency test): nothing routes the playback side.
+        let config = generate_dsp_config("x", None, &gate, 256, lsp()).unwrap();
+        assert!(!config.contains("node.target"));
+        assert!(config.contains(
+            "node.name = \"x_out\" node.autoconnect = false node.dont-reconnect = true node.dont-fallback = true node.passive = true"
+        ));
     }
 
     #[test]
     fn config_maps_all_gate_and_compressor_params() {
         let config = generate_dsp_config(
             "Test",
-            "target",
+            Some("target"),
             &chain(vec![
                 effect(
                     "gate",
@@ -1540,6 +1782,8 @@ mod tests {
                     },
                 ),
             ]),
+            256,
+            lsp(),
         )
         .unwrap();
 
@@ -1553,7 +1797,14 @@ mod tests {
 
     #[test]
     fn config_builds_stereo_biquad_chain_for_eq() {
-        let config = generate_dsp_config(AUX_DSP_SINK, "target", &gate_eq_compressor()).unwrap();
+        let config = generate_dsp_config(
+            AUX_DSP_SINK,
+            Some("target"),
+            &gate_eq_compressor(),
+            256,
+            lsp(),
+        )
+        .unwrap();
 
         let order = [
             "gate_stereo",
@@ -1589,7 +1840,10 @@ mod tests {
             true,
             eq(&[(EqBandKind::LowShelf, 100.0)]),
         )]);
-        let config = generate_dsp_config(AUX_DSP_SINK, "target", &eq_only).unwrap();
+        // EQ alone needs no LADSPA library.
+        let config =
+            generate_dsp_config(AUX_DSP_SINK, Some("target"), &eq_only, 128, None).unwrap();
+        assert!(config.contains("node.latency = \"128/48000\""));
         assert!(config.contains("inputs = [ \"fx0_b0_l:In\" \"fx0_b0_r:In\" ]"));
         assert!(config.contains("outputs = [ \"fx0_b0_l:Out\" \"fx0_b0_r:Out\" ]"));
         assert!(!config.contains("{ output = "));
@@ -1597,16 +1851,24 @@ mod tests {
 
     #[test]
     fn config_rejects_invalid_or_empty_chain() {
-        assert!(generate_dsp_config(AUX_DSP_SINK, "t", &AuxEffectChain::default()).is_err());
+        let config = |chain: &AuxEffectChain| {
+            generate_dsp_config(AUX_DSP_SINK, Some("t"), chain, 256, lsp())
+        };
+        assert!(config(&AuxEffectChain::default()).is_err());
         let disabled = chain(vec![effect("gate", false, AuxEffectKind::default_gate())]);
-        assert!(generate_dsp_config(AUX_DSP_SINK, "t", &disabled).is_err());
+        assert!(config(&disabled).is_err());
         let empty_eq = chain(vec![effect("eq", true, eq(&[]))]);
-        assert!(generate_dsp_config(AUX_DSP_SINK, "t", &empty_eq).is_err());
+        assert!(config(&empty_eq).is_err());
     }
 
     #[test]
     fn live_params_cover_every_control() {
-        let params = effect_params(&gate_eq_compressor());
+        // The pairs as `pw-cli s <id> Props` used to get them.
+        let pairs: String = effect_params(&gate_eq_compressor())
+            .iter()
+            .map(|(key, value)| format!(" \"{key}\" {value}"))
+            .collect();
+        let params = format!("{{ params = [{pairs} ] }}");
         assert!(params.starts_with("{ params = [ \"fx0:Curve threshold (G)\" "));
         assert!(params.ends_with(" ] }"));
         for key in [
@@ -1632,28 +1894,64 @@ mod tests {
     }
 
     #[test]
-    fn port_parser_requires_exact_stereo_ports() {
-        let ports = "other:capture_FL\nline:capture_FL\nline:capture_FR\nline:capture_AUX\n";
-        let regex = Regex::new("^line$").unwrap();
+    fn node_picker_requires_exact_stereo_or_mono_ports() {
+        let ports = [
+            ("other", "capture_FL"),
+            ("line", "capture_FL"),
+            ("line", "capture_FR"),
+            ("line", "capture_AUX"),
+            ("mic", "capture_MONO"),
+        ];
+        let pick =
+            |pattern, stereo, mono| pick_node(&ports, &Regex::new(pattern).unwrap(), stereo, mono);
+        let capture = ["capture_FL", "capture_FR"];
+        assert_eq!(pick("^line$", capture, None), Some(("line".into(), false)));
+        assert_eq!(pick("^line$", PLAYBACK, None), None);
+        // A half-stereo node is skipped for the next candidate.
         assert_eq!(
-            parse_stereo_node(ports, &regex, "capture_FL", "capture_FR"),
-            Some("line".into())
+            pick("^(other|line)$", capture, None),
+            Some(("line".into(), false))
         );
-        assert!(parse_stereo_node(ports, &regex, "playback_FL", "playback_FR").is_none());
-        assert!(node_has_stereo_ports(
-            ports,
-            "line",
-            "capture_FL",
-            "capture_FR"
-        ));
+        // Mono sources only where the caller accepts them (AUX capture).
+        assert_eq!(pick("^mic$", capture, None), None);
+        assert_eq!(
+            pick("^mic$", capture, Some("capture_MONO")),
+            Some(("mic".into(), true))
+        );
+        assert_eq!(
+            pick("^(line|mic)$", capture, Some("capture_MONO")),
+            Some(("line".into(), false))
+        );
     }
 
     #[test]
-    fn link_parser_reads_pw_link_list() {
-        let dump = "line:capture_FL\n  |-> Hako_AUX_DSP:playback_FL\nHako_AUX_DSP:playback_FL\n  |<- line:capture_FL\nline:capture_FR\n";
-        let links = parse_links(dump);
-        assert_eq!(links.len(), 1);
-        assert!(links.contains(&("line:capture_FL".into(), "Hako_AUX_DSP:playback_FL".into())));
+    fn mono_capture_feeds_both_channels() {
+        assert_eq!(
+            capture_links("mic", true, "sink"),
+            [
+                (
+                    "mic:capture_MONO".to_string(),
+                    "sink:playback_FL".to_string()
+                ),
+                (
+                    "mic:capture_MONO".to_string(),
+                    "sink:playback_FR".to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            capture_links("line", false, "sink"),
+            [
+                (
+                    "line:capture_FL".to_string(),
+                    "sink:playback_FL".to_string()
+                ),
+                (
+                    "line:capture_FR".to_string(),
+                    "sink:playback_FR".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -1663,20 +1961,35 @@ mod tests {
 
     #[test]
     fn loopback_props_quote_values_with_spaces() {
-        let (capture, playback) = loopback_props("Hako_Game", "hako Game", "alsa_output.x");
+        let (capture, playback) = loopback_props("Hako_Game", "hako Game", "alsa_output.x", 256);
         assert!(
             capture.contains("node.description=\"hako Game\""),
             "{capture}"
         );
         assert!(capture.contains("node.name=\"Hako_Game\""), "{capture}");
-        assert_eq!(playback, "node.target=\"alsa_output.x\"");
+        assert!(capture.contains("node.latency=\"256/48000\""), "{capture}");
+        assert_eq!(
+            playback,
+            "node.target=\"alsa_output.x\" node.latency=\"256/48000\""
+        );
     }
 
     #[test]
     fn parses_selected_alsa_card_only() {
-        let inspect = "  * api.alsa.card = \"3\"\n    device.id = \"42\"\n";
-        assert_eq!(parse_alsa_card(inspect).as_deref(), Some("3"));
-        assert_eq!(parse_alsa_card("device.id = \"42\"").as_deref(), None);
+        let props = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<HashMap<_, _>>()
+        };
+        let node = props(&[("api.alsa.card", "3"), ("device.id", "42")]);
+        assert_eq!(alsa_card(&node).as_deref(), Some("3"));
+        assert_eq!(alsa_card(&props(&[("device.id", "42")])), None);
+        assert_eq!(alsa_card(&props(&[("api.alsa.card", "hw:3")])), None);
+        assert_eq!(
+            alsa_card(&props(&[("alsa.card", "1")])).as_deref(),
+            Some("1")
+        );
     }
 
     #[test]
@@ -1791,5 +2104,304 @@ mod tests {
             *got.lock().unwrap(),
             ["ChatMix: no sink", "ChatMix: no sink"]
         );
+    }
+
+    thread_local! {
+        pub(super) static PKILLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn only_the_kill_switch_sweeps_other_processes() {
+        let pkills = || PKILLS.with(std::cell::Cell::get);
+        let audio = AudioService::new();
+        audio.aux_keep_pending(&AuxConfig::default(), &AuxEffectChain::default());
+        let _ = audio.aux_disable();
+        let _ = audio.destroy_chatmix();
+        let _ = audio.set_aux_capture_percent(10);
+        drop(audio);
+        assert_eq!(
+            pkills(),
+            0,
+            "teardown of an instance signalled other processes"
+        );
+
+        let audio = AudioService::new();
+        audio.kill_orphans();
+        assert_eq!(pkills(), 3);
+        // The kill-switch needs PipeWire only to restore a default it holds.
+        let _ = audio.reset_all();
+        assert_eq!(pkills(), 6);
+        drop(audio);
+        assert_eq!(pkills(), 6);
+    }
+
+    #[test]
+    fn status_reads_never_wait_for_audio_work() {
+        let audio = AudioService::new();
+        audio.aux_keep_pending(&AuxConfig::default(), &AuxEffectChain::default());
+        let busy = audio.state();
+        assert!(audio.aux_active());
+        assert!(!audio.chatmix_active());
+        assert_eq!(audio.aux_capture_node(), None, "pending AUX owns no nodes");
+        drop(busy);
+        // Nothing is up, so a new latency rebuilds nothing.
+        assert!(audio.set_latency(128).is_ok());
+    }
+
+    #[test]
+    fn volumes_follow_the_wpctl_curve() {
+        for (linear, expected) in [
+            (0.5, 0.125),
+            (0.25, 0.015625),
+            (0.8, 0.512),
+            (1.0, 1.0),
+            (0.0, 0.0),
+            (0.123, 0.001860867),
+            // Rounded to the 3 decimals hako passed to wpctl.
+            (0.12345, 0.001860867),
+            (1.5, 1.0),
+            (-1.0, 0.0),
+        ] {
+            let got = wpctl_volume(linear);
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "{linear}: {got} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn latency_is_samples_at_48k() {
+        assert_eq!(node_latency(128), "128/48000");
+        assert_eq!(node_latency(512), "512/48000");
+    }
+
+    #[test]
+    fn lsp_is_found_on_ladspa_path_first() {
+        let root = std::env::temp_dir().join(format!("hako-ladspa-test-{}", std::process::id()));
+        let (empty, with_lsp) = (root.join("empty"), root.join("lsp"));
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&with_lsp).unwrap();
+        std::fs::write(with_lsp.join(LSP_LADSPA), b"").unwrap();
+
+        let path = std::env::join_paths([&empty, &with_lsp]).unwrap();
+        let dirs = ladspa_dirs(Some(&path));
+        assert_eq!(dirs[..2], [empty.clone(), with_lsp.clone()]);
+        assert_eq!(dirs[2..], LADSPA_DIRS.map(PathBuf::from));
+        assert_eq!(find_lsp_ladspa(&dirs), Some(with_lsp.join(LSP_LADSPA)));
+        assert_eq!(find_lsp_ladspa(std::slice::from_ref(&empty)), None);
+        // Empty entries (`::`) are no directory.
+        assert_eq!(ladspa_dirs(Some(OsStr::new("::"))).len(), LADSPA_DIRS.len());
+        assert_eq!(ladspa_dirs(None).len(), LADSPA_DIRS.len());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A `pw-loopback` sink named `name` whose playback side links nowhere.
+    struct TestSink(Child);
+
+    impl TestSink {
+        fn spawn(name: &str) -> Self {
+            let child = Command::new("pw-loopback")
+                .args([
+                    "-n",
+                    name,
+                    "-i",
+                    &format!("media.class=Audio/Sink node.name=\"{name}\""),
+                    "-o",
+                    &format!("node.name=\"{name}-out\" node.autoconnect=false"),
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn pw-loopback");
+            let mut sink = Self(child);
+            let ready = engine()
+                .unwrap()
+                .wait_for(NODE_WAIT, |graph| {
+                    ensure_running(&mut sink.0, name)?;
+                    Ok(graph.has_ports(name, Direction::In, &PLAYBACK))
+                })
+                .unwrap();
+            assert!(ready, "{name} did not appear");
+            sink
+        }
+    }
+
+    impl Drop for TestSink {
+        fn drop(&mut self) {
+            let _ = stop_child(&mut self.0);
+        }
+    }
+
+    /// `info.params.Props` of the node named `name`, from `pw-dump`.
+    fn dumped_props(name: &str) -> Vec<serde_json::Value> {
+        let dump = run_cmd("pw-dump", &[]).unwrap();
+        let objects: Vec<serde_json::Value> = serde_json::from_str(&dump).unwrap();
+        let node = objects
+            .iter()
+            .find(|o| o["info"]["props"]["node.name"] == name)
+            .unwrap_or_else(|| panic!("{name} not in pw-dump"));
+        node["info"]["params"]["Props"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn live_engine_sees_the_graph() {
+        let engine = engine().unwrap();
+        engine.with_graph(|graph| {
+            assert!(graph.connected);
+            assert!(graph.nodes.values().any(|n| n.media_class == "Audio/Sink"));
+            assert!(!graph.ports.is_empty());
+            assert!(graph.default_sink.is_some(), "default metadata not bound");
+        });
+        let sink = current_default_sink().unwrap();
+        assert!(resolve_node_id(&sink).is_ok());
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn live_links_are_owned_synchronous_and_replace_lingering_ones() {
+        let (_a, _b) = (
+            TestSink::spawn("hako-test-a"),
+            TestSink::spawn("hako-test-b"),
+        );
+        let engine = engine().unwrap();
+        let pair = ("hako-test-a:monitor_FL", "hako-test-b:playback_FL");
+        let present = |linked: bool| {
+            engine
+                .wait_for(Duration::from_secs(2), |graph| {
+                    let names = graph.link_names();
+                    Ok(names.contains(&(pair.0.into(), pair.1.into())) == linked)
+                })
+                .unwrap()
+        };
+
+        // A lingering link, as older hako versions made them.
+        run_cmd("pw-link", &[pair.0, pair.1]).unwrap();
+        assert!(present(true));
+        // Ids are reused at once; serials are not.
+        let serials = |graph: &engine::Graph| -> Vec<String> {
+            let out = graph_port(graph, pair.0, Direction::Out).unwrap().1;
+            let inp = graph_port(graph, pair.1, Direction::In).unwrap().1;
+            graph
+                .links_between(out, inp)
+                .iter()
+                .map(|id| graph.links[id].props["object.serial"].clone())
+                .collect()
+        };
+        let old = engine.with_graph(serials);
+        assert_eq!(old.len(), 1);
+
+        let link = link_ports(pair.0, pair.1).unwrap();
+        let id = link.id;
+        let synced = engine
+            .wait_for(Duration::from_secs(2), |graph| {
+                let now = serials(graph);
+                Ok(now.len() == 1
+                    && now != old
+                    && graph
+                        .links
+                        .get(&id)
+                        .is_some_and(|l| l.props.contains_key("object.id")))
+            })
+            .unwrap();
+        assert!(synced, "lingering link not replaced, or no link info");
+        engine.with_graph(|graph| {
+            assert_ne!(
+                graph.links[&id].props.get("link.async").map(String::as_str),
+                Some("true")
+            );
+        });
+
+        drop(link);
+        assert!(present(false), "link outlived its handle");
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn live_volume_matches_wpctl() {
+        let _sink = TestSink::spawn("hako-test-volume");
+        let id = resolve_node_id("hako-test-volume").unwrap();
+        let mut volumes = None;
+        for _ in 0..20 {
+            // Re-applied: WirePlumber restores a stored volume onto a node
+            // that just appeared, racing the first write.
+            set_node_volume(id, 0.5).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            volumes = dumped_props("hako-test-volume")
+                .iter()
+                .find_map(|p| p.get("channelVolumes").cloned());
+            if volumes == Some(serde_json::json!([0.125, 0.125])) {
+                break;
+            }
+        }
+        assert_eq!(volumes, Some(serde_json::json!([0.125, 0.125])));
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn live_dsp_parameters_update() {
+        const SINK: &str = "hako-test-dsp";
+        let chain = |gain_db| {
+            let mut chain = chain(vec![effect(
+                "eq",
+                true,
+                eq(&[(EqBandKind::Peaking, 1000.0)]),
+            )]);
+            if let AuxEffectKind::Equalizer { bands } = &mut chain.effects[0].kind {
+                bands[0].gain_db = gain_db;
+            }
+            chain
+        };
+        // Unlinked and suspended, filter-chain reports every control as 0:
+        // always-process keeps it running (on the dummy driver).
+        let config = generate_dsp_config(SINK, Some("hako-test-nowhere"), &chain(3.0), 256, None)
+            .unwrap()
+            .replace("node.passive = true", "node.autoconnect = false")
+            .replace("node.latency", "node.always-process = true node.latency");
+        let path = std::env::temp_dir().join(format!("hako-test-dsp-{}.conf", std::process::id()));
+        std::fs::write(&path, config).unwrap();
+        let mut child = Command::new("pipewire")
+            .arg("-c")
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let gain_becomes = |want: f64| {
+            let mut gain = None;
+            for _ in 0..20 {
+                std::thread::sleep(Duration::from_millis(100));
+                gain = dumped_props(SINK).iter().find_map(|p| {
+                    let params = p.get("params")?.as_array()?;
+                    let at = params.iter().position(|v| v == "fx0_b0_l:Gain")?;
+                    params.get(at + 1)?.as_f64()
+                });
+                if gain == Some(want) {
+                    break;
+                }
+            }
+            gain
+        };
+        let configured = wait_for_node(&mut child, SINK).map(|()| gain_becomes(3.0));
+        let updated = configured.is_ok().then(|| {
+            let id = resolve_node_id(SINK).unwrap();
+            let pod = engine::params_pod(&effect_params(&chain(-4.5))).unwrap();
+            engine().unwrap().set_props(id, pod).unwrap();
+            gain_becomes(-4.5)
+        });
+        let _ = stop_child(&mut child);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            configured.unwrap(),
+            Some(3.0),
+            "configured gain not reported"
+        );
+        assert_eq!(updated.flatten(), Some(-4.5));
     }
 }

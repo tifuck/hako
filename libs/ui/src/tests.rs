@@ -157,6 +157,7 @@ fn sample_state() -> HubState {
         audio: AudioSummary {
             chatmix_active: true,
             aux_active: true,
+            aux_processing_active: true,
             ..Default::default()
         },
         devices: vec![keyboard, mouse, headset, other],
@@ -447,6 +448,13 @@ fn settings_page_renders_with_and_without_settings() {
     app.settings = Some(AppSettings::default());
     let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
     assert!(out.iter().all(|c| !matches!(c, UiCommand::SetConfig(_))));
+}
+
+#[test]
+fn latency_labels_cover_the_presets() {
+    let values: Vec<_> = AUDIO_LATENCY_LABELS.iter().map(|(v, _)| *v).collect();
+    let presets: Vec<_> = hako_core::AUDIO_LATENCIES.iter().map(|(v, _)| *v).collect();
+    assert_eq!(values, presets);
 }
 
 #[test]
@@ -870,6 +878,8 @@ fn snapshot_audit_gallery() {
         selected,
         daemon_error: None,
         settings: Some(settings.clone()),
+        // Line-in meters: input in the ok zone, output reaching danger.
+        meter_levels: vec![[0.08, 0.06], [0.6, 0.9]],
         ..Default::default()
     };
     for d in &state.devices {
@@ -1006,6 +1016,84 @@ fn dpi_snap_stays_inside_the_device_range() {
     assert_eq!(snap_dpi(45000.0, 100.0, 45000.0, 50.0), 45000.0);
     assert_eq!(snap_dpi(50.0, 50.0, 18000.0, 50.0), 50.0);
     assert_eq!(snap_dpi(1649.0, 100.0, 26000.0, 50.0), 1600.0);
+}
+
+#[test]
+fn meter_ballistics_attack_release_and_hold() {
+    use crate::widgets::{to_dbfs, Ballistics, METER_FLOOR_DB};
+    assert_eq!(to_dbfs(1.0), 0.0);
+    assert!((to_dbfs(0.5) + 6.02).abs() < 0.01);
+    assert_eq!(to_dbfs(0.0), METER_FLOOR_DB);
+    assert_eq!(to_dbfs(1e-9), METER_FLOOR_DB);
+    assert_eq!(to_dbfs(4.0), 0.0, "clipping pins to full scale");
+
+    let mut b = Ballistics::default();
+    // Attack is instant.
+    b.step(-6.0, 0.016, false);
+    assert_eq!((b.level, b.peak), (-6.0, -6.0));
+    // Release: 20 dB/s; the peak tick holds.
+    b.step(METER_FLOOR_DB, 0.5, false);
+    assert!((b.level + 16.0).abs() < 1e-4, "{b:?}");
+    assert_eq!(b.peak, -6.0);
+    // Never falls below the input.
+    b.step(-10.0, 0.4, false);
+    assert_eq!(b.level, -10.0);
+    assert_eq!(b.peak, -6.0, "held for 0.9 s");
+    // After a second the tick drops to the bar.
+    b.step(-10.0, 0.2, false);
+    assert_eq!(b.peak, b.level);
+    // A louder peak takes the tick again.
+    b.step(-3.0, 0.016, false);
+    assert_eq!(b.peak, -3.0);
+
+    // Reduced motion shows the input as is.
+    b.step(-40.0, 0.016, true);
+    assert_eq!((b.level, b.peak), (-40.0, -40.0));
+}
+
+#[test]
+fn line_in_page_asks_for_meters_only_while_monitoring() {
+    let mut state = sample_state();
+    let headset = state
+        .devices
+        .iter()
+        .find(|d| d.settings.contains_key(SettingKey::AuxEnabled.as_str()))
+        .unwrap()
+        .clone();
+    let tab_id = egui::Id::new(("tab", headset.id.key()));
+    let targets = |state: &HubState| {
+        let mut app = HakoAppUi {
+            state: Some(state.clone()),
+            selected: Some(headset.id.clone()),
+            daemon_error: None,
+            settings: Some(AppSettings::default()),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        ctx.data_mut(|m| m.insert_temp(tab_id, Tab::LineIn));
+        let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut Vec::new()));
+        app.meter_targets
+    };
+    let set_aux = |state: &mut HubState, on: bool| {
+        for d in &mut state.devices {
+            if d.id == headset.id {
+                d.settings.insert(
+                    SettingKey::AuxEnabled.as_str().into(),
+                    SettingValue::Bool(on),
+                );
+            }
+        }
+    };
+    set_aux(&mut state, false);
+    assert!(targets(&state).is_empty());
+    set_aux(&mut state, true);
+    state.audio.aux_processing_active = false;
+    assert_eq!(targets(&state), [MeterTargetSpec::AuxInput]);
+    state.audio.aux_processing_active = true;
+    assert_eq!(
+        targets(&state),
+        [MeterTargetSpec::AuxInput, MeterTargetSpec::AuxOutput]
+    );
 }
 
 // ── README screenshots ───────────────────────────────────────────

@@ -2,8 +2,13 @@
 
 use crate::hub::DaemonHub;
 use anyhow::{bail, Result};
+use hako_audio::meters::{MeterService, MeterSubscription, MeterTarget};
+use hako_audio::AudioService;
 use hako_core::device::DeviceId;
-use hako_core::ipc::{EventKind, IpcEvent, IpcRequest, IpcResponse, Method};
+use hako_core::ipc::{
+    EventKind, IpcEvent, IpcRequest, IpcResponse, MeterLevels, MeterTargetSpec, Method,
+    SubscribeMetersParams, MAX_METER_TARGETS,
+};
 use hako_core::protocol::AdapterEvent;
 use hako_core::remap::StartCaptureParams;
 use hako_core::{read_json_frame, write_json_frame};
@@ -11,10 +16,15 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
+
+/// Meter frame period (~30 Hz).
+const METER_PERIOD: Duration = Duration::from_millis(33);
+/// How often meter targets are resolved again (AUX turning on or off).
+const METER_RESOLVE: Duration = Duration::from_secs(1);
 
 /// Bind the daemon socket, owner-only. Refuses to replace a socket another
 /// daemon still answers on; a stale file from a crashed daemon is removed.
@@ -145,6 +155,27 @@ async fn serve_requests(
             break;
         }
 
+        if req.method == Method::SubscribeMeters {
+            let targets = match serde_json::from_value::<SubscribeMetersParams>(req.params) {
+                Ok(p) if p.targets.len() <= MAX_METER_TARGETS => p.targets,
+                Ok(_) => {
+                    let msg = format!("at most {MAX_METER_TARGETS} meter targets");
+                    let resp = IpcResponse::err(req.id, "invalid_value", msg);
+                    write_json_frame(stream, &resp).await?;
+                    continue;
+                }
+                Err(e) => {
+                    let resp = IpcResponse::err(req.id, "invalid_value", e.to_string());
+                    write_json_frame(stream, &resp).await?;
+                    continue;
+                }
+            };
+            let resp = IpcResponse::ok(req.id.clone(), serde_json::json!({"subscribed": true}));
+            write_json_frame(stream, &resp).await?;
+            stream_meters(stream, &hub.audio, &hub.meters, &targets).await;
+            break;
+        }
+
         let method = req.method;
         let started = (method == Method::StartCapture)
             .then(|| serde_json::from_value::<StartCaptureParams>(req.params.clone()).ok())
@@ -160,6 +191,80 @@ async fn serve_requests(
         write_json_frame(stream, &resp).await?;
     }
     Ok(())
+}
+
+/// Meter frames until the client leaves (a failed write). Its streams go
+/// with it: the subscription is dropped on return.
+async fn stream_meters(
+    stream: &mut UnixStream,
+    audio: &Arc<AudioService>,
+    meters: &MeterService,
+    specs: &[MeterTargetSpec],
+) {
+    let mut tick = tokio::time::interval(METER_PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut resolved: Vec<Option<MeterTarget>> = Vec::new();
+    let mut sub: Option<MeterSubscription> = None;
+    let mut resolve_at = Instant::now();
+    loop {
+        tick.tick().await;
+        if Instant::now() >= resolve_at {
+            resolve_at = Instant::now() + METER_RESOLVE;
+            // The getters read the published status, never waiting on audio work.
+            let (audio, owned) = (audio.clone(), specs.to_vec());
+            let Ok(now) = tokio::task::spawn_blocking(move || {
+                owned
+                    .iter()
+                    .map(|s| resolve_meter(&audio, s))
+                    .collect::<Vec<_>>()
+            })
+            .await
+            else {
+                break;
+            };
+            if now != resolved {
+                // Subscribed before the old one drops: shared streams stay up.
+                let targets: Vec<MeterTarget> = now.iter().flatten().cloned().collect();
+                sub = (!targets.is_empty()).then(|| meters.subscribe(targets));
+                resolved = now;
+            }
+        }
+        let read = sub.as_ref().map(|s| s.read()).unwrap_or_default();
+        let ev = IpcEvent {
+            kind: EventKind::Meters,
+            payload: serde_json::to_value(meter_frame(&resolved, read, specs.len()))
+                .unwrap_or_default(),
+        };
+        if write_json_frame(stream, &ev).await.is_err() {
+            break;
+        }
+    }
+}
+
+fn resolve_meter(audio: &AudioService, spec: &MeterTargetSpec) -> Option<MeterTarget> {
+    let (node_name, monitor_sink) = match spec {
+        MeterTargetSpec::AuxInput => (audio.aux_capture_node()?, false),
+        MeterTargetSpec::AuxOutput => (audio.aux_output_node()?, true),
+        MeterTargetSpec::Node { name, monitor_sink } => (name.clone(), *monitor_sink),
+    };
+    Some(MeterTarget {
+        node_name,
+        monitor_sink,
+    })
+}
+
+/// `read` holds the resolved targets' peaks in order; unresolved targets
+/// read 0. Rounded to 3 decimals to keep frames small.
+fn meter_frame(resolved: &[Option<MeterTarget>], read: Vec<[f32; 2]>, n: usize) -> MeterLevels {
+    let mut read = read.into_iter();
+    let round = |v: f32| (v * 1000.0).round() / 1000.0;
+    let levels = (0..n)
+        .map(|i| match resolved.get(i) {
+            Some(Some(_)) => read.next().unwrap_or_default().map(round),
+            _ => [0.0, 0.0],
+        })
+        .collect();
+    MeterLevels { levels }
 }
 
 /// The read failed because the client went away (EOF, reset), not because
@@ -206,6 +311,93 @@ mod tests {
         assert!(!client_left(
             &read_json_frame(&mut server).await.unwrap_err()
         ));
+    }
+
+    #[test]
+    fn meter_frames_keep_target_order_with_gaps() {
+        let t = |n: &str| {
+            Some(MeterTarget {
+                node_name: n.into(),
+                monitor_sink: false,
+            })
+        };
+        let resolved = [t("a"), None, t("b")];
+        let frame = meter_frame(&resolved, vec![[0.12345, 1.5], [0.0, 0.25]], 3);
+        assert_eq!(frame.levels, vec![[0.123, 1.5], [0.0, 0.0], [0.0, 0.25]]);
+        // Nothing resolved: every target reads 0.
+        assert_eq!(meter_frame(&[], Vec::new(), 2).levels, vec![[0.0; 2]; 2]);
+    }
+
+    /// End to end over a socket pair: frames at ~30 Hz in target order, an
+    /// unresolved target reads 0, and the meter stream goes with the client.
+    #[tokio::test]
+    #[ignore = "needs a live PipeWire session (pw-cli, pw-dump)"]
+    async fn meter_stream_follows_its_client() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let meter_nodes = || {
+            let dump = Command::new("pw-dump").output().unwrap();
+            String::from_utf8_lossy(&dump.stdout)
+                .matches(r#""node.name": "hako-meter""#)
+                .count()
+        };
+        let sink = format!("hako-test-ipc-{}", std::process::id());
+        let mut cli = Command::new("pw-cli")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        writeln!(
+            cli.stdin.as_mut().unwrap(),
+            "create-node adapter {{ factory.name=support.null-audio-sink node.name={sink} \
+             media.class=Audio/Sink audio.position=[FL FR] object.linger=false }}"
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Never dropped: AudioService's Drop tears down the session's audio.
+        let audio = Arc::new(AudioService::new());
+        let meters = MeterService::new();
+        let specs = [
+            MeterTargetSpec::AuxInput,
+            MeterTargetSpec::Node {
+                name: sink.clone(),
+                monitor_sink: true,
+            },
+        ];
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let client_side = async {
+            let started = Instant::now();
+            for _ in 0..30 {
+                let ev: IpcEvent =
+                    serde_json::from_value(read_json_frame(&mut client).await.unwrap()).unwrap();
+                assert_eq!(ev.kind, EventKind::Meters);
+                let frame: MeterLevels = serde_json::from_value(ev.payload).unwrap();
+                assert_eq!(frame.levels.len(), 2);
+                assert_eq!(frame.levels[0], [0.0, 0.0], "AUX is off");
+            }
+            let elapsed = started.elapsed();
+            let nodes = meter_nodes();
+            drop(client);
+            (elapsed, nodes)
+        };
+        let ((elapsed, nodes), ()) = tokio::join!(
+            client_side,
+            stream_meters(&mut server, &audio, &meters, &specs)
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let after = meter_nodes();
+        let _ = cli.kill();
+        let _ = cli.wait();
+        std::mem::forget(audio);
+
+        assert!(
+            (Duration::from_millis(800)..Duration::from_millis(1300)).contains(&elapsed),
+            "30 frames took {elapsed:?}"
+        );
+        assert_eq!(nodes, 1, "one stream for the node target");
+        assert_eq!(after, 0, "meter stream outlived its client");
     }
 
     #[tokio::test]

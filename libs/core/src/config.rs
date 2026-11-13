@@ -1,7 +1,7 @@
 //! XDG config / profiles / device TOML.
 
 use crate::catalog::{normalize_key, SettingKey, SettingValue, SettingsMap};
-use crate::ipc::AuxEffectChain;
+use crate::ipc::{default_audio_latency, AuxEffectChain};
 use crate::remap::{RemapBinding, RemapFile};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,9 @@ pub struct AppConfig {
     /// The UI looks for new GitHub releases.
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    /// Audio latency preset (`crate::AUDIO_LATENCIES`).
+    #[serde(default = "default_audio_latency")]
+    pub audio_latency: String,
 }
 
 impl Default for AppConfig {
@@ -50,6 +53,7 @@ impl Default for AppConfig {
             onboard_writes: Vec::new(),
             theme: String::new(),
             check_updates: true,
+            audio_latency: default_audio_latency(),
         }
     }
 }

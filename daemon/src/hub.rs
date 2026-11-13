@@ -5,6 +5,7 @@ use crate::hid::HidDeviceInfo;
 use crate::remap::RemapEngine;
 use crate::worker::{DeviceHandle, Refused};
 use anyhow::{Context, Result};
+use hako_audio::meters::MeterService;
 use hako_audio::AudioService;
 use hako_core::catalog::{SettingKey, SettingMeta, SettingValue};
 use hako_core::config::{
@@ -13,8 +14,8 @@ use hako_core::config::{
 };
 use hako_core::device::{AudioSummary, DaemonHealth, DeviceId, DeviceKind, HubState};
 use hako_core::ipc::{
-    AppSettings, IpcRequest, IpcResponse, Method, ProfileNameParams, SetManyParams, SetParams,
-    SnapshotParams,
+    audio_latency_samples, AppSettings, IpcRequest, IpcResponse, Method, ProfileNameParams,
+    SetManyParams, SetParams, SnapshotParams, AUDIO_LATENCIES,
 };
 use hako_core::protocol::{is_new_error, AdapterEvent};
 use hako_core::remap::{CancelCaptureParams, ClearRemapParams, SetRemapParams, StartCaptureParams};
@@ -45,6 +46,8 @@ type Retry = (u32, Instant, Option<String>);
 pub struct DaemonHub {
     pub paths: ConfigPaths,
     pub audio: Arc<AudioService>,
+    /// Level meters; runs only while a `SubscribeMeters` connection is open.
+    pub meters: MeterService,
     /// Never held across an await or device I/O (workers own the devices).
     devices: std::sync::Mutex<HashMap<String, DeviceHandle>>,
     events: EventTx,
@@ -70,10 +73,13 @@ impl DaemonHub {
             });
         });
         let cfg = load_app_config(&paths);
-        // ChatMix is not up yet, so this only records the preference.
+        // ChatMix is not up yet, so these only record the preferences.
         let _ =
             audio.set_chatmix_default(cfg.as_ref().map_or(true, |c| c.chatmix_set_default_sink));
-        // AUX links a crashed daemon made outlive it (pw-link links linger).
+        let _ = audio.set_latency(latency_samples(cfg.as_ref().ok()));
+        // Loopback / DSP processes of a crashed daemon (they would clash by name).
+        audio.kill_orphans();
+        // AUX links older versions made outlive them (pw-link links linger).
         if let Ok(cfg) = &cfg {
             if let Err(e) = audio.remove_orphan_aux_links(&cfg.aux) {
                 warn!("orphan AUX links: {e:#}");
@@ -82,6 +88,7 @@ impl DaemonHub {
         Self {
             paths,
             audio: Arc::new(audio),
+            meters: MeterService::new(),
             devices: std::sync::Mutex::new(HashMap::new()),
             events,
             started: Instant::now(),
@@ -254,10 +261,11 @@ impl DaemonHub {
             config_dir: self.paths.root.display().to_string(),
             theme: cfg.theme.clone(),
             check_updates: cfg.check_updates,
+            audio_latency: cfg.audio_latency.clone(),
         }
     }
 
-    /// Save first, then apply live (blocking: pw-* subprocesses, audio lock).
+    /// Save first, then apply live (blocking: audio lock, child processes).
     /// `reconfigure_aux` keeps the running chain when the new one fails.
     fn set_config(&self, s: AppSettings) -> Result<AppSettings> {
         let (cfg, ()) = update_app_config(&self.paths, |cfg| {
@@ -270,6 +278,7 @@ impl DaemonHub {
             cfg.aux.effects = s.aux_effects.clone();
             cfg.theme = s.theme.clone();
             cfg.check_updates = s.check_updates;
+            cfg.audio_latency = s.audio_latency.clone();
             Ok(())
         })?;
         self.audio
@@ -280,6 +289,9 @@ impl DaemonHub {
                 .reconfigure_aux(&cfg.aux, &cfg.aux.effects)
                 .context("saved, but AUX could not apply it")?;
         }
+        self.audio
+            .set_latency(latency_samples(Some(&cfg)))
+            .context("saved, but audio could not apply the new latency")?;
         Ok(self.app_settings(&cfg))
     }
 
@@ -315,14 +327,14 @@ impl DaemonHub {
             Err(e) => (Vec::new(), Some(format!("profiles: {e:#}"))),
         };
         let devices: Vec<_> = self.handles().iter().map(DeviceHandle::snapshot).collect();
-        // Device threads hold the audio lock across pw-* subprocesses.
-        let audio = tokio::task::block_in_place(|| AudioSummary {
+        // Published status: never waits for audio work in progress.
+        let audio = AudioSummary {
             chatmix_active: self.audio.chatmix_active(),
             aux_active: self.audio.aux_active(),
             aux_processing_active: self.audio.aux_processing_active(),
             last_error: self.audio.last_error(),
             default_sink: None,
-        });
+        };
         HubState {
             health: DaemonHealth {
                 version: VERSION.into(),
@@ -528,10 +540,10 @@ impl DaemonHub {
             }
             // The connection loop turns its connection into an event stream
             // before requests reach the hub.
-            Method::SubscribeEvents => IpcResponse::err(
+            Method::SubscribeEvents | Method::SubscribeMeters => IpcResponse::err(
                 id,
                 "invalid_value",
-                "SubscribeEvents is handled by the connection",
+                format!("{:?} is handled by the connection", req.method),
             ),
         }
     }
@@ -705,7 +717,21 @@ fn validate_settings(s: &AppSettings) -> Result<(), String> {
             LOG_LEVELS.join(", ")
         ));
     }
+    if audio_latency_samples(&s.audio_latency).is_none() {
+        let presets: Vec<_> = AUDIO_LATENCIES.iter().map(|(name, _)| *name).collect();
+        return Err(format!(
+            "audio latency must be one of {}",
+            presets.join(", ")
+        ));
+    }
     Ok(())
+}
+
+/// The configured latency preset in samples (an unknown one: the default).
+fn latency_samples(cfg: Option<&AppConfig>) -> u32 {
+    let balanced = AUDIO_LATENCIES[1].1;
+    cfg.and_then(|cfg| audio_latency_samples(&cfg.audio_latency))
+        .unwrap_or(balanced)
 }
 
 /// Wait after the `n`th consecutive failed open (n >= 1): one discovery
@@ -889,6 +915,7 @@ mod tests {
         let hub = DaemonHub {
             paths: paths.clone(),
             audio: Arc::new(AudioService::new()),
+            meters: MeterService::new(),
             devices: Default::default(),
             remap: RemapEngine::start(paths.clone(), events.clone()),
             events,

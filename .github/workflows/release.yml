@@ -21,8 +21,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@1.100.0
       # No build cache here: a release must not restore state other runs wrote.
-      - name: System deps (egui/winit)
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: System deps (egui/winit, PipeWire bindings)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang pkg-config
       - name: Tag matches workspace version
         run: |
           v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"

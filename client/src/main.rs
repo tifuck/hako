@@ -9,7 +9,8 @@ use hako_core::catalog::{ControlKind, SettingKey, SettingValue};
 use hako_core::default_socket_path;
 use hako_core::device::{DeviceSnapshot, HubState};
 use hako_core::ipc::{
-    AppSettings, EventKind, IpcEvent, IpcRequest, IpcResponse, Method, SetManyParams, SetParams,
+    AppSettings, EventKind, IpcEvent, IpcRequest, IpcResponse, MeterLevels, MeterTargetSpec,
+    Method, SetManyParams, SetParams, SubscribeMetersParams,
 };
 use hako_core::remap::{
     CancelCaptureParams, ClearRemapParams, DeviceRemaps, SetRemapParams, StartCaptureParams,
@@ -29,6 +30,10 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often an open UI looks for a new release.
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
+
+/// A meter stream closes once no frame has asked for it this long (the
+/// window is hidden and no longer drawn).
+const METER_STALE: Duration = Duration::from_secs(1);
 
 #[derive(Parser, Debug)]
 #[command(name = "hako", version, about = "hako control panel")]
@@ -50,6 +55,27 @@ struct App {
     rt: Handle,
     /// `(owner/repo, installed binary)` when this build can update itself.
     updater: Option<(&'static str, PathBuf)>,
+    meters: Arc<Mutex<Meters>>,
+}
+
+/// Level meters, shared with the meter task.
+#[derive(Default)]
+struct Meters {
+    /// What the page shows, as of `asked`.
+    wanted: Vec<MeterTargetSpec>,
+    asked: Option<Instant>,
+    /// Targets the stream is open for, and their latest frame.
+    streaming: Vec<MeterTargetSpec>,
+    levels: Vec<[f32; 2]>,
+}
+
+impl Meters {
+    fn wanted(&self) -> &[MeterTargetSpec] {
+        match self.asked {
+            Some(t) if t.elapsed() < METER_STALE => &self.wanted,
+            _ => &[],
+        }
+    }
 }
 
 #[derive(Default)]
@@ -133,6 +159,8 @@ fn main() -> Result<()> {
         rt.spawn(update_checks(repo, state.clone()));
     }
 
+    let meters = Arc::new(Mutex::new(Meters::default()));
+    let meter_socket = socket.clone();
     let state_bg = state.clone();
     rt.spawn(async move {
         loop {
@@ -217,6 +245,7 @@ fn main() -> Result<()> {
         lost: false,
         rt: rt.handle().clone(),
         updater,
+        meters: meters.clone(),
     };
 
     let mut viewport = egui::ViewportBuilder::default()
@@ -236,8 +265,16 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native("hako", native, Box::new(|_cc| Ok(Box::new(app))))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let handle = rt.handle().clone();
+    eframe::run_native(
+        "hako",
+        native,
+        Box::new(move |cc| {
+            handle.spawn(stream_meters(meter_socket, meters, cc.egui_ctx.clone()));
+            Ok(Box::new(app))
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }
 
@@ -252,6 +289,15 @@ impl eframe::App for App {
             // GetConfig doesn't clobber an in-progress edit.
             if self.ui.settings.is_none() || st.error.is_some() {
                 self.ui.settings = st.settings.clone();
+            }
+            {
+                // Levels only for the meters the page asked for last frame.
+                let m = self.meters.lock().unwrap();
+                self.ui.meter_levels = if m.streaming == self.ui.meter_targets {
+                    m.levels.clone()
+                } else {
+                    Vec::new()
+                };
             }
             self.ui.update = st.update.as_ref().map(|r| UpdateOffer {
                 version: r.version.clone(),
@@ -277,6 +323,11 @@ impl eframe::App for App {
         self.was_online = online;
         let mut cmds = Vec::new();
         self.ui.ui(ctx, &mut cmds);
+        {
+            let mut m = self.meters.lock().unwrap();
+            m.wanted.clone_from(&self.ui.meter_targets);
+            m.asked = Some(Instant::now());
+        }
         for c in cmds {
             let to = |v: Result<serde_json::Value, serde_json::Error>| v.unwrap_or_default();
             let cmd = match c {
@@ -647,7 +698,60 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
                     s.notices.push((Tone::Error, msg.to_string()));
                 }
             }
-            EventKind::RemapCaptured | EventKind::DaemonShuttingDown => {}
+            EventKind::RemapCaptured | EventKind::DaemonShuttingDown | EventKind::Meters => {}
         }
+    }
+}
+
+/// Meter frames on their own connection, open only while the page shows
+/// meters and the window is drawn. Each frame repaints the UI.
+async fn stream_meters(socket: PathBuf, meters: Arc<Mutex<Meters>>, ctx: egui::Context) {
+    loop {
+        let wanted = meters.lock().unwrap().wanted().to_vec();
+        if wanted.is_empty() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
+        let params = serde_json::to_value(SubscribeMetersParams {
+            targets: wanted.clone(),
+        })
+        .unwrap_or_default();
+        let mut stream = match UnixStream::connect(&socket).await {
+            Ok(stream) => stream,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        let subscribed = call(&mut stream, Method::SubscribeMeters, params).await;
+        if !subscribed.is_some_and(|r| r.ok) {
+            // A daemon without meters: the page stays silent.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+        // Frames come at ~30 Hz; a silent daemon is a dead one.
+        while let Ok(Ok(v)) =
+            tokio::time::timeout(Duration::from_secs(2), read_json_frame(&mut stream)).await
+        {
+            let Some(frame) = serde_json::from_value::<IpcEvent>(v)
+                .ok()
+                .filter(|ev| ev.kind == EventKind::Meters)
+                .and_then(|ev| serde_json::from_value::<MeterLevels>(ev.payload).ok())
+            else {
+                continue;
+            };
+            {
+                let mut m = meters.lock().unwrap();
+                if m.wanted() != wanted.as_slice() {
+                    break;
+                }
+                m.streaming.clone_from(&wanted);
+                m.levels = frame.levels;
+            }
+            ctx.request_repaint();
+        }
+        let mut m = meters.lock().unwrap();
+        m.streaming.clear();
+        m.levels.clear();
     }
 }

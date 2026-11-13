@@ -29,6 +29,8 @@ pub enum Method {
     StartCapture,
     CancelCapture,
     SubscribeEvents,
+    /// Like `SubscribeEvents`, for `Meters` frames of `SubscribeMetersParams`.
+    SubscribeMeters,
 }
 
 /// Server-pushed event types (`"type":"DeviceUpdated"`).
@@ -41,6 +43,8 @@ pub enum EventKind {
     RemapCaptured,
     Error,
     DaemonShuttingDown,
+    /// ~30 Hz on a `SubscribeMeters` connection; payload `MeterLevels`.
+    Meters,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +119,32 @@ pub struct SetManyParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileNameParams {
     pub name: String,
+}
+
+/// What a level meter measures; the daemon resolves it to a PipeWire node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeterTargetSpec {
+    /// The line-in capture source.
+    AuxInput,
+    /// What the line-in plays into: after processing when a chain runs.
+    AuxOutput,
+    /// A node by `node.name`; `monitor_sink` meters what a sink plays.
+    Node { name: String, monitor_sink: bool },
+}
+
+/// Most targets one meter subscription may hold.
+pub const MAX_METER_TARGETS: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubscribeMetersParams {
+    pub targets: Vec<MeterTargetSpec>,
+}
+
+/// One `Meters` frame: peak since the previous frame per target, in
+/// subscription order (linear, L/R; 0 for a target that is not available).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeterLevels {
+    pub levels: Vec<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -411,10 +441,28 @@ pub struct AppSettings {
     /// The UI looks for new GitHub releases (release builds only).
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    /// `node.latency` preset of hako's audio nodes: an [`AUDIO_LATENCIES`] name.
+    #[serde(default = "default_audio_latency")]
+    pub audio_latency: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Audio latency presets: (setting value, samples at 48 kHz).
+pub const AUDIO_LATENCIES: [(&str, u32); 3] = [("low", 128), ("balanced", 256), ("safe", 512)];
+
+pub fn default_audio_latency() -> String {
+    "balanced".into()
+}
+
+/// Samples for an `audio_latency` setting value; `None` if unknown.
+pub fn audio_latency_samples(name: &str) -> Option<u32> {
+    AUDIO_LATENCIES
+        .iter()
+        .find(|(preset, _)| *preset == name)
+        .map(|&(_, samples)| samples)
 }
 
 impl Default for AppSettings {
@@ -428,6 +476,7 @@ impl Default for AppSettings {
             config_dir: String::new(),
             theme: String::new(),
             check_updates: true,
+            audio_latency: default_audio_latency(),
         }
     }
 }

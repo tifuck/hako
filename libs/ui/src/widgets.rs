@@ -345,6 +345,150 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
     resp
 }
 
+// ── Level meter ──────────────────────────────────────────────────
+
+/// Bottom of the meter scale (dBFS); anything quieter reads as empty.
+pub const METER_FLOOR_DB: f32 = -60.0;
+/// Zone edges (dBFS): ok below the first, warn up to the second, danger above.
+pub const METER_WARN_DB: f32 = -18.0;
+pub const METER_DANGER_DB: f32 = -6.0;
+const METER_RELEASE_DB_S: f32 = 20.0;
+const METER_HOLD_S: f32 = 1.0;
+
+/// Linear peak → dBFS on the meter scale.
+pub fn to_dbfs(linear: f32) -> f32 {
+    if linear > 0.0 {
+        (20.0 * linear.log10()).clamp(METER_FLOOR_DB, 0.0)
+    } else {
+        METER_FLOOR_DB
+    }
+}
+
+/// One meter channel as drawn: instant attack, a 20 dB/s release and a
+/// peak tick that holds for a second, then follows the bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ballistics {
+    pub level: f32,
+    pub peak: f32,
+    held: f32,
+}
+
+impl Default for Ballistics {
+    fn default() -> Self {
+        Self {
+            level: METER_FLOOR_DB,
+            peak: METER_FLOOR_DB,
+            held: 0.0,
+        }
+    }
+}
+
+impl Ballistics {
+    /// Advance `dt` seconds with the newest peak `db`. `instant` (reduced
+    /// motion) shows the input as it is.
+    pub fn step(&mut self, db: f32, dt: f32, instant: bool) {
+        if instant {
+            *self = Self {
+                level: db,
+                peak: db,
+                held: 0.0,
+            };
+            return;
+        }
+        self.level = db.max(self.level - METER_RELEASE_DB_S * dt);
+        if db >= self.peak {
+            self.peak = db;
+            self.held = 0.0;
+        } else {
+            self.held += dt;
+            if self.held >= METER_HOLD_S {
+                self.peak = self.level;
+            }
+        }
+    }
+}
+
+/// Horizontal stereo meter: two thin bars on a −60..0 dBFS scale with
+/// ok / warn / danger zones and a peak-hold tick. `levels` is the latest
+/// linear peak (L, R); the motion is computed here, per frame.
+pub fn stereo_meter(ui: &mut Ui, id_salt: impl std::hash::Hash, levels: [f32; 2], width: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 24.0), Sense::hover());
+    let id = ui.id().with(id_salt);
+    let now = ui.input(|i| i.time);
+    // egui 0.31 has no reduced-motion setting; no animations means none here.
+    let instant = ui.style().animation_time <= 0.0;
+    let (mut chans, last) = ui
+        .data(|m| m.get_temp::<([Ballistics; 2], f64)>(id))
+        .unwrap_or_default();
+    let dt = (now - last).clamp(0.0, 0.25) as f32;
+    for (ch, v) in chans.iter_mut().zip(levels) {
+        ch.step(to_dbfs(v), dt, instant);
+    }
+    ui.data_mut(|m| m.insert_temp(id, (chans, now)));
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+
+    let x = |db: f32| egui::remap_clamp(db, METER_FLOOR_DB..=0.0, rect.x_range());
+    let zones = [
+        (METER_FLOOR_DB, METER_WARN_DB, pal().ok),
+        (METER_WARN_DB, METER_DANGER_DB, pal().warn),
+        (METER_DANGER_DB, 0.0, pal().danger),
+    ];
+    let zone_color = |db: f32| {
+        zones
+            .iter()
+            .find(|(_, hi, _)| db <= *hi)
+            .map_or(pal().danger, |z| z.2)
+    };
+    let p = ui.painter();
+    let (bar_h, gap) = (4.0, 3.0);
+    for (i, ch) in chans.iter().enumerate() {
+        let top = rect.top() + i as f32 * (bar_h + gap);
+        let y = egui::Rangef::new(top, top + bar_h);
+        p.rect_filled(Rect::from_x_y_ranges(rect.x_range(), y), 2.0, pal().bg);
+        for (lo, hi, color) in zones {
+            // The unlit part of each zone stays faintly visible.
+            p.rect_filled(
+                Rect::from_x_y_ranges(x(lo)..=x(hi), y),
+                0.0,
+                color.gamma_multiply(0.12),
+            );
+            if ch.level > lo {
+                p.rect_filled(
+                    Rect::from_x_y_ranges(x(lo)..=x(ch.level.min(hi)), y),
+                    0.0,
+                    color,
+                );
+            }
+        }
+        if ch.peak > METER_FLOOR_DB {
+            let px = x(ch.peak).max(rect.left() + 2.0);
+            p.rect_filled(
+                Rect::from_x_y_ranges(px - 2.0..=px, y),
+                0.0,
+                zone_color(ch.peak),
+            );
+        }
+    }
+    for db in [METER_FLOOR_DB, METER_WARN_DB, METER_DANGER_DB, 0.0] {
+        let align = if db == METER_FLOOR_DB {
+            egui::Align2::LEFT_BOTTOM
+        } else if db == 0.0 {
+            egui::Align2::RIGHT_BOTTOM
+        } else {
+            egui::Align2::CENTER_BOTTOM
+        };
+        p.text(
+            pos2(x(db), rect.bottom()),
+            align,
+            format!("{db:.0}"),
+            egui::FontId::proportional(9.5),
+            pal().text_faint,
+        );
+    }
+}
+
 /// Flat icon button drawn by `paint` inside a square hit area.
 pub fn icon_button(
     ui: &mut Ui,

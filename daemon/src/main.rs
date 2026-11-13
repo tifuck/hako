@@ -9,13 +9,15 @@ mod worker;
 
 use anyhow::Result;
 use clap::Parser;
+use hako_audio::latency::{run_latency_test, LatencyTestOptions};
 use hako_audio::AudioService;
 use hako_core::config::{load_app_config, ConfigPaths};
 use hako_core::default_socket_path;
-use hako_core::ipc::IpcRequest;
+use hako_core::ipc::{audio_latency_samples, IpcRequest};
 use hako_core::{read_json_frame_sync, write_json_frame_sync};
 use hub::{DaemonHub, DISCOVERY_PERIOD, LOG_LEVELS};
 use std::os::unix::net::UnixStream as StdUnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -46,6 +48,19 @@ struct Cli {
     /// Report every connected HID device and what handles it, then exit
     #[arg(long)]
     diagnose: bool,
+
+    /// Measure the latency the default AUX chain adds over a direct link
+    /// (software only, no device plays anything); exit 1 if over one quantum
+    #[arg(long)]
+    latency_test: bool,
+
+    /// With --latency-test: the `node.latency` preset
+    #[arg(long, default_value = "balanced", value_parser = ["low", "balanced", "safe"], requires = "latency_test")]
+    latency: String,
+
+    /// With --latency-test: seconds to measure
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=60), requires = "latency_test")]
+    seconds: u32,
 }
 
 #[tokio::main]
@@ -82,6 +97,9 @@ async fn main() -> Result<()> {
 
     if cli.reset_audio {
         return reset_audio_cli(&socket, &paths);
+    }
+    if cli.latency_test {
+        return latency_test_cli(&cli.latency, cli.seconds).await;
     }
 
     paths.ensure()?;
@@ -132,6 +150,29 @@ async fn main() -> Result<()> {
     hub.shutdown().await;
     let _ = std::fs::remove_file(&socket);
     result
+}
+
+/// Ctrl-C / SIGTERM stop the run; it cleans up before returning.
+async fn latency_test_cli(preset: &str, seconds: u32) -> Result<()> {
+    let latency = audio_latency_samples(preset)
+        .ok_or_else(|| anyhow::anyhow!("unknown latency preset {preset}"))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let flag = stop.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+        flag.store(true, Ordering::Relaxed);
+    });
+    let opts = LatencyTestOptions { latency, seconds };
+    let report = tokio::task::spawn_blocking(move || run_latency_test(&opts, &stop)).await??;
+    print!("{report}");
+    if report.verdict().is_err() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn reset_audio_cli(socket: &std::path::Path, paths: &ConfigPaths) -> Result<()> {

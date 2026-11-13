@@ -17,8 +17,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: System deps (egui/winit)
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: System deps (egui/winit, PipeWire bindings)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang pkg-config
       - run: scripts/check-public.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings

@@ -1,6 +1,7 @@
 use hako_core::{
     AppConfig, AppSettings, AuxEffect, AuxEffectChain, AuxEffectKind, DeviceId, EqBand, EqBandKind,
-    IpcRequest, IpcResponse, Method, SetManyParams, SetParams, SettingKey, SettingValue,
+    EventKind, IpcEvent, IpcRequest, IpcResponse, MeterLevels, MeterTargetSpec, Method,
+    SetManyParams, SetParams, SettingKey, SettingValue, SubscribeMetersParams,
 };
 
 #[test]
@@ -45,6 +46,53 @@ fn set_many_params_roundtrip() {
     let back: SetManyParams = serde_json::from_value(r.params).unwrap();
     assert_eq!(back.device_id, p.device_id);
     assert_eq!(back.values, values);
+}
+
+#[test]
+fn subscribe_meters_roundtrip() {
+    let p = SubscribeMetersParams {
+        targets: vec![
+            MeterTargetSpec::AuxInput,
+            MeterTargetSpec::AuxOutput,
+            MeterTargetSpec::Node {
+                name: "Hako_Game".into(),
+                monitor_sink: true,
+            },
+        ],
+    };
+    let req = IpcRequest {
+        id: serde_json::json!(1),
+        method: Method::SubscribeMeters,
+        params: serde_json::to_value(&p).unwrap(),
+    };
+    let s = serde_json::to_string(&req).unwrap();
+    assert!(s.contains(r#""method":"SubscribeMeters""#), "{s}");
+    assert!(
+        s.contains(r#""targets":["AuxInput","AuxOutput",{"Node""#),
+        "{s}"
+    );
+    let r: IpcRequest = serde_json::from_str(&s).unwrap();
+    assert_eq!(
+        serde_json::from_value::<SubscribeMetersParams>(r.params).unwrap(),
+        p
+    );
+
+    let ev = IpcEvent {
+        kind: EventKind::Meters,
+        payload: serde_json::to_value(MeterLevels {
+            levels: vec![[0.5, 0.125], [0.0, 0.0]],
+        })
+        .unwrap(),
+    };
+    let s = serde_json::to_string(&ev).unwrap();
+    assert_eq!(
+        s,
+        r#"{"type":"Meters","payload":{"levels":[[0.5,0.125],[0.0,0.0]]}}"#
+    );
+    let back: IpcEvent = serde_json::from_str(&s).unwrap();
+    assert_eq!(back.kind, EventKind::Meters);
+    let levels: MeterLevels = serde_json::from_value(back.payload).unwrap();
+    assert_eq!(levels.levels, vec![[0.5, 0.125], [0.0, 0.0]]);
 }
 
 #[test]
@@ -209,6 +257,7 @@ fn missing_fields_use_semantic_defaults() {
     assert!(config.chatmix_set_default_sink);
     assert!(config.check_updates);
     assert_eq!(config.aux.effects, AuxEffectChain::default());
+    assert_eq!(config.audio_latency, "balanced");
 
     let settings: AppSettings = serde_json::from_value(serde_json::json!({
         "log_level": "info",
@@ -219,6 +268,17 @@ fn missing_fields_use_semantic_defaults() {
     .unwrap();
     assert_eq!(settings.aux_effects, AuxEffectChain::default());
     assert!(settings.check_updates);
+    assert_eq!(settings.audio_latency, "balanced");
+}
+
+#[test]
+fn audio_latency_presets_map_to_samples() {
+    use hako_core::audio_latency_samples;
+    assert_eq!(audio_latency_samples("low"), Some(128));
+    assert_eq!(audio_latency_samples("balanced"), Some(256));
+    assert_eq!(audio_latency_samples("safe"), Some(512));
+    assert_eq!(audio_latency_samples(""), None);
+    assert_eq!(audio_latency_samples("Low"), None);
 }
 
 #[test]
