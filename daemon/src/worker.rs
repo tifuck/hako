@@ -11,12 +11,13 @@
 
 use crate::drivers::{DeviceAdapter, EventTx, Model};
 use anyhow::{anyhow, bail, Result};
-use hako_core::catalog::{SettingKey, SettingMeta, SettingValue};
-use hako_core::config::{load_app_config, update_app_config, ConfigPaths};
+use hako_core::catalog::{ControlKind, SettingKey, SettingMeta, SettingValue};
+use hako_core::config::{load_app_config, load_device_settings, update_app_config, ConfigPaths};
 use hako_core::device::DeviceSnapshot;
 use hako_core::protocol::AdapterEvent;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -62,6 +63,9 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// Longest an IPC `Set` waits for the device thread (it may be mid-tick).
+const SET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 enum Cmd {
     Set {
         key: SettingKey,
@@ -89,9 +93,10 @@ impl DeviceHandle {
         nodes: Vec<PathBuf>,
         paths: ConfigPaths,
     ) -> Self {
-        let gate = Gate::load(paths, adapter.id().config_stem());
+        let mut gate = Gate::load(paths, adapter.id().config_stem());
         let mut adapter = adapter;
         gate.enforce(adapter.as_mut());
+        repair_saved(adapter.as_mut(), &mut gate);
         let snapshot = Arc::new(Mutex::new(gate.view(adapter.as_ref())));
         let (tx, rx) = mpsc::channel();
         let shared = snapshot.clone();
@@ -134,7 +139,11 @@ impl DeviceHandle {
         self.tx
             .send(Cmd::Set { key, value, reply })
             .map_err(|_| anyhow!("device worker stopped"))?;
-        rx.await.map_err(|_| anyhow!("device worker stopped"))?
+        // A wedged device must not hang the IPC connection that asked.
+        match tokio::time::timeout(SET_TIMEOUT, rx).await {
+            Ok(reply) => reply.map_err(|_| anyhow!("device worker stopped"))?,
+            Err(_) => Err(Refused::new("busy", "the device did not answer in time").into()),
+        }
     }
 
     /// Ask the worker to release the device; the receiver fires when done.
@@ -145,21 +154,37 @@ impl DeviceHandle {
     }
 }
 
+/// Bumped whenever any worker changes an opt-in, so workers sharing a `vid_pid`
+/// stem (identical devices) reload theirs.
+static OPT_IN_EPOCH: AtomicUsize = AtomicUsize::new(0);
+
 /// The device's onboard-memory opt-in.
 struct Gate {
     paths: ConfigPaths,
     /// `vid_pid` the opt-in is stored under.
     stem: String,
     allowed: bool,
+    /// `OPT_IN_EPOCH` when `allowed` was read.
+    epoch: usize,
 }
 
 impl Gate {
     fn load(paths: ConfigPaths, stem: String) -> Self {
+        let epoch = OPT_IN_EPOCH.load(Ordering::SeqCst);
         let allowed = load_app_config(&paths).is_ok_and(|c| c.onboard_writes.contains(&stem));
         Self {
             paths,
             stem,
             allowed,
+            epoch,
+        }
+    }
+
+    /// Pick up an opt-in another worker changed, leaving save mode if revoked.
+    fn refresh(&mut self, a: &mut dyn DeviceAdapter) {
+        if self.epoch != OPT_IN_EPOCH.load(Ordering::SeqCst) {
+            *self = Self::load(self.paths.clone(), std::mem::take(&mut self.stem));
+            self.enforce(a);
         }
     }
 
@@ -214,6 +239,7 @@ impl Gate {
             self.stem
         );
         self.allowed = on;
+        self.epoch = OPT_IN_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(())
     }
 }
@@ -249,6 +275,7 @@ fn run(
             }
             Err(RecvTimeoutError::Timeout) => {
                 next_tick = Instant::now() + adapter.tick_interval();
+                gate.refresh(adapter.as_mut());
                 if let Err(e) = adapter.tick() {
                     warn!("tick {}: {e:#}", adapter.id().key());
                 }
@@ -256,11 +283,64 @@ fn run(
                     let _ = events.send(AdapterEvent::Updated(snap));
                 }
             }
-            // Handle dropped (device replaced after a reconnect): just let go of
-            // the device; daemon-level teardown belongs to Shutdown only.
+            // Handle dropped without Shutdown (replaced by a reopened adapter
+            // that now owns the device and its audio): just let go.
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
+}
+
+/// A device file may hold a number its control no longer accepts (hand edits,
+/// an older version's range): the driver already sent it while opening, so
+/// write the nearest valid value back. Only sliders, only values that came
+/// from the file, and never in save-to-device mode (no automatic onboard write).
+/// ponytail: the first write at open is not prevented, only corrected.
+fn repair_saved(a: &mut dyn DeviceAdapter, gate: &mut Gate) {
+    let snap = gate.view(a);
+    let saving =
+        snap.settings.get(SettingKey::SaveToDevice.as_str()) == Some(&SettingValue::Bool(true));
+    if !snap.connected || saving {
+        return;
+    }
+    let file = load_device_settings(&gate.paths, snap.id.vendor_id, snap.id.product_id)
+        .unwrap_or_default();
+    for meta in &snap.controls {
+        let key = meta.key.as_str();
+        let Some(value) = snap.settings.get(key).filter(|v| file.get(key) == Some(*v)) else {
+            continue;
+        };
+        let Some(fixed) = nearest_valid(meta, value) else {
+            continue;
+        };
+        warn!(
+            "{}: saved {key} {value:?} is invalid; setting {fixed:?}",
+            snap.name
+        );
+        if let Err(e) = set_checked(a, gate, meta.key, fixed) {
+            warn!("{}: could not repair {key}: {e:#}", snap.name);
+        }
+    }
+}
+
+/// The in-range whole/fractional number closest to `value` for an invalid
+/// slider value; `None` when it is valid or not a slider.
+fn nearest_valid(meta: &SettingMeta, value: &SettingValue) -> Option<SettingValue> {
+    if meta.kind != ControlKind::Slider && meta.kind != ControlKind::ColorChannel
+        || meta.validate(value).is_ok()
+    {
+        return None;
+    }
+    let n = value.as_float().filter(|f| f.is_finite())?;
+    let n = n.clamp(meta.min.unwrap_or(f64::MIN), meta.max.unwrap_or(f64::MAX));
+    let fixed = if [meta.min, meta.max, meta.step]
+        .iter()
+        .all(|v| v.is_none_or(|v| v.fract() == 0.0))
+    {
+        SettingValue::Int(n.round() as i64)
+    } else {
+        SettingValue::Float(n)
+    };
+    meta.validate(&fixed).is_ok().then_some(fixed)
 }
 
 /// Every write is checked against the control the driver declares for it, so
@@ -272,6 +352,7 @@ fn set_checked(
     key: SettingKey,
     value: SettingValue,
 ) -> Result<()> {
+    gate.refresh(a);
     let snap = gate.view(a);
     if !snap.connected {
         bail!(
@@ -439,5 +520,26 @@ mod tests {
         assert!(!a.saving, "revoking the opt-in leaves save mode");
         assert!(!Gate::load(paths, a.id.config_stem()).allowed);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_saved_slider_values_get_the_nearest_valid_one() {
+        let pct = SettingMeta::slider(SettingKey::Brightness, "B", 0.0, 100.0, 1.0);
+        assert_eq!(
+            nearest_valid(&pct, &SettingValue::Int(300)),
+            Some(SettingValue::Int(100))
+        );
+        assert_eq!(
+            nearest_valid(&pct, &SettingValue::Float(40.4)),
+            Some(SettingValue::Int(40))
+        );
+        assert_eq!(nearest_valid(&pct, &SettingValue::Int(50)), None);
+        let mix = SettingMeta::slider(SettingKey::Volume, "V", 0.0, 1.0, 0.01);
+        assert_eq!(
+            nearest_valid(&mix, &SettingValue::Float(1.5)),
+            Some(SettingValue::Float(1.0))
+        );
+        let toggle = SettingMeta::toggle(SettingKey::GameMode, "G");
+        assert_eq!(nearest_valid(&toggle, &SettingValue::Int(3)), None);
     }
 }

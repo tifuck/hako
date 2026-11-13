@@ -219,7 +219,7 @@ impl HidrawDevice {
             .open(path)
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "open {} failed: {e} (Permission denied usually means udev GROUP=plugdev not applied)",
+                    "open {} failed: {e} (Permission denied usually means the hako udev rules are not installed, or this user has no active seat session)",
                     path.display()
                 )
             })?;

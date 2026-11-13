@@ -24,6 +24,9 @@ use tokio::net::UnixStream;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::mpsc;
 
+/// Longest one daemon request may take (a profile touches every device).
+const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How often an open UI looks for a new release.
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
@@ -512,7 +515,9 @@ fn set_feedback(
     }
 }
 
-/// One request/response round trip. `None` means the connection is gone.
+/// One request/response round trip. `None` means the connection is gone (or
+/// the daemon stopped answering: the caller reconnects, so a late reply can
+/// never be read as the answer to a later request).
 async fn call(
     stream: &mut UnixStream,
     method: Method,
@@ -523,8 +528,13 @@ async fn call(
         method,
         params,
     };
-    write_json_frame(stream, &req).await.ok()?;
-    let v = read_json_frame(stream).await.ok()?;
+    let round_trip = async {
+        write_json_frame(stream, &req).await.ok()?;
+        read_json_frame(stream).await.ok()
+    };
+    let v = tokio::time::timeout(CALL_TIMEOUT, round_trip)
+        .await
+        .ok()??;
     serde_json::from_value(v).ok()
 }
 

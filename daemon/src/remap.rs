@@ -115,6 +115,7 @@ impl EngineInner {
 pub struct RemapEngine {
     inner: Arc<Mutex<EngineInner>>,
     tx: mpsc::UnboundedSender<Cmd>,
+    events: broadcast::Sender<AdapterEvent>,
 }
 
 impl RemapEngine {
@@ -126,7 +127,7 @@ impl RemapEngine {
         let (tx, rx) = mpsc::unbounded_channel();
         let worker = Worker {
             inner: inner.clone(),
-            events,
+            events: events.clone(),
             slots: Vec::new(),
             virt: None,
             axes: Axes::default(),
@@ -137,7 +138,7 @@ impl RemapEngine {
             .name("hako-remap".into())
             .spawn(move || worker.run(rx))
             .expect("spawn remap thread");
-        Self { inner, tx }
+        Self { inner, tx, events }
     }
 
     /// Register a mouse or keyboard (idempotent; a reconnect keeps its bindings).
@@ -258,10 +259,12 @@ impl RemapEngine {
         }
         let mut g = self.inner.lock().unwrap();
         let idx = g.find(&device_id)?;
-        // One listening session at a time.
-        for d in &mut g.devices {
-            d.capturing = None;
-            d.capture_source = None;
+        // One listening session at a time: others stop (and say so).
+        for (i, d) in g.devices.iter_mut().enumerate() {
+            if i != idx && d.capturing.take().is_some() {
+                d.capture_source = None;
+                let _ = self.events.send(AdapterEvent::RemapsUpdated(d.snapshot()));
+            }
         }
         let d = &mut g.devices[idx];
         d.capturing = Some(role);
@@ -945,7 +948,11 @@ fn node_matches(slot: &Slot, dev: &Device) -> bool {
         return false;
     };
     let iid = dev.input_id();
-    let same = iid.vendor() == slot.id.vendor_id && slot.pids.contains(&iid.product());
+    // A node with a key the virtual device cannot repeat (touchpad, joystick,
+    // gamepad) is never grabbed: those events would be lost.
+    let same = iid.vendor() == slot.id.vendor_id
+        && slot.pids.contains(&iid.product())
+        && keys.iter().all(|k| forwardable(k.code()));
     match slot.kind {
         DeviceKind::Mouse => {
             same && (keys.contains(KeyCode::BTN_LEFT) || keys.contains(KeyCode::BTN_SIDE))
@@ -1000,9 +1007,16 @@ impl Axes {
     }
 }
 
+/// Keys the virtual device declares: every remap target plus the `BTN_MISC`
+/// block (`BTN_0`..), which some mice use for extra buttons. Not the
+/// joystick / gamepad / tablet ranges, so udev keeps it a keyboard + mouse.
+fn forwardable(code: u16) -> bool {
+    emittable(code) || (0x100..=0x10f).contains(&code)
+}
+
 fn build_virtual(axes: &Axes) -> Result<VirtualDevice> {
     let mut keys = AttributeSet::<KeyCode>::new();
-    for code in (1u16..0x2c0).filter(|&c| emittable(c)) {
+    for code in (1u16..0x2c0).filter(|&c| forwardable(c)) {
         keys.insert(KeyCode::new(code));
     }
     let mut rel = AttributeSet::<RelativeAxisCode>::new();

@@ -217,7 +217,12 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
     if written.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    Ok(written?)
+    written?;
+    // The rename itself is only durable once the directory is synced.
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 pub fn device_config_path(paths: &ConfigPaths, vid: u16, pid: u16) -> PathBuf {
@@ -277,9 +282,11 @@ pub fn list_profiles(paths: &ConfigPaths) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Profile names become file names: no separators, dots, or control chars.
+/// Profile names become file names: no separators, dots, control chars, or
+/// spaces at either end (the UI trims names; `" a"` and `"a"` must not differ).
 pub fn validate_profile_name(name: &str) -> Result<()> {
-    let ok = !name.trim().is_empty()
+    let ok = !name.is_empty()
+        && name.trim() == name
         && name.len() <= 48
         && name
             .chars()

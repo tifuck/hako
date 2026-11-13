@@ -404,7 +404,7 @@ per device), `profiles/` and `remaps/`. All plain TOML, written atomically.
 <details>
 <summary><b>"Permission denied" on a device</b></summary>
 
-The udev rules give the logged-in user (`uaccess`) and the `plugdev` group
+The udev rules give the logged-in user (a `uaccess` seat ACL, no group)
 access to supported devices. Reinstall them and replug:
 
 ```bash
@@ -412,7 +412,8 @@ access to supported devices. Reinstall them and replug:
 systemctl --user restart hakod
 ```
 
-Device nodes should look like `crw-rw----+ root plugdev`.
+Device nodes should look like `crw-rw----+ root root`; `getfacl` on one lists
+your user.
 
 </details>
 

@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
 
     // Bind IPC first so the UI can always connect even if HID discovery is
     // slow/stuck, and so a second daemon exits before touching any device.
-    let listener = ipc_server::bind(&socket)?;
+    let (listener, _lock) = ipc_server::bind(&socket)?;
 
     let hub = Arc::new(DaemonHub::new(paths));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

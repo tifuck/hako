@@ -197,7 +197,7 @@ fn missing_fields_use_semantic_defaults() {
 fn profile_names_cannot_escape_the_profiles_dir() {
     use hako_core::validate_profile_name;
     assert!(validate_profile_name("Gaming 2").is_ok());
-    for bad in ["../x", "a/b", "", "  ", ".hidden"] {
+    for bad in ["../x", "a/b", "", "  ", ".hidden", " Gaming", "Gaming "] {
         assert!(validate_profile_name(bad).is_err(), "{bad:?}");
     }
 }

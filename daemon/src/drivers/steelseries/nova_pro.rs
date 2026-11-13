@@ -570,6 +570,12 @@ impl DeviceAdapter for SteelSeriesAdapter {
         Ok(())
     }
 
+    /// The ChatMix dial is read in `tick`: keep its latency low. The slow
+    /// parts of `tick` (status poll, ChatMix retry, AUX heal) run on timers.
+    fn tick_interval(&self) -> Duration {
+        Duration::from_millis(100)
+    }
+
     fn shutdown(&mut self) {
         let _ = self.audio.aux_disable();
         // ChatMix destroyed by daemon-level audio reset on stop

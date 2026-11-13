@@ -60,6 +60,11 @@ impl DefaultState {
             .or_else(|| self.session_original.take())
     }
 
+    /// The sink hako made the default, if any.
+    fn held(&self) -> Option<&str> {
+        self.claims.last().map(|(_, sink)| sink.as_str())
+    }
+
     fn restore(&mut self) -> Option<String> {
         self.claims.clear();
         self.session_original.take()
@@ -728,10 +733,28 @@ fn claim_default(defaults: &mut DefaultState, owner: DefaultOwner, sink: &str) -
 }
 
 fn release_default(defaults: &mut DefaultState, owner: DefaultOwner) -> Result<()> {
+    let ours = defaults.held().map(str::to_string);
     if let Some(sink) = defaults.release(owner) {
-        set_default_sink(&sink)?;
+        let moved = ours.as_deref().is_some_and(|ours| {
+            user_moved_default(
+                ours,
+                resolve_node_id(ours).is_ok(),
+                current_default_sink().ok().as_deref(),
+            )
+        });
+        if moved {
+            info!("default output changed by the user; not restoring {sink}");
+        } else {
+            set_default_sink(&sink)?;
+        }
     }
     Ok(())
+}
+
+/// The user picked another output while `ours` was the default. When `ours`
+/// no longer exists the server chose the fallback itself, so restoring is right.
+fn user_moved_default(ours: &str, ours_exists: bool, current: Option<&str>) -> bool {
+    ours_exists && current.is_some_and(|current| current != ours)
 }
 
 /// `pw-loopback` capture / playback properties. Values are quoted: an
@@ -1670,6 +1693,14 @@ mod tests {
         let out = output_within(Command::new("echo").arg("hi"), Duration::from_secs(5)).unwrap();
         assert!(out.status.success());
         assert_eq!(out.stdout, b"hi\n");
+    }
+
+    #[test]
+    fn a_default_the_user_picked_is_kept() {
+        assert!(user_moved_default("Hako_Game", true, Some("hdmi")));
+        assert!(!user_moved_default("Hako_Game", true, Some("Hako_Game")));
+        assert!(!user_moved_default("Hako_Game", false, Some("hdmi")));
+        assert!(!user_moved_default("Hako_Game", true, None));
     }
 
     #[test]

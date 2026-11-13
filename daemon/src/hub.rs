@@ -91,9 +91,10 @@ impl DaemonHub {
             return;
         };
         // Unplugged or replugged: none of the nodes the adapter was opened on
-        // is left (a replug between two passes brings new ones). Drop it so the
-        // device is reopened fresh (adapters keep dead fds otherwise).
-        let gone: Vec<DeviceId> = {
+        // is left (a replug between two passes brings new ones). Shut it down
+        // (its teardown, e.g. AUX, must run before a replugged device is
+        // reopened below) so the device is reopened fresh.
+        let gone: Vec<DeviceHandle> = {
             let mut map = self.devices.lock().unwrap();
             let mut gone = Vec::new();
             map.retain(|_, h| {
@@ -101,13 +102,15 @@ impl DaemonHub {
                     .iter()
                     .any(|sys| h.nodes.contains(sys));
                 if !alive {
-                    gone.push(h.snapshot().id);
+                    gone.push(h.clone());
                 }
                 alive
             });
             gone
         };
-        for id in gone {
+        stop_all(&gone).await;
+        for h in gone {
+            let id = h.snapshot().id;
             info!("{} unplugged", id.key());
             let _ = self.events.send(AdapterEvent::Disconnected(id));
         }
@@ -603,22 +606,30 @@ impl DaemonHub {
             .drain()
             .map(|(_, h)| h)
             .collect();
-        let acks: Vec<_> = handles.iter().map(DeviceHandle::shutdown).collect();
-        tokio::task::spawn_blocking(move || {
-            // ponytail: shared 2 s budget; a wedged device is abandoned, not joined.
-            let deadline = Instant::now() + Duration::from_secs(2);
-            for ack in acks {
-                let _ = ack.recv_timeout(deadline.saturating_duration_since(Instant::now()));
-            }
-        })
-        .await
-        .ok();
+        stop_all(&handles).await;
         if let Err(e) = self.audio.reset_all() {
             warn!("audio teardown: {e:#}");
         }
         self.remap.shutdown();
         let _ = self.events.send(AdapterEvent::ShuttingDown);
     }
+}
+
+/// Shut the workers down and wait for them.
+async fn stop_all(handles: &[DeviceHandle]) {
+    if handles.is_empty() {
+        return;
+    }
+    let acks: Vec<_> = handles.iter().map(DeviceHandle::shutdown).collect();
+    tokio::task::spawn_blocking(move || {
+        // ponytail: shared 2 s budget; a wedged device is abandoned, not joined.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for ack in acks {
+            let _ = ack.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        }
+    })
+    .await
+    .ok();
 }
 
 fn set_last_profile(paths: &ConfigPaths, name: &str) -> Result<()> {

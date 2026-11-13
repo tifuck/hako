@@ -18,9 +18,9 @@ jobs:
     # Oldest supported runner: the binaries need its glibc (2.35) or newer.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@1.100.0
-      - uses: Swatinem/rust-cache@v2
+      # No build cache here: a release must not restore state other runs wrote.
       - name: System deps (egui/winit)
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - name: Tag matches workspace version
@@ -62,7 +62,7 @@ jobs:
           test -L /etc/systemd/user/default.target.wants/hakod.service
           sudo apt-get remove -y hako
           test ! -e /etc/systemd/user/default.target.wants/hakod.service
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
             dist/*.tar.gz

@@ -7,7 +7,8 @@ use hako_core::ipc::{EventKind, IpcEvent, IpcRequest, IpcResponse, Method};
 use hako_core::protocol::AdapterEvent;
 use hako_core::remap::StartCaptureParams;
 use hako_core::{read_json_frame, write_json_frame};
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,18 +18,29 @@ use tracing::{info, warn};
 
 /// Bind the daemon socket, owner-only. Refuses to replace a socket another
 /// daemon still answers on; a stale file from a crashed daemon is removed.
-pub fn bind(socket_path: &Path) -> Result<UnixListener> {
-    if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
-        bail!("hakod is already running on {}", socket_path.display());
-    }
-    let _ = std::fs::remove_file(socket_path);
+/// The returned lock (held for the daemon's life) keeps two daemons started
+/// at the same moment from both getting past that check.
+pub fn bind(socket_path: &Path) -> Result<(UnixListener, std::fs::File)> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(socket_path.with_extension("lock"))?;
+    // SAFETY: valid open fd; flock has no other preconditions.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
+        || std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+    {
+        bail!("hakod is already running on {}", socket_path.display());
+    }
+    let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
     info!("listening on {}", socket_path.display());
-    Ok(listener)
+    Ok((listener, lock))
 }
 
 pub async fn serve(listener: UnixListener, hub: Arc<DaemonHub>) -> Result<()> {
