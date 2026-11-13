@@ -5,6 +5,7 @@ mod hid;
 mod hub;
 mod ipc_server;
 mod mixer;
+mod net;
 mod remap;
 mod worker;
 

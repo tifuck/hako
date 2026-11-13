@@ -3,10 +3,12 @@
 use crate::drivers::{self, DeviceAdapter, DriverCtx, EventTx, Model, PlaceholderAdapter};
 use crate::hid::HidDeviceInfo;
 use crate::mixer::{MixerService, PatchError};
+use crate::net::NetService;
 use crate::remap::RemapEngine;
 use crate::worker::{DeviceHandle, Refused};
 use anyhow::{Context, Result};
 use hako_audio::meters::MeterService;
+use hako_audio::net::NetAudio;
 use hako_audio::AudioService;
 use hako_core::catalog::{SettingKey, SettingMeta, SettingValue};
 use hako_core::config::{
@@ -20,6 +22,7 @@ use hako_core::ipc::{
     SetManyParams, SetParams, SnapshotParams, AUDIO_LATENCIES,
 };
 use hako_core::mixer::{MixerFile, PatchMixerParams, Scene};
+use hako_core::net::{PatchNetParams, DISCOVERY_PORT};
 use hako_core::protocol::{is_new_error, AdapterEvent};
 use hako_core::remap::{CancelCaptureParams, ClearRemapParams, SetRemapParams, StartCaptureParams};
 use hako_core::VERSION;
@@ -53,6 +56,8 @@ pub struct DaemonHub {
     pub meters: MeterService,
     /// `mixer.toml` and its PipeWire graph (own thread).
     pub mixer: Arc<MixerService>,
+    /// LAN audio: pairing, sessions, network nodes (own threads).
+    pub net: Arc<NetService>,
     /// Never held across an await or device I/O (workers own the devices).
     devices: std::sync::Mutex<HashMap<String, DeviceHandle>>,
     events: EventTx,
@@ -95,11 +100,18 @@ impl DaemonHub {
         let audio = Arc::new(audio);
         let mixer = MixerService::start(paths.clone(), audio.clone(), events.clone(), latency);
         audio.on_dial(mixer.dial_hook());
+        let net = NetService::start(
+            paths.clone(),
+            events.clone(),
+            Some(DISCOVERY_PORT),
+            Some(NetAudio::new()),
+        );
         Self {
             paths,
             audio,
             meters: MeterService::new(),
             mixer: Arc::new(mixer),
+            net: Arc::new(net),
             devices: std::sync::Mutex::new(HashMap::new()),
             events,
             started: Instant::now(),
@@ -578,6 +590,20 @@ impl DaemonHub {
                 }
                 Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
+            Method::GetNet => IpcResponse::ok(id, self.net.state()),
+            Method::PatchNet => match serde_json::from_value::<PatchNetParams>(req.params) {
+                Ok(p) => {
+                    // A Pair waits for its handshake: off the runtime.
+                    let net = self.net.clone();
+                    match tokio::task::spawn_blocking(move || net.patch(&p.ops)).await {
+                        Ok(Ok(state)) => IpcResponse::ok(id, state),
+                        Ok(Err(PatchError::Invalid(e))) => IpcResponse::err(id, "invalid_value", e),
+                        Ok(Err(PatchError::Io(e))) => IpcResponse::err(id, "io", format!("{e:#}")),
+                        Err(e) => IpcResponse::err(id, "io", format!("net task: {e}")),
+                    }
+                }
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+            },
         }
     }
 
@@ -729,6 +755,8 @@ impl DaemonHub {
     pub async fn shutdown(&self) {
         let handles: Vec<_> = lock(&self.devices).drain().map(|(_, h)| h).collect();
         stop_all(&handles).await;
+        let net = self.net.clone();
+        let _ = tokio::task::spawn_blocking(move || net.shutdown()).await;
         let mixer = self.mixer.clone();
         let _ = tokio::task::spawn_blocking(move || mixer.shutdown()).await;
         if let Err(e) = self.audio.reset_all() {
@@ -975,6 +1003,7 @@ mod tests {
                 events.clone(),
                 256,
             )),
+            net: Arc::new(NetService::start(paths.clone(), events.clone(), None, None)),
             audio,
             meters: MeterService::new(),
             devices: Default::default(),
@@ -989,6 +1018,7 @@ mod tests {
     }
 
     fn close(hub: DaemonHub) {
+        hub.net.shutdown();
         hub.remap.shutdown();
         hub.mixer.shutdown();
         let _ = std::fs::remove_dir_all(&hub.paths.root);
@@ -1103,6 +1133,28 @@ mod tests {
         hub.delete_profile("q").unwrap();
         assert_eq!(last(), None);
         assert!(hub.delete_profile("q").is_err(), "no such profile");
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn lan_audio_is_served_over_ipc() {
+        let hub = hub("net");
+        let call = |method, params| IpcRequest {
+            id: serde_json::json!(1),
+            method,
+            params,
+        };
+        let got = hub
+            .handle(call(Method::GetNet, serde_json::Value::Null))
+            .await;
+        let state: hako_core::net::NetState = serde_json::from_value(got.result.unwrap()).unwrap();
+        assert!(!state.enabled);
+        let ops = serde_json::json!({"ops": [{"op": "set_name", "name": "Desk"}]});
+        let set = hub.handle(call(Method::PatchNet, ops)).await;
+        assert_eq!(set.result.unwrap()["name"], "Desk");
+        let ops = serde_json::json!({"ops": [{"op": "forget", "id": "nope"}]});
+        let bad = hub.handle(call(Method::PatchNet, ops)).await;
+        assert_eq!(bad.error.unwrap().code, "invalid_value");
         close(hub);
     }
 

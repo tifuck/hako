@@ -31,6 +31,7 @@ use tracing::info;
 
 pub mod latency;
 pub mod meters;
+pub mod net;
 
 pub const CHATMIX_GAME: &str = "Hako_Game";
 pub const CHATMIX_CHAT: &str = "Hako_Chat";

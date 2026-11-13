@@ -37,6 +37,10 @@ pub enum Method {
     GetMixer,
     /// `PatchMixerParams`; returns the new `MixerState`.
     PatchMixer,
+    /// `NetState` (`crate::net`).
+    GetNet,
+    /// `PatchNetParams`; returns the new `NetState`.
+    PatchNet,
 }
 
 /// Server-pushed event types (`"type":"DeviceUpdated"`).
@@ -53,6 +57,8 @@ pub enum EventKind {
     Meters,
     /// The mixer file or its status changed; payload `MixerState`.
     MixerUpdated,
+    /// LAN audio peers, requests or link stats changed; payload `NetState`.
+    NetUpdated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

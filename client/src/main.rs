@@ -13,6 +13,7 @@ use hako_core::ipc::{
     Method, ProfileNameParams, SetManyParams, SetParams, SubscribeMetersParams,
 };
 use hako_core::mixer::{MixerState, PatchMixerParams};
+use hako_core::net::{NetState, PatchNetParams};
 use hako_core::remap::{
     CancelCaptureParams, ClearRemapParams, DeviceRemaps, SetRemapParams, StartCaptureParams,
 };
@@ -55,6 +56,8 @@ struct App {
     lost: bool,
     /// `ClientState::mixer_rev` the UI has seen.
     mixer_rev: u64,
+    /// `ClientState::net_rev` the UI has seen.
+    net_rev: u64,
     rt: Handle,
     /// `(owner/repo, installed binary)` when this build can update itself.
     updater: Option<(&'static str, PathBuf)>,
@@ -102,12 +105,23 @@ struct ClientState {
     mixer_rev: u64,
     /// `PatchMixer` calls sent and not yet answered.
     mixer_pending: usize,
+    /// Latest network state from `GetNet` / `PatchNet` / `NetUpdated`, or
+    /// why `GetNet` failed; `net_rev` counts changes.
+    net: Option<Result<NetState, String>>,
+    net_rev: u64,
+    /// `PatchNet` calls sent and not yet answered.
+    net_pending: usize,
 }
 
 impl ClientState {
     fn set_mixer(&mut self, m: Result<MixerState, String>) {
         self.mixer = Some(m);
         self.mixer_rev += 1;
+    }
+
+    fn set_net(&mut self, n: Result<NetState, String>) {
+        self.net = Some(n);
+        self.net_rev += 1;
     }
 }
 
@@ -189,6 +203,7 @@ fn main() -> Result<()> {
                         }
                     }
                     fetch_mixer(&mut stream, &state_bg).await;
+                    fetch_net(&mut stream, &state_bg).await;
                     let mut events = tokio::spawn(subscribe(socket.clone(), state_bg.clone()));
 
                     // Commands on this connection; a slow poll keeps health,
@@ -205,6 +220,7 @@ fn main() -> Result<()> {
                                     ClientCmd::Call(m, p, f) => (m, p, f),
                                 };
                                 let mixer_call = matches!(method, Method::GetMixer | Method::PatchMixer);
+                                let net_call = matches!(method, Method::GetNet | Method::PatchNet);
                                 let alive = match call(&mut stream, method, params).await {
                                     Some(resp) if mixer_call => {
                                         // A refused patch: show why, then reload what the daemon has.
@@ -215,6 +231,16 @@ fn main() -> Result<()> {
                                             fetch_mixer(&mut stream, &state_bg).await
                                         } else {
                                             state_bg.lock().unwrap().set_mixer(mixer_result(resp));
+                                            true
+                                        }
+                                    }
+                                    Some(resp) if net_call => {
+                                        if method == Method::PatchNet && !resp.ok {
+                                            let why = resp.error.map_or_else(|| "no reason given".into(), |e| e.message);
+                                            state_bg.lock().unwrap().notices.push((Tone::Error, format!("{}: {why}", feedback.failed)));
+                                            fetch_net(&mut stream, &state_bg).await
+                                        } else {
+                                            state_bg.lock().unwrap().set_net(net_result(resp));
                                             true
                                         }
                                     }
@@ -248,6 +274,9 @@ fn main() -> Result<()> {
                                     s.pending -= 1;
                                     if method == Method::PatchMixer {
                                         s.mixer_pending -= 1;
+                                    }
+                                    if method == Method::PatchNet {
+                                        s.net_pending -= 1;
                                     }
                                 }
                                 if !alive {
@@ -284,6 +313,7 @@ fn main() -> Result<()> {
         was_online: false,
         lost: false,
         mixer_rev: 0,
+        net_rev: 0,
         rt: rt.handle().clone(),
         updater,
         meters: meters.clone(),
@@ -332,6 +362,15 @@ impl eframe::App for App {
                 match &st.mixer {
                     Some(Ok(m)) => self.ui.mixer.receive(m.clone()),
                     Some(Err(e)) => self.ui.mixer.unavailable(e.clone()),
+                    None => {}
+                }
+            }
+            self.ui.net.busy = st.net_pending > 0;
+            if st.net_rev != self.net_rev {
+                self.net_rev = st.net_rev;
+                match &st.net {
+                    Some(Ok(n)) => self.ui.net.receive(n.clone()),
+                    Some(Err(e)) => self.ui.net.unavailable(e.clone()),
                     None => {}
                 }
             }
@@ -505,12 +544,25 @@ impl eframe::App for App {
                     to(serde_json::to_value(PatchMixerParams { ops })),
                     Feedback::quiet("Couldn't change the mixer"),
                 ),
+                UiCommand::GetNet => ClientCmd::Call(
+                    Method::GetNet,
+                    serde_json::Value::Null,
+                    Feedback::quiet("Couldn't load network audio"),
+                ),
+                UiCommand::PatchNet(ops) => ClientCmd::Call(
+                    Method::PatchNet,
+                    to(serde_json::to_value(PatchNetParams { ops })),
+                    Feedback::quiet("Couldn't change network audio"),
+                ),
             };
             if let ClientCmd::Call(method, ..) = &cmd {
                 let mut s = self.state.lock().unwrap();
                 s.pending += 1;
                 if *method == Method::PatchMixer {
                     s.mixer_pending += 1;
+                }
+                if *method == Method::PatchNet {
+                    s.net_pending += 1;
                 }
             }
             let _ = self.cmd_tx.send(cmd);
@@ -742,6 +794,29 @@ async fn fetch_mixer(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -
     true
 }
 
+/// A `GetNet` / `PatchNet` answer: the state, or why there is none (an
+/// older hakod answers `unsupported`).
+fn net_result(resp: IpcResponse) -> Result<NetState, String> {
+    match (resp.result, resp.error) {
+        (Some(r), _) if resp.ok => serde_json::from_value(r).map_err(|e| {
+            format!("hakod sent a network state this UI cannot read ({e}); update both")
+        }),
+        (_, Some(e)) if e.code == "unsupported" => {
+            Err("This hakod has no network audio yet. Update hako to use it.".into())
+        }
+        (_, e) => Err(e.map_or_else(|| "no reason given".into(), |e| e.message)),
+    }
+}
+
+/// Reload network audio. Returns false when the connection dropped.
+async fn fetch_net(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> bool {
+    let Some(resp) = call(stream, Method::GetNet, serde_json::Value::Null).await else {
+        return false;
+    };
+    state.lock().unwrap().set_net(net_result(resp));
+    true
+}
+
 /// Event stream on its own connection; snapshots are applied in place.
 async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
     let Ok(mut stream) = UnixStream::connect(&socket).await else {
@@ -772,6 +847,12 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
         if ev.kind == EventKind::MixerUpdated {
             if let Ok(m) = serde_json::from_value::<MixerState>(ev.payload) {
                 s.set_mixer(Ok(m));
+            }
+            continue;
+        }
+        if ev.kind == EventKind::NetUpdated {
+            if let Ok(n) = serde_json::from_value::<NetState>(ev.payload) {
+                s.set_net(Ok(n));
             }
             continue;
         }
@@ -806,7 +887,8 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
             EventKind::RemapCaptured
             | EventKind::DaemonShuttingDown
             | EventKind::Meters
-            | EventKind::MixerUpdated => {}
+            | EventKind::MixerUpdated
+            | EventKind::NetUpdated => {}
         }
     }
 }

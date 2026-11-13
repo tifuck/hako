@@ -543,6 +543,22 @@ impl Scene {
                         i.id, s.node
                     ));
                 }
+                // A peer's audio sent straight back to it echoes at once.
+                for s in sources {
+                    let Some((peer, false)) = crate::net::peer_of_node(&s.node) else {
+                        continue;
+                    };
+                    let back = crate::net::send_node(peer);
+                    if let Some(o) = self.outputs.iter().find(|o| {
+                        i.routes.contains(&o.id)
+                            && matches!(&o.kind, OutputKind::Hardware { sink, .. } if *sink == back)
+                    }) {
+                        return Err(format!(
+                            "input {} plays the network audio it receives back to its sender ({}): echo",
+                            i.id, o.id
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -880,6 +896,52 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.contains("feedback"), "{err}");
+    }
+
+    #[test]
+    fn a_peer_s_audio_cannot_route_straight_back_to_it() {
+        let mut m = sample();
+        let id = "0011223344556677";
+        m.apply(&MixerOp::PutOutput {
+            output: out(
+                "A2",
+                OutputKind::Hardware {
+                    sink: crate::net::send_node(id),
+                    description: "hako to Desktop".into(),
+                },
+            ),
+        })
+        .unwrap();
+        let recv = crate::net::recv_node(id);
+        m.apply(&MixerOp::PutInput {
+            input: hw("desk", &[recv.as_str()], &["A1"]),
+        })
+        .unwrap();
+        let err = m
+            .apply(&MixerOp::SetRoute {
+                input: "desk".into(),
+                output: "A2".into(),
+                on: true,
+            })
+            .unwrap_err();
+        assert!(err.contains("echo"), "{err}");
+        // Another peer's network rack is fine.
+        m.apply(&MixerOp::PutOutput {
+            output: out(
+                "A3",
+                OutputKind::Hardware {
+                    sink: crate::net::send_node("8899aabbccddeeff"),
+                    description: String::new(),
+                },
+            ),
+        })
+        .unwrap();
+        m.apply(&MixerOp::SetRoute {
+            input: "desk".into(),
+            output: "A3".into(),
+            on: true,
+        })
+        .unwrap();
     }
 
     #[test]

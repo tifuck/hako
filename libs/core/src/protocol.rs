@@ -2,6 +2,7 @@
 
 use crate::device::{DeviceId, DeviceSnapshot};
 use crate::mixer::MixerState;
+use crate::net::NetState;
 use crate::remap::{DeviceRemaps, RemapCaptured};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,8 @@ pub enum AdapterEvent {
     RemapCaptured(RemapCaptured),
     /// The mixer file or its status changed.
     MixerUpdated(Box<MixerState>),
+    /// LAN audio state changed.
+    NetUpdated(Box<NetState>),
     /// Daemon is stopping; subscribers should disconnect.
     ShuttingDown,
 }

@@ -290,6 +290,7 @@ fn to_ipc_event(ev: AdapterEvent) -> Result<IpcEvent> {
         AdapterEvent::RemapsUpdated(s) => (EventKind::RemapsUpdated, serde_json::to_value(s)?),
         AdapterEvent::RemapCaptured(s) => (EventKind::RemapCaptured, serde_json::to_value(s)?),
         AdapterEvent::MixerUpdated(s) => (EventKind::MixerUpdated, serde_json::to_value(s)?),
+        AdapterEvent::NetUpdated(s) => (EventKind::NetUpdated, serde_json::to_value(s)?),
         AdapterEvent::Error { message, .. } => {
             (EventKind::Error, serde_json::json!({ "message": message }))
         }

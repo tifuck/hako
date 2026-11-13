@@ -206,6 +206,19 @@ mixer on with line-in already in it.
 hako only manages its own nodes. It remembers your default output and puts it
 back when it stops, and `hakod --reset-audio` is a one-command kill switch.
 
+### Audio between computers
+
+**Audio → Network** streams audio between two Linux computers running hako on
+the same network, both ways. Turn it on on both, press **Pair** on one and
+**Accept** on the other (both show the same 6-digit code: check it matches).
+Each paired computer then appears in the mixer as an output device
+(*hako to Desktop*: route any inputs to it) and an input source (*hako from
+Laptop*: route it to any outputs); other apps can use them too. Audio is
+uncompressed 48 kHz and encrypted end to end (Noise protocol, keys pinned at
+pairing); expect about 20 ms on a wired network with the default buffer.
+Network is off until you turn it on; a firewall must allow 47820/udp and
+47821/tcp+udp.
+
 ### Make it yours
 
 <img src="docs/screenshots/themes.png" alt="The same page in the Onyx, Graphite, Synthwave and Daylight themes" width="100%">

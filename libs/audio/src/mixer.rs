@@ -519,11 +519,13 @@ pub struct DeviceInfo {
     pub alsa_card: Option<String>,
 }
 
-/// Node names hako makes (its own prefixes) are never offered as devices.
+/// Node names hako makes (its own prefixes) are never offered as devices,
+/// except network peers' nodes (`hako_net.`): they are the network racks.
 fn is_hako_node(name: &str) -> bool {
-    ["hako_", "Hako_", "hako-"]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    !name.starts_with(hako_core::net::NODE_PREFIX)
+        && ["hako_", "Hako_", "hako-"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 /// Sources and sinks in `graph`, without hako's own nodes and `created`
@@ -1858,6 +1860,12 @@ mod tests {
         assert_eq!(list[1].device.direction, DeviceDirection::Sink);
         assert_eq!(list[0].alsa_card.as_deref(), Some("4"));
         assert_eq!(list[1].alsa_card, None);
+        // A network peer's nodes are offered: they are the network racks.
+        let net = graph_with(&[
+            ("hako_net.0011223344556677.recv", "Audio/Source", &[]),
+            ("hako_net.0011223344556677.send", "Audio/Sink", &[]),
+        ]);
+        assert_eq!(device_list(&net, &[]).len(), 2);
     }
 
     fn info(node: &str, direction: DeviceDirection, card: &str) -> DeviceInfo {

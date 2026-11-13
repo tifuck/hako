@@ -8,6 +8,7 @@ use hako_core::catalog::{SettingGroup, SettingKey, SettingMeta, SettingValue};
 use hako_core::device::{DeviceKind, DeviceSnapshot, HubState};
 use hako_core::ipc::{AppSettings, MeterTargetSpec};
 use hako_core::mixer::MixerOp;
+use hako_core::net::NetOp;
 use hako_core::remap::{CaptureRole, DeviceRemaps, EvdevKey, RemapBinding};
 use hako_core::DeviceId;
 
@@ -16,6 +17,7 @@ pub mod bindings;
 pub mod brand;
 pub mod controls;
 pub mod mixer;
+pub mod net;
 pub mod theme;
 pub mod widgets;
 
@@ -77,6 +79,10 @@ pub enum UiCommand {
     GetMixer,
     /// Mixer edits, applied in order, all or nothing.
     PatchMixer(Vec<MixerOp>),
+    /// Reload network audio (`HakoAppUi::net` gets the answer).
+    GetNet,
+    /// Network edits, applied in order.
+    PatchNet(Vec<NetOp>),
 }
 
 pub struct HakoAppUi {
@@ -95,6 +101,10 @@ pub struct HakoAppUi {
     /// Mixer page active instead of a device page (settings still win).
     pub show_mixer: bool,
     pub mixer: mixer::MixerUi,
+    /// Network page active instead of a device page (settings still win;
+    /// never together with `show_mixer`).
+    pub show_net: bool,
+    pub net: net::NetUi,
     /// Newer release found by the client's update check.
     pub update: Option<widgets::UpdateOffer>,
     /// Commands sent but not yet answered (with the state after them);
@@ -120,6 +130,8 @@ impl Default for HakoAppUi {
             show_settings: false,
             show_mixer: false,
             mixer: mixer::MixerUi::default(),
+            show_net: false,
+            net: net::NetUi::default(),
             update: None,
             pending: false,
             meter_targets: Vec::new(),
@@ -146,6 +158,7 @@ impl HakoAppUi {
         controls::set_pending(ctx, self.pending);
         self.meter_targets.clear();
         self.mixer.sync(ctx.dragged_id().is_some());
+        self.net_frame(ctx.dragged_id().is_some());
         self.ensure_selection();
         self.top_bar(ctx, out);
         self.rail(ctx, out);
@@ -172,6 +185,11 @@ impl HakoAppUi {
                         if mixer_page {
                             widgets::page_transition(ui, "mixer");
                             self.mixer_page(ui, out);
+                            return;
+                        }
+                        if self.show_net {
+                            widgets::page_transition(ui, "net");
+                            self.net_page(ui, out);
                             return;
                         }
                         let device = self.selected.as_ref().and_then(|id| {
@@ -405,6 +423,7 @@ impl HakoAppUi {
                 for d in &devices {
                     let selected = !self.show_settings
                         && !self.show_mixer
+                        && !self.show_net
                         && self.selected.as_ref() == Some(&d.id);
                     let resp = rail_entry(ui, d, selected);
                     if selected {
@@ -414,6 +433,7 @@ impl HakoAppUi {
                         self.selected = Some(d.id.clone());
                         self.show_settings = false;
                         self.show_mixer = false;
+                        self.show_net = false;
                     }
                 }
 
@@ -431,6 +451,21 @@ impl HakoAppUi {
                         out.push(UiCommand::GetMixer);
                     }
                     self.show_mixer = true;
+                    self.show_net = false;
+                    self.show_settings = false;
+                }
+                let selected = self.show_net && !self.show_settings;
+                let (status, dot) = self.net.rail_status();
+                let resp = rail_item(ui, selected, "Network", &status, dot, net::icon_network);
+                if selected {
+                    target = Some(resp.rect);
+                }
+                if resp.clicked() {
+                    if !selected {
+                        out.push(UiCommand::GetNet);
+                    }
+                    self.show_net = true;
+                    self.show_mixer = false;
                     self.show_settings = false;
                 }
                 if let Some(r) = target {
