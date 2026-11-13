@@ -22,13 +22,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
       # No build cache here: a release must not restore state other runs wrote.
       - name: System deps (egui/winit, PipeWire bindings)
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang pkg-config pipewire-bin libpipewire-0.3-modules
+      - name: PipeWire 1.0 headers, 0.3.48 library
+        run: packaging/pipewire-headers.sh "$RUNNER_TEMP/pw" >> "$GITHUB_ENV"
       - name: Tag matches workspace version
         run: |
           v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml v$v"; exit 1; }
       - run: scripts/check-public.sh
       - run: cargo test --workspace --locked
+      - name: Audio engine against PipeWire 0.3.48
+        # Release mode: pipewire-rs debug-asserts on 0.3.x sequence numbers.
+        run: |
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$RUNNER_TEMP/xdg}"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          cargo test --release --locked -p hako-audio live_engine_reconnects -- --ignored --exact engine::tests::live_engine_reconnects
       - name: Build
         # Embeds owner/repo so installed builds know where to look for updates.
         env:
@@ -36,7 +44,8 @@ jobs:
         run: cargo build --release --locked --workspace
       - name: Smoke test binaries
         run: |
-          target/release/hakod --version
+          # Every PipeWire function must resolve against the runner's 0.3.48.
+          LD_BIND_NOW=1 target/release/hakod --version
           target/release/hako --version
           if ldd target/release/hako target/release/hakod | grep 'not found'; then exit 1; fi
       - name: Package

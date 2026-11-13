@@ -619,18 +619,24 @@ impl Conn {
 
         // Two round trips: the first returns every global, the second the
         // info of the nodes bound while handling them.
-        let pending = Rc::new(Cell::new(Some(core.sync(0)?)));
+        // Compared by sequence number: PipeWire 0.3.x reports `done` without
+        // the async bit that `sync` returns, newer versions keep it.
+        let pending = Rc::new(Cell::new(Some(core.sync(0)?.seq())));
         let rounds = Rc::new(Cell::new(0));
         let core_listener = {
             let (weak, shared, dead) = (core.downgrade(), shared.clone(), dead.clone());
             core.add_listener_local()
                 .done(move |id, seq| {
-                    if id != pw::core::PW_ID_CORE || pending.get() != Some(seq) {
+                    if id != pw::core::PW_ID_CORE || pending.get() != Some(seq.seq()) {
                         return;
                     }
                     rounds.set(rounds.get() + 1);
                     if rounds.get() == 1 {
-                        pending.set(weak.upgrade().and_then(|core| core.sync(0).ok()));
+                        pending.set(
+                            weak.upgrade()
+                                .and_then(|core| core.sync(0).ok())
+                                .map(|seq| seq.seq()),
+                        );
                     } else {
                         pending.set(None);
                         shared.update(|graph| {
