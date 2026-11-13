@@ -1,11 +1,14 @@
-//! `hakod --latency-test`: how much latency the AUX processing chain adds
-//! over a direct link, measured in software on the live PipeWire graph.
+//! `hakod --latency-test`: how much latency the AUX processing chain or a
+//! mixer path adds over a direct link, measured in software on the live
+//! PipeWire graph.
 //!
-//! A generator stream plays short noise bursts into the default AUX chain
-//! (gate, EQ, compressor; the same `generate_dsp_config` output in a
-//! `pipewire -c` child, as AUX runs it) and straight into channel 1 of one
-//! capture stream; the chain's output feeds channel 2. Both channels arrive
-//! in the same buffers, so the offset between them is the added latency.
+//! A generator stream plays short noise bursts into the path under test and
+//! straight into channel 1 of one capture stream; the path's output feeds
+//! channel 2. Both channels arrive in the same buffers, so the offset between
+//! them is the added latency. The AUX path is the default chain (gate, EQ,
+//! compressor; the same `generate_dsp_config` output in a `pipewire -c`
+//! child, as AUX runs it); the mixer path is a virtual input strip with that
+//! chain routed to a virtual output (`MixerGraph`, as the mixer runs them).
 //!
 //! No test audio reaches a device: every node is `hako-test-latency-<pid>-*`,
 //! none autoconnects, links are this process's own (they die with it), and
@@ -13,21 +16,21 @@
 //! touch the test nodes. A foreign link at any point aborts the run.
 
 use crate::engine::{engine, Direction, Graph, LinkHandle};
+use crate::mixer::{MixerGraph, Naming};
 use crate::{
     ensure_running, find_lsp_ladspa, generate_dsp_config, ladspa_dirs, meters, node_latency,
-    stop_child, LSP_LADSPA, NODE_WAIT, PLAYBACK,
+    spawn_pipewire, stop_child, write_conf, LSP_LADSPA, NODE_WAIT,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use hako_core::ipc::{AuxEffect, AuxEffectChain, AuxEffectKind};
+use hako_core::mixer::{Input, InputKind, Output, OutputKind, Scene};
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
 use std::collections::HashSet;
 use std::fmt;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -52,15 +55,27 @@ const MIN_BURSTS: usize = 3;
 const SETTLE: Duration = Duration::from_millis(500);
 const STRIDE: usize = 8;
 
+/// What the bursts go through.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LatencyPath {
+    /// The line-in's processing chain.
+    #[default]
+    Aux,
+    /// A mixer virtual input (that chain) routed to a virtual output.
+    Mixer,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct LatencyTestOptions {
     /// `node.latency` in samples at 48 kHz (an `audio_latency` preset).
     pub latency: u32,
     pub seconds: u32,
+    pub path: LatencyPath,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct LatencyReport {
+    pub path: LatencyPath,
     pub requested: u32,
     /// Smallest and largest capture buffer seen while measuring, in frames.
     pub quantum: Option<(u32, u32)>,
@@ -136,10 +151,11 @@ impl LatencyReport {
 
 impl fmt::Display for LatencyReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(
-            f,
-            "hako latency test: AUX chain (gate, EQ, compressor) vs a direct link"
-        )?;
+        let path = match self.path {
+            LatencyPath::Aux => "AUX chain (gate, EQ, compressor)",
+            LatencyPath::Mixer => "mixer input (gate, EQ, compressor) -> virtual output",
+        };
+        writeln!(f, "hako latency test: {path} vs a direct link")?;
         writeln!(
             f,
             "  requested  node.latency {}",
@@ -226,22 +242,8 @@ impl Dsp {
             .ok_or_else(|| anyhow!("LSP LADSPA plugins not installed ({LSP_LADSPA} not found)"))?;
         let config = generate_dsp_config(sink, None, &default_chain(), latency, Some(&lsp))?;
         let conf = hako_core::default_socket_path().with_file_name(format!("{sink}.conf"));
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&conf)
-            .and_then(|mut f| f.write_all(config.as_bytes()))
-            .with_context(|| format!("write {}", conf.display()))?;
-        let child = Command::new("pipewire")
-            .arg("-c")
-            .arg(&conf)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        match child {
+        write_conf(&conf, &config)?;
+        match spawn_pipewire(&conf) {
             Ok(child) => Ok(Self { child, conf }),
             Err(error) => {
                 let _ = std::fs::remove_file(&conf);
@@ -249,6 +251,54 @@ impl Dsp {
             }
         }
     }
+}
+
+/// A mixer with one virtual input (the default chain) routed to one virtual
+/// output, its nodes named `prefix*`: `(graph, input sink, output source,
+/// its stream nodes)`.
+fn test_mixer(prefix: &str, latency: u32) -> Result<(MixerGraph, String, String, Vec<String>)> {
+    let (sink, source) = (format!("{prefix}vin"), format!("{prefix}vout"));
+    let scene = Scene {
+        inputs: vec![Input {
+            id: "t".into(),
+            label: "latency test".into(),
+            kind: InputKind::Virtual {
+                node_name: sink.clone(),
+            },
+            chain: default_chain(),
+            gain_db: 0.0,
+            mute: false,
+            solo: false,
+            routes: vec!["B1".into()],
+            chatmix: None,
+        }],
+        outputs: vec![Output {
+            id: "B1".into(),
+            label: "latency test out".into(),
+            kind: OutputKind::Virtual {
+                node_name: source.clone(),
+            },
+            chain: AuxEffectChain::default(),
+            gain_db: 0.0,
+            mute: false,
+            mono: false,
+        }],
+    };
+    scene.validate().map_err(anyhow::Error::msg)?;
+    let mut graph = MixerGraph::new(
+        Naming {
+            nodes: prefix.into(),
+            files: prefix.into(),
+            args: String::new(),
+        },
+        latency,
+    );
+    graph.reconcile(&scene, (1.0, 1.0));
+    if let Some(problem) = graph.problems().first() {
+        bail!("test mixer: {}: {}", problem.strip, problem.message);
+    }
+    let streams = vec![format!("{prefix}in_t"), format!("{prefix}out_B1")];
+    Ok((graph, sink, source, streams))
 }
 
 impl Drop for Dsp {
@@ -471,13 +521,14 @@ fn foreign_links(graph: &Graph, prefix: &str, ours: &[u32]) -> Vec<String> {
 /// The test's PipeWire loop plus what every wait must keep checking.
 struct Session<'a> {
     mainloop: pw::main_loop::MainLoopRc,
-    dsp: Dsp,
+    dsp: Option<Dsp>,
+    mixer: Option<MixerGraph>,
     stop: &'a AtomicBool,
 }
 
 impl Session<'_> {
     /// Run the loop until `ready` holds for the registry cache or `timeout`
-    /// passes; fails at once on Ctrl-C / SIGTERM or when the DSP child exits.
+    /// passes; fails at once on Ctrl-C / SIGTERM or when a DSP child exits.
     fn pump(
         &mut self,
         timeout: Duration,
@@ -492,7 +543,12 @@ impl Session<'_> {
             if self.stop.load(Ordering::Relaxed) {
                 bail!("interrupted");
             }
-            ensure_running(&mut self.dsp.child, "test filter graph")?;
+            if let Some(dsp) = self.dsp.as_mut() {
+                ensure_running(&mut dsp.child, "test filter graph")?;
+            }
+            if let Some(mixer) = self.mixer.as_mut() {
+                mixer.ensure_running()?;
+            }
             if engine.with_graph(|graph| ready(graph))? {
                 return Ok(true);
             }
@@ -504,19 +560,40 @@ impl Session<'_> {
 }
 
 /// Measure, then tear everything down (on every path: streams and links drop
-/// with this frame, the DSP child with `Session`). `stop` aborts the run.
+/// with this frame, the DSP children with `Session`). `stop` aborts the run.
 pub fn run_latency_test(opts: &LatencyTestOptions, stop: &AtomicBool) -> Result<LatencyReport> {
     let engine = engine()?;
     let prefix = format!("hako-test-latency-{}-", std::process::id());
-    let [gen, cap, dsp] = ["gen", "capture", "dsp"].map(|part| format!("{prefix}{part}"));
-    let dsp_out = format!("{dsp}_out");
+    let [gen, cap] = ["gen", "capture"].map(|part| format!("{prefix}{part}"));
     let latency = node_latency(opts.latency);
 
     pw::init();
-    let mut session = Session {
-        mainloop: pw::main_loop::MainLoopRc::new(None)?,
-        dsp: Dsp::spawn(&dsp, opts.latency)?,
-        stop,
+    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
+    // The path: where the bursts go in, where they come out, its stream
+    // nodes (never autoconnected) and the links it made itself.
+    let (mut session, into, from, streams, path_links) = match opts.path {
+        LatencyPath::Aux => {
+            let dsp = format!("{prefix}dsp");
+            let session = Session {
+                mainloop,
+                dsp: Some(Dsp::spawn(&dsp, opts.latency)?),
+                mixer: None,
+                stop,
+            };
+            let out = format!("{dsp}_out");
+            (session, dsp, out.clone(), vec![out], Vec::new())
+        }
+        LatencyPath::Mixer => {
+            let (mixer, sink, source, streams) = test_mixer(&prefix, opts.latency)?;
+            let links = mixer.link_ids();
+            let session = Session {
+                mainloop,
+                dsp: None,
+                mixer: Some(mixer),
+                stop,
+            };
+            (session, sink, source, streams, links)
+        }
     };
     let context = pw::context::ContextRc::new(&session.mainloop, None)?;
     let core = context.connect_rc(None)?;
@@ -530,19 +607,24 @@ pub fn run_latency_test(opts: &LatencyTestOptions, stop: &AtomicBool) -> Result<
     let _generator = generator(&core, &gen, &latency, go.clone())?;
     let _capture = capture(&core, &cap, &latency, go.clone(), recording.clone())?;
 
-    const OUTPUTS: [&str; 2] = ["output_FL", "output_FR"];
+    let stereo = |graph: &Graph, node: &str, direction| {
+        ["FL", "FR"]
+            .iter()
+            .all(|channel| graph.channel_port(node, channel, direction).is_some())
+    };
     let ready = session.pump(NODE_WAIT, |graph| {
-        Ok(graph.has_ports(&gen, Direction::Out, &OUTPUTS)
-            && graph.has_ports(&cap, Direction::In, &["input_FL", "input_FR"])
-            && graph.has_ports(&dsp, Direction::In, &PLAYBACK)
-            && graph.has_ports(&dsp_out, Direction::Out, &OUTPUTS))
+        Ok(stereo(graph, &gen, Direction::Out)
+            && stereo(graph, &cap, Direction::In)
+            && stereo(graph, &into, Direction::In)
+            && stereo(graph, &from, Direction::Out))
     })?;
     if !ready {
         bail!("the test nodes did not appear");
     }
     let autoconnecting: Vec<String> = engine.with_graph(|graph| {
-        [&gen, &cap, &dsp_out]
+        [&gen, &cap]
             .into_iter()
+            .chain(&streams)
             .filter(|name| {
                 graph.node_id(name).is_none_or(|id| {
                     graph.nodes[&id]
@@ -572,30 +654,30 @@ pub fn run_latency_test(opts: &LatencyTestOptions, stop: &AtomicBool) -> Result<
             Ok(false)
         }
     };
-    session.pump(SETTLE, isolated(&[]))?;
+    session.pump(SETTLE, isolated(&path_links))?;
 
     let pairs = [
-        ((&gen, "output_FL"), (&dsp, "playback_FL")),
-        ((&gen, "output_FR"), (&dsp, "playback_FR")),
-        ((&gen, "output_FL"), (&cap, "input_FL")),
-        ((&dsp_out, "output_FL"), (&cap, "input_FR")),
+        ((&gen, "FL"), (&into, "FL")),
+        ((&gen, "FR"), (&into, "FR")),
+        ((&gen, "FL"), (&cap, "FL")),
+        ((&from, "FL"), (&cap, "FR")),
     ];
     let mut links: Vec<LinkHandle> = Vec::new();
-    for ((out_node, out_port), (in_node, in_port)) in pairs {
+    for ((out_node, out_channel), (in_node, in_channel)) in pairs {
         let ports = engine.with_graph(|graph| {
             graph
-                .port(out_node, out_port, Direction::Out)
-                .zip(graph.port(in_node, in_port, Direction::In))
+                .channel_port(out_node, out_channel, Direction::Out)
+                .zip(graph.channel_port(in_node, in_channel, Direction::In))
         });
-        let (output, input) =
-            ports.ok_or_else(|| anyhow!("{out_node}:{out_port} or {in_node}:{in_port} is gone"))?;
+        let (output, input) = ports
+            .ok_or_else(|| anyhow!("{out_node}:{out_channel} or {in_node}:{in_channel} is gone"))?;
         links.push(
-            engine
-                .link(output, input)
-                .with_context(|| format!("link {out_node}:{out_port} -> {in_node}:{in_port}"))?,
+            engine.link(output, input).with_context(|| {
+                format!("link {out_node}:{out_channel} -> {in_node}:{in_channel}")
+            })?,
         );
     }
-    let ids: Vec<u32> = links.iter().map(|link| link.id).collect();
+    let ids: Vec<u32> = links.iter().map(|link| link.id).chain(path_links).collect();
     session.pump(Duration::ZERO, isolated(&ids))?;
     go.store(true, Ordering::Relaxed);
     let check = isolated(&ids);
@@ -632,6 +714,7 @@ pub fn run_latency_test(opts: &LatencyTestOptions, stop: &AtomicBool) -> Result<
     let rec = std::mem::take(&mut *recording.lock().unwrap_or_else(PoisonError::into_inner));
     let found = burst_offsets(&rec.reference, &rec.processed, MAX_LAG);
     Ok(LatencyReport {
+        path: opts.path,
         requested: opts.latency,
         quantum: rec.quantum,
         rate: rec.rate,
@@ -690,6 +773,7 @@ fn burst_offsets(reference: &[f32], processed: &[f32], max_lag: usize) -> Vec<Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     const LAG: usize = 1024;
 
@@ -810,9 +894,20 @@ mod tests {
     #[test]
     #[ignore = "needs a live PipeWire session and LSP plugins"]
     fn live_balanced_chain_adds_at_most_one_quantum() {
+        live_path_adds_at_most_one_quantum(LatencyPath::Aux);
+    }
+
+    #[test]
+    #[ignore = "needs a live PipeWire session and LSP plugins"]
+    fn live_balanced_mixer_adds_at_most_one_quantum() {
+        live_path_adds_at_most_one_quantum(LatencyPath::Mixer);
+    }
+
+    fn live_path_adds_at_most_one_quantum(path: LatencyPath) {
         let opts = LatencyTestOptions {
             latency: hako_core::ipc::audio_latency_samples("balanced").unwrap(),
             seconds: 5,
+            path,
         };
         let report = run_latency_test(&opts, &AtomicBool::new(false)).unwrap();
         println!("{report}");

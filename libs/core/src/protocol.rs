@@ -1,6 +1,7 @@
 //! Adapter trait surface shared conceptually with the daemon (types only).
 
 use crate::device::{DeviceId, DeviceSnapshot};
+use crate::mixer::MixerState;
 use crate::remap::{DeviceRemaps, RemapCaptured};
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +18,8 @@ pub enum AdapterEvent {
     },
     RemapsUpdated(DeviceRemaps),
     RemapCaptured(RemapCaptured),
+    /// The mixer file or its status changed.
+    MixerUpdated(Box<MixerState>),
     /// Daemon is stopping; subscribers should disconnect.
     ShuttingDown,
 }

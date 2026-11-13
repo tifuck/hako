@@ -8,6 +8,7 @@
 //! The line-in mixer controls use `amixer`.
 
 mod engine;
+pub mod mixer;
 
 use anyhow::{anyhow, bail, Context, Result};
 use engine::{engine, Direction, LinkHandle};
@@ -165,6 +166,15 @@ struct AudioState {
     chatmix_suppressed: bool,
     /// `node.latency` of hako's nodes, in samples at 48 kHz.
     latency: u32,
+    /// The mixer owns ChatMix and the line-in (`hand_over`): neither is built
+    /// while set; the ChatMix dial goes to the mixer.
+    handed_over: bool,
+    /// ChatMix's sink when the mixer took over, to bring it back on that sink.
+    parked_sink: Option<String>,
+    /// The last ChatMix dial position (game, chat), 0..1.
+    dial: Option<(f32, f32)>,
+    /// The mixer runs a `Hako_Game` sink (the default-sink preference's target).
+    mixer_game: bool,
 }
 
 /// What status reads see: refreshed each time the audio lock is released,
@@ -235,11 +245,13 @@ impl Drop for StateGuard<'_> {
 }
 
 type ErrorHook = Box<dyn Fn(String) + Send + Sync>;
+type DialHook = Box<dyn Fn(f32, f32) + Send + Sync>;
 
 pub struct AudioService {
     state: Mutex<AudioState>,
     status: Mutex<Status>,
     on_error: OnceLock<ErrorHook>,
+    on_dial: OnceLock<DialHook>,
 }
 
 impl AudioService {
@@ -256,10 +268,98 @@ impl AudioService {
                 chatmix_set_default: true,
                 chatmix_suppressed: false,
                 latency: DEFAULT_LATENCY,
+                handed_over: false,
+                parked_sink: None,
+                dial: None,
+                mixer_game: false,
             }),
             status: Mutex::new(Status::default()),
             on_error: OnceLock::new(),
+            on_dial: OnceLock::new(),
         }
+    }
+
+    /// Called with each ChatMix dial position (game, chat) while the mixer
+    /// owns ChatMix (under the audio lock: it must not block). Set once.
+    pub fn on_dial(&self, hook: impl Fn(f32, f32) + Send + Sync + 'static) {
+        let _ = self.on_dial.set(Box::new(hook));
+    }
+
+    /// The last ChatMix dial position (game, chat); centred until reported.
+    pub fn chatmix_dial(&self) -> (f32, f32) {
+        self.state().dial.unwrap_or((1.0, 1.0))
+    }
+
+    /// The headset sink ChatMix plays into (or did, before the mixer took over).
+    pub fn chatmix_sink(&self) -> Option<String> {
+        let state = self.state();
+        state.chatmix.sink.clone().or(state.parked_sink.clone())
+    }
+
+    /// The mixer takes ChatMix and the line-in over (`on`) or gives them back.
+    /// Taking over stops the ChatMix loopbacks and the line-in links / DSP;
+    /// the default-sink claim and the line-in's input selection stay, so the
+    /// mixer's `Hako_Game` and line-in strip pick up where they left off.
+    /// Giving back rebuilds both as they were.
+    pub fn hand_over(&self, on: bool) -> Result<()> {
+        let mut state = self.state();
+        if state.handed_over == on {
+            return Ok(());
+        }
+        state.handed_over = on;
+        if on {
+            state.parked_sink = state.chatmix.sink.clone();
+            cleanup_chatmix_children(&mut state.chatmix);
+            if let Some(aux) = state.aux.as_mut() {
+                cleanup_aux_parts(&mut aux.handles, &mut aux.dsp);
+            }
+            info!("ChatMix and AUX handed over to the mixer");
+            seen(&mut state);
+            return Ok(());
+        }
+        state.mixer_game = false;
+        let mut result = Ok(());
+        if let Some(sink) = state.parked_sink.take() {
+            if !state.chatmix_suppressed && !state.chatmix.active() {
+                let chatmix =
+                    start_chatmix_locked(&mut state, &sink).and_then(|()| match state.dial {
+                        Some((game, chat)) => set_chatmix_volumes_now(game, chat)
+                            .map(|()| state.chatmix.volumes = Some((game, chat))),
+                        None => Ok(()),
+                    });
+                record_result(&mut state.chatmix_error, &chatmix);
+                result = chatmix;
+            }
+        }
+        if state.aux.is_some() {
+            let aux = rebuild_aux_locked(&mut state);
+            record_result(&mut state.aux_error, &aux);
+            result = result.and(aux);
+        }
+        info!("ChatMix and AUX back from the mixer");
+        seen(&mut state);
+        result
+    }
+
+    /// While the mixer owns ChatMix: whether it runs a `Hako_Game` sink. With
+    /// the default-sink preference on, that sink is claimed like ChatMix's.
+    pub fn mixer_default(&self, game: bool) -> Result<()> {
+        let mut state = self.state();
+        if !state.handed_over {
+            return Ok(());
+        }
+        state.mixer_game = game;
+        let held = state.defaults.held() == Some(CHATMIX_GAME);
+        let result = if game && state.chatmix_set_default && !held {
+            claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
+        } else if !game && held {
+            release_default(&mut state.defaults, DefaultOwner::ChatMix)
+        } else {
+            Ok(())
+        };
+        record_result(&mut state.chatmix_error, &result);
+        seen(&mut state);
+        result
     }
 
     /// Called (under the audio lock: it must not block) with each new ChatMix /
@@ -360,6 +460,10 @@ impl AudioService {
             return Ok(());
         }
         state.latency = samples;
+        // Built with the new latency when the mixer gives them back.
+        if state.handed_over {
+            return Ok(());
+        }
         let mut result = Ok(());
         if state.chatmix.active() {
             let chatmix = restart_chatmix_locked(&mut state);
@@ -384,7 +488,7 @@ impl AudioService {
     /// the kill-switch suppressed it. Already up (for any headset): no-op.
     pub fn ensure_chatmix(&self, sink_regexes: &[&str]) -> Result<()> {
         let mut state = self.state();
-        if state.chatmix.active() || state.chatmix_suppressed {
+        if state.chatmix.active() || state.chatmix_suppressed || state.handed_over {
             return Ok(());
         }
 
@@ -406,7 +510,7 @@ impl AudioService {
             return Ok(());
         }
         state.chatmix_set_default = on;
-        if !state.chatmix.active() {
+        if !state.chatmix.active() && !state.mixer_game {
             return Ok(());
         }
         let result = if on {
@@ -422,6 +526,13 @@ impl AudioService {
     pub fn set_chatmix_volumes(&self, game: f32, chat: f32) -> Result<()> {
         let mut state = self.state();
         let (game, chat) = (game.clamp(0.0, 1.0), chat.clamp(0.0, 1.0));
+        state.dial = Some((game, chat));
+        if state.handed_over {
+            if let Some(hook) = self.on_dial.get() {
+                hook(game, chat);
+            }
+            return Ok(());
+        }
         if !state.chatmix.active() || state.chatmix.volumes == Some((game, chat)) {
             return Ok(());
         }
@@ -443,6 +554,11 @@ impl AudioService {
     pub fn aux_enable(&self, cfg: &AuxConfig, chain: &AuxEffectChain) -> Result<()> {
         let mut state = self.state();
         if state.aux.is_some() {
+            return Ok(());
+        }
+        // Requested only: built when the mixer gives the line-in back.
+        if state.handed_over {
+            state.aux = Some(AuxState::pending(cfg.clone(), chain.clone()));
             return Ok(());
         }
         let result = aux_enable_locked(&mut state, cfg, chain);
@@ -468,6 +584,9 @@ impl AudioService {
     /// pending so the next call retries once the nodes are back.
     pub fn heal_aux(&self) {
         let mut state = self.state();
+        if state.handed_over {
+            return;
+        }
         let Some(aux) = state.aux.as_mut() else {
             return;
         };
@@ -519,6 +638,13 @@ impl AudioService {
             cfg.capture_percent = aux.cfg.capture_percent;
         }
         let cfg = &cfg;
+        if state.handed_over {
+            if let Some(aux) = state.aux.as_mut() {
+                aux.cfg = cfg.clone();
+                aux.chain = chain.clone();
+            }
+            return Ok(());
+        }
         if let Some(aux) = state.aux.as_mut() {
             if aux.cfg.capture_name_regex == cfg.capture_name_regex
                 && aux.cfg.sink_name_regex == cfg.sink_name_regex
@@ -575,6 +701,7 @@ impl AudioService {
     pub fn reset_all(&self) -> Result<()> {
         let mut state = self.state();
         state.chatmix_suppressed = true;
+        state.mixer_game = false;
         let aux = aux_disable_locked(&mut state);
         let mut chatmix = destroy_chatmix_locked(&mut state);
         kill_orphans_locked(&state);
@@ -655,6 +782,8 @@ fn kill_orphans_locked(state: &AudioState) {
         kill_loopback_orphan(CHATMIX_GAME);
         kill_loopback_orphan(CHATMIX_CHAT);
         kill_aux_dsp_orphan();
+        // The caller tore its own mixer down first (startup: none yet).
+        mixer::kill_orphans();
     }
 }
 
@@ -680,9 +809,12 @@ fn ensure_chatmix_locked(state: &mut AudioState, sink_regexes: &[&str]) -> Resul
             break;
         }
     }
-    let arctis = found?;
+    start_chatmix_locked(state, &found?)
+}
 
-    spawn_chatmix(state, &arctis)?;
+/// The loopbacks into `sink`, then the default-sink claim if wanted.
+fn start_chatmix_locked(state: &mut AudioState, sink: &str) -> Result<()> {
+    spawn_chatmix(state, sink)?;
     if state.chatmix_set_default {
         if let Err(error) = claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
         {
@@ -690,7 +822,7 @@ fn ensure_chatmix_locked(state: &mut AudioState, sink_regexes: &[&str]) -> Resul
             return Err(error);
         }
     }
-    info!("ChatMix sinks ready -> {arctis}");
+    info!("ChatMix sinks ready -> {sink}");
     Ok(())
 }
 
@@ -786,25 +918,9 @@ fn aux_enable_locked(
     let previous_input_source = current_input_source(&alsa_card).ok();
 
     let has_effects = chain.effects.iter().any(|effect| effect.enabled);
-    let needs_lsp = chain
-        .effects
-        .iter()
-        .any(|effect| effect.enabled && !matches!(effect.kind, AuxEffectKind::Equalizer { .. }));
     let mut dsp = None;
     let destination = if has_effects {
-        let lsp = if needs_lsp {
-            let dirs = ladspa_dirs(std::env::var_os("LADSPA_PATH").as_deref());
-            let Some(lsp) = find_lsp_ladspa(&dirs) else {
-                let searched: Vec<_> = dirs.iter().map(|dir| dir.display().to_string()).collect();
-                bail!(
-                    "LSP LADSPA plugins not installed ({LSP_LADSPA} not in {})",
-                    searched.join(", ")
-                );
-            };
-            Some(lsp)
-        } else {
-            None
-        };
+        let lsp = lsp_for(chain)?;
         let config = generate_dsp_config(
             AUX_DSP_SINK,
             Some(&sink),
@@ -813,23 +929,9 @@ fn aux_enable_locked(
             lsp.as_deref(),
         )?;
         let path = dsp_conf_path();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .and_then(|mut f| f.write_all(config.as_bytes()))
-            .with_context(|| format!("write {}", path.display()))?;
+        write_conf(&path, &config)?;
         kill_aux_dsp_orphan();
-        let mut child = Command::new("pipewire")
-            .arg("-c")
-            .arg(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("spawn PipeWire AUX filter graph")?;
+        let mut child = spawn_pipewire(&path).context("spawn PipeWire AUX filter graph")?;
         if let Err(error) = wait_for_node(&mut child, AUX_DSP_SINK) {
             let _ = stop_child(&mut child);
             return Err(error);
@@ -1151,6 +1253,26 @@ fn find_lsp_ladspa(dirs: &[PathBuf]) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// The LSP LADSPA library if `chain` needs it (an enabled gate or compressor).
+fn lsp_for(chain: &AuxEffectChain) -> Result<Option<PathBuf>> {
+    let needs_lsp = chain
+        .effects
+        .iter()
+        .any(|effect| effect.enabled && !matches!(effect.kind, AuxEffectKind::Equalizer { .. }));
+    if !needs_lsp {
+        return Ok(None);
+    }
+    let dirs = ladspa_dirs(std::env::var_os("LADSPA_PATH").as_deref());
+    let Some(lsp) = find_lsp_ladspa(&dirs) else {
+        let searched: Vec<_> = dirs.iter().map(|dir| dir.display().to_string()).collect();
+        bail!(
+            "LSP LADSPA plugins not installed ({LSP_LADSPA} not in {})",
+            searched.join(", ")
+        );
+    };
+    Ok(Some(lsp))
+}
+
 /// One filter-chain node: the LSP LADSPA plugin when `lsp`, else a PipeWire builtin.
 struct DspNode {
     name: String,
@@ -1269,6 +1391,55 @@ fn dsp_stages(chain: &AuxEffectChain) -> Vec<DspStage> {
     stages
 }
 
+/// A `filter.graph`: its nodes, the links between them, and the ports the
+/// capture stream's channels enter / the playback stream's channels leave by.
+struct FilterGraph {
+    nodes: Vec<DspNode>,
+    links: Vec<(String, String)>,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+}
+
+impl FilterGraph {
+    /// `stages` one after the other.
+    fn chain(stages: Vec<DspStage>) -> Self {
+        let mut links = Vec::new();
+        for pair in stages.windows(2) {
+            links.extend(pair[0].outputs.iter().cloned().zip(pair[1].inputs.clone()));
+        }
+        Self {
+            inputs: stages.first().map_or_else(Vec::new, |s| s.inputs.to_vec()),
+            outputs: stages.last().map_or_else(Vec::new, |s| s.outputs.to_vec()),
+            nodes: stages.into_iter().flat_map(|stage| stage.nodes).collect(),
+            links,
+        }
+    }
+}
+
+/// Write a generated config owner-only (it names the user's devices).
+fn write_conf(path: &Path, config: &str) -> Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .and_then(|mut f| f.write_all(config.as_bytes()))
+        .with_context(|| format!("write {}", path.display()))
+}
+
+/// `pipewire -c conf`: a filter-chain in its own process.
+fn spawn_pipewire(conf: &Path) -> Result<Child> {
+    Command::new("pipewire")
+        .arg("-c")
+        .arg(conf)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn pipewire -c {}", conf.display()))
+}
+
 /// `lsp`: the LSP LADSPA library, needed when the chain has a gate or compressor.
 /// Without a `target` the playback side is never autoconnected (its owner links it).
 fn generate_dsp_config(
@@ -1279,13 +1450,42 @@ fn generate_dsp_config(
     lsp: Option<&Path>,
 ) -> Result<String> {
     chain.validate().map_err(anyhow::Error::msg)?;
-    let stages = dsp_stages(chain);
-    let (Some(first), Some(last)) = (stages.first(), stages.last()) else {
+    let graph = FilterGraph::chain(dsp_stages(chain));
+    if graph.nodes.is_empty() {
         bail!("cannot generate an empty DSP graph");
+    }
+    let latency = node_latency(latency);
+    let sink = pw_escape(sink);
+    let route = match target {
+        Some(target) => format!("node.target = \"{}\"", pw_escape(target)),
+        None => "node.autoconnect = false node.dont-reconnect = true node.dont-fallback = true"
+            .to_string(),
     };
+    filter_chain_config(
+        AUX_DSP_DESC,
+        &graph,
+        "",
+        &format!("node.name = \"{sink}\" media.class = Audio/Sink node.latency = \"{latency}\""),
+        &format!(
+            "node.name = \"{sink}_out\" {route} node.passive = true node.latency = \"{latency}\""
+        ),
+        lsp,
+    )
+}
 
+/// A `pipewire -c` config hosting `graph` in a filter-chain. `capture` and
+/// `playback` are the two streams' props (stereo unless they say otherwise),
+/// `args` extra module arguments.
+fn filter_chain_config(
+    description: &str,
+    graph: &FilterGraph,
+    args: &str,
+    capture: &str,
+    playback: &str,
+    lsp: Option<&Path>,
+) -> Result<String> {
     let mut nodes = String::new();
-    for node in stages.iter().flat_map(|stage| &stage.nodes) {
+    for node in &graph.nodes {
         let kind = if node.lsp {
             let lsp = lsp.ok_or_else(|| anyhow!("LSP LADSPA plugins not installed"))?;
             format!(
@@ -1308,17 +1508,25 @@ fn generate_dsp_config(
     }
 
     let mut links = String::new();
-    for pair in stages.windows(2) {
-        for (output, input) in pair[0].outputs.iter().zip(&pair[1].inputs) {
-            links.push_str(&format!(
-                "          {{ output = \"{}\" input = \"{}\" }}\n",
-                pw_escape(output),
-                pw_escape(input),
-            ));
-        }
+    for (output, input) in &graph.links {
+        links.push_str(&format!(
+            "          {{ output = \"{}\" input = \"{}\" }}\n",
+            pw_escape(output),
+            pw_escape(input),
+        ));
     }
-    let [in_l, in_r] = first.inputs.each_ref().map(|port| pw_escape(port));
-    let [out_l, out_r] = last.outputs.each_ref().map(|port| pw_escape(port));
+    let ports = |ports: &[String]| -> String {
+        ports
+            .iter()
+            .map(|port| format!("\"{}\"", pw_escape(port)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let args = if args.is_empty() {
+        String::new()
+    } else {
+        format!("      {args}\n")
+    };
 
     Ok(format!(
         r#"context.properties = {{ log.level = 1 }}
@@ -1332,30 +1540,25 @@ context.modules = [
     args = {{
       node.description = "{description}"
       media.name = "{description}"
-      filter.graph = {{
+{args}      filter.graph = {{
         nodes = [
 {nodes}        ]
         links = [
 {links}        ]
-        inputs = [ "{in_l}" "{in_r}" ]
-        outputs = [ "{out_l}" "{out_r}" ]
+        inputs = [ {inputs} ]
+        outputs = [ {outputs} ]
       }}
       audio.channels = 2
       audio.position = [ FL FR ]
-      capture.props = {{ node.name = "{sink}" media.class = Audio/Sink node.latency = "{latency}" }}
-      playback.props = {{ node.name = "{sink}_out" {route} node.passive = true node.latency = "{latency}" }}
+      capture.props = {{ {capture} }}
+      playback.props = {{ {playback} }}
     }}
   }}
 ]
 "#,
-        description = pw_escape(AUX_DSP_DESC),
-        sink = pw_escape(sink),
-        route = match target {
-            Some(target) => format!("node.target = \"{}\"", pw_escape(target)),
-            None => "node.autoconnect = false node.dont-reconnect = true node.dont-fallback = true"
-                .to_string(),
-        },
-        latency = node_latency(latency),
+        description = pw_escape(description),
+        inputs = ports(&graph.inputs),
+        outputs = ports(&graph.outputs),
     ))
 }
 
@@ -2126,13 +2329,44 @@ mod tests {
         );
 
         let audio = AudioService::new();
+        // ChatMix's two loopbacks, the AUX DSP, the mixer's strips.
         audio.kill_orphans();
-        assert_eq!(pkills(), 3);
+        assert_eq!(pkills(), 4);
         // The kill-switch needs PipeWire only to restore a default it holds.
         let _ = audio.reset_all();
-        assert_eq!(pkills(), 6);
+        assert_eq!(pkills(), 8);
         drop(audio);
-        assert_eq!(pkills(), 6);
+        assert_eq!(pkills(), 8);
+    }
+
+    #[test]
+    fn the_mixer_takes_the_dial_and_holds_chatmix_and_aux_back() {
+        let audio = AudioService::new();
+        let dial = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let seen = dial.clone();
+        audio.on_dial(move |game, chat| seen.lock().unwrap().push((game, chat)));
+        // Not handed over: the dial is only remembered (no ChatMix is up).
+        audio.set_chatmix_volumes(0.3, 1.0).unwrap();
+        assert!(dial.lock().unwrap().is_empty());
+        assert_eq!(audio.chatmix_dial(), (0.3, 1.0));
+
+        audio.hand_over(true).unwrap();
+        // Neither ChatMix nor AUX is built (no PipeWire lookup happens).
+        assert!(audio.ensure_chatmix(&["no such sink"]).is_ok());
+        assert!(!audio.chatmix_active() && audio.healthy());
+        audio
+            .aux_enable(&AuxConfig::default(), &AuxEffectChain::default())
+            .unwrap();
+        assert!(audio.aux_active(), "requested, built on hand-back");
+        assert_eq!(audio.aux_capture_node(), None);
+        audio.set_chatmix_volumes(0.5, 2.0).unwrap();
+        assert_eq!(*dial.lock().unwrap(), [(0.5, 1.0)]);
+        assert_eq!(audio.chatmix_dial(), (0.5, 1.0));
+
+        audio.aux_disable().unwrap();
+        audio.hand_over(false).unwrap();
+        audio.set_chatmix_volumes(0.7, 0.7).unwrap();
+        assert_eq!(dial.lock().unwrap().len(), 1, "the dial is ChatMix's again");
     }
 
     #[test]
@@ -2235,7 +2469,7 @@ mod tests {
     }
 
     /// `info.params.Props` of the node named `name`, from `pw-dump`.
-    fn dumped_props(name: &str) -> Vec<serde_json::Value> {
+    pub(crate) fn dumped_props(name: &str) -> Vec<serde_json::Value> {
         let dump = run_cmd("pw-dump", &[]).unwrap();
         let objects: Vec<serde_json::Value> = serde_json::from_str(&dump).unwrap();
         let node = objects

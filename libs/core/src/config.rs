@@ -202,7 +202,7 @@ pub fn update_app_config<T>(
 
 /// Owner-only temp file, fsynced, then renamed over `path`: a crash never
 /// leaves a truncated file and concurrent writers never share a temp file.
-fn write_atomic(path: &Path, text: &str) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!(
         "toml.{}.{}.tmp",

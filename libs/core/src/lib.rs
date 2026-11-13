@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod config;
 pub mod device;
 pub mod ipc;
+pub mod mixer;
 pub mod protocol;
 pub mod remap;
 pub mod socket;

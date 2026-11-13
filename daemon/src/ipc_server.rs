@@ -1,8 +1,10 @@
 //! Unix socket IPC server.
 
 use crate::hub::DaemonHub;
+use crate::mixer::MixerService;
 use anyhow::{bail, Result};
 use hako_audio::meters::{MeterService, MeterSubscription, MeterTarget};
+use hako_audio::mixer::Side;
 use hako_audio::AudioService;
 use hako_core::device::DeviceId;
 use hako_core::ipc::{
@@ -172,7 +174,7 @@ async fn serve_requests(
             };
             let resp = IpcResponse::ok(req.id.clone(), serde_json::json!({"subscribed": true}));
             write_json_frame(stream, &resp).await?;
-            stream_meters(stream, &hub.audio, &hub.meters, &targets).await;
+            stream_meters(stream, &hub.audio, &hub.mixer, &hub.meters, &targets).await;
             break;
         }
 
@@ -198,6 +200,7 @@ async fn serve_requests(
 async fn stream_meters(
     stream: &mut UnixStream,
     audio: &Arc<AudioService>,
+    mixer: &Arc<MixerService>,
     meters: &MeterService,
     specs: &[MeterTargetSpec],
 ) {
@@ -211,11 +214,11 @@ async fn stream_meters(
         if Instant::now() >= resolve_at {
             resolve_at = Instant::now() + METER_RESOLVE;
             // The getters read the published status, never waiting on audio work.
-            let (audio, owned) = (audio.clone(), specs.to_vec());
+            let (audio, mixer, owned) = (audio.clone(), mixer.clone(), specs.to_vec());
             let Ok(now) = tokio::task::spawn_blocking(move || {
                 owned
                     .iter()
-                    .map(|s| resolve_meter(&audio, s))
+                    .map(|s| resolve_meter(&audio, &mixer, s))
                     .collect::<Vec<_>>()
             })
             .await
@@ -241,11 +244,18 @@ async fn stream_meters(
     }
 }
 
-fn resolve_meter(audio: &AudioService, spec: &MeterTargetSpec) -> Option<MeterTarget> {
+fn resolve_meter(
+    audio: &AudioService,
+    mixer: &MixerService,
+    spec: &MeterTargetSpec,
+) -> Option<MeterTarget> {
     let (node_name, monitor_sink) = match spec {
         MeterTargetSpec::AuxInput => (audio.aux_capture_node()?, false),
         MeterTargetSpec::AuxOutput => (audio.aux_output_node()?, true),
         MeterTargetSpec::Node { name, monitor_sink } => (name.clone(), *monitor_sink),
+        // The strip's post-fader (playback) node, captured like a source.
+        MeterTargetSpec::MixerInput { id } => (mixer.meter_node(Side::Input, id)?, false),
+        MeterTargetSpec::MixerOutput { id } => (mixer.meter_node(Side::Output, id)?, false),
     };
     Some(MeterTarget {
         node_name,
@@ -285,6 +295,7 @@ fn to_ipc_event(ev: AdapterEvent) -> Result<IpcEvent> {
         }
         AdapterEvent::RemapsUpdated(s) => (EventKind::RemapsUpdated, serde_json::to_value(s)?),
         AdapterEvent::RemapCaptured(s) => (EventKind::RemapCaptured, serde_json::to_value(s)?),
+        AdapterEvent::MixerUpdated(s) => (EventKind::MixerUpdated, serde_json::to_value(s)?),
         AdapterEvent::Error { message, .. } => {
             (EventKind::Error, serde_json::json!({ "message": message }))
         }
@@ -359,6 +370,17 @@ mod tests {
         // Never dropped: AudioService's Drop tears down the session's audio.
         let audio = Arc::new(AudioService::new());
         let meters = MeterService::new();
+        // Off (no mixer.toml in an empty dir): never builds anything.
+        let root = std::env::temp_dir().join(format!("hako-test-ipc-{}", std::process::id()));
+        let paths = hako_core::config::ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root,
+        };
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        let mixer = Arc::new(MixerService::start(paths, audio.clone(), events, 256));
         let specs = [
             MeterTargetSpec::AuxInput,
             MeterTargetSpec::Node {
@@ -384,7 +406,7 @@ mod tests {
         };
         let ((elapsed, nodes), ()) = tokio::join!(
             client_side,
-            stream_meters(&mut server, &audio, &meters, &specs)
+            stream_meters(&mut server, &audio, &mixer, &meters, &specs)
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
         let after = meter_nodes();

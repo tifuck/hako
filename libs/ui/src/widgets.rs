@@ -408,12 +408,9 @@ impl Ballistics {
     }
 }
 
-/// Horizontal stereo meter: two thin bars on a −60..0 dBFS scale with
-/// ok / warn / danger zones and a peak-hold tick. `levels` is the latest
-/// linear peak (L, R); the motion is computed here, per frame.
-pub fn stereo_meter(ui: &mut Ui, id_salt: impl std::hash::Hash, levels: [f32; 2], width: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 24.0), Sense::hover());
-    let id = ui.id().with(id_salt);
+/// Both channels of meter `id` advanced to this frame with the newest
+/// linear peaks (L, R).
+fn meter_channels(ui: &Ui, id: egui::Id, levels: [f32; 2]) -> [Ballistics; 2] {
     let now = ui.input(|i| i.time);
     // egui 0.31 has no reduced-motion setting; no animations means none here.
     let instant = ui.style().animation_time <= 0.0;
@@ -425,22 +422,36 @@ pub fn stereo_meter(ui: &mut Ui, id_salt: impl std::hash::Hash, levels: [f32; 2]
         ch.step(to_dbfs(v), dt, instant);
     }
     ui.data_mut(|m| m.insert_temp(id, (chans, now)));
+    chans
+}
+
+fn meter_zones() -> [(f32, f32, Color32); 3] {
+    [
+        (METER_FLOOR_DB, METER_WARN_DB, pal().ok),
+        (METER_WARN_DB, METER_DANGER_DB, pal().warn),
+        (METER_DANGER_DB, 0.0, pal().danger),
+    ]
+}
+
+fn zone_color(db: f32) -> Color32 {
+    meter_zones()
+        .iter()
+        .find(|(_, hi, _)| db <= *hi)
+        .map_or(pal().danger, |z| z.2)
+}
+
+/// Horizontal stereo meter: two thin bars on a −60..0 dBFS scale with
+/// ok / warn / danger zones and a peak-hold tick. `levels` is the latest
+/// linear peak (L, R); the motion is computed here, per frame.
+pub fn stereo_meter(ui: &mut Ui, id_salt: impl std::hash::Hash, levels: [f32; 2], width: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 24.0), Sense::hover());
+    let chans = meter_channels(ui, ui.id().with(id_salt), levels);
     if !ui.is_rect_visible(rect) {
         return;
     }
 
     let x = |db: f32| egui::remap_clamp(db, METER_FLOOR_DB..=0.0, rect.x_range());
-    let zones = [
-        (METER_FLOOR_DB, METER_WARN_DB, pal().ok),
-        (METER_WARN_DB, METER_DANGER_DB, pal().warn),
-        (METER_DANGER_DB, 0.0, pal().danger),
-    ];
-    let zone_color = |db: f32| {
-        zones
-            .iter()
-            .find(|(_, hi, _)| db <= *hi)
-            .map_or(pal().danger, |z| z.2)
-    };
+    let zones = meter_zones();
     let p = ui.painter();
     let (bar_h, gap) = (4.0, 3.0);
     for (i, ch) in chans.iter().enumerate() {
@@ -487,6 +498,184 @@ pub fn stereo_meter(ui: &mut Ui, id_salt: impl std::hash::Hash, levels: [f32; 2]
             pal().text_faint,
         );
     }
+}
+
+/// `stereo_meter` standing up, painted into `rect` (two bars side by side,
+/// silence at the bottom), same scale, zones and ballistics.
+pub fn vertical_meter(ui: &Ui, id: egui::Id, rect: Rect, levels: [f32; 2]) {
+    let chans = meter_channels(ui, id, levels);
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let y = |db: f32| egui::remap_clamp(db, METER_FLOOR_DB..=0.0, rect.bottom()..=rect.top());
+    let p = ui.painter();
+    let gap = 2.0;
+    let bar_w = (rect.width() - gap) / 2.0;
+    for (i, ch) in chans.iter().enumerate() {
+        let left = rect.left() + i as f32 * (bar_w + gap);
+        let x = egui::Rangef::new(left, left + bar_w);
+        p.rect_filled(Rect::from_x_y_ranges(x, rect.y_range()), 2.0, pal().bg);
+        for (lo, hi, color) in meter_zones() {
+            p.rect_filled(
+                Rect::from_x_y_ranges(x, y(hi)..=y(lo)),
+                0.0,
+                color.gamma_multiply(0.12),
+            );
+            if ch.level > lo {
+                p.rect_filled(
+                    Rect::from_x_y_ranges(x, y(ch.level.min(hi))..=y(lo)),
+                    0.0,
+                    color,
+                );
+            }
+        }
+        if ch.peak > METER_FLOOR_DB {
+            let py = y(ch.peak).min(rect.bottom() - 2.0);
+            p.rect_filled(
+                Rect::from_x_y_ranges(x, py..=py + 2.0),
+                0.0,
+                zone_color(ch.peak),
+            );
+        }
+    }
+}
+
+// ── Gain fader ───────────────────────────────────────────────────
+
+/// Fader range (dB), the mixer's.
+pub const FADER_MIN_DB: f32 = hako_core::mixer::GAIN_MIN_DB;
+pub const FADER_MAX_DB: f32 = hako_core::mixer::GAIN_MAX_DB;
+/// Drags this close to 0 dB land on it.
+pub const FADER_DETENT_DB: f32 = 0.75;
+
+/// Taper: (dB, travel) breakpoints, linear between them. Like a console
+/// fader, most of the travel sits around 0 dB and the bottom 20 dB are short.
+const TAPER: [(f32, f32); 6] = [
+    (FADER_MIN_DB, 0.0),
+    (-40.0, 0.12),
+    (-20.0, 0.36),
+    (-10.0, 0.56),
+    (0.0, 0.8),
+    (FADER_MAX_DB, 1.0),
+];
+
+/// Fader travel (0 bottom .. 1 top) for a gain.
+pub fn fader_pos(db: f32) -> f32 {
+    let db = db.clamp(FADER_MIN_DB, FADER_MAX_DB);
+    TAPER
+        .windows(2)
+        .find(|w| db <= w[1].0)
+        .map_or(1.0, |w| egui::remap(db, w[0].0..=w[1].0, w[0].1..=w[1].1))
+}
+
+/// Gain at fader travel `pos`.
+pub fn fader_db(pos: f32) -> f32 {
+    let pos = pos.clamp(0.0, 1.0);
+    TAPER
+        .windows(2)
+        .find(|w| pos <= w[1].1)
+        .map_or(FADER_MAX_DB, |w| {
+            egui::remap(pos, w[0].1..=w[1].1, w[0].0..=w[1].0)
+        })
+}
+
+/// A dragged gain as stored: 0.1 dB steps, caught by the 0 dB detent.
+pub fn snap_gain(db: f32) -> f32 {
+    if db.abs() < FADER_DETENT_DB {
+        return 0.0;
+    }
+    ((db * 10.0).round() / 10.0).clamp(FADER_MIN_DB, FADER_MAX_DB)
+}
+
+/// Vertical gain fader over `rect`, dragged relative to where it was
+/// grabbed (the knob never jumps to the pointer); double-click resets to
+/// 0 dB. `changed` while it moves, `drag_stopped` on release.
+pub fn vertical_fader(ui: &Ui, rect: Rect, id: egui::Id, db: &mut f32, fill: Color32) -> Response {
+    let mut resp = ui
+        .interact(rect, id, Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let knob_h = 12.0;
+    let track = rect.y_range().shrink(knob_h / 2.0);
+    let raw_id = id.with("raw");
+    if resp.drag_started() {
+        ui.data_mut(|m| m.insert_temp(raw_id, fader_pos(*db)));
+    }
+    if resp.dragged() {
+        let raw = ui
+            .data(|m| m.get_temp::<f32>(raw_id))
+            .unwrap_or(fader_pos(*db));
+        let raw = (raw - resp.drag_delta().y / track.span()).clamp(0.0, 1.0);
+        ui.data_mut(|m| m.insert_temp(raw_id, raw));
+        let v = snap_gain(fader_db(raw));
+        if v != *db {
+            *db = v;
+            resp.mark_changed();
+        }
+    }
+    if resp.double_clicked() && *db != 0.0 {
+        *db = 0.0;
+        resp.mark_changed();
+    }
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let p = ui.painter();
+    let y = |db: f32| egui::lerp(track.max..=track.min, fader_pos(db));
+    let cx = rect.center().x;
+    let groove = Rect::from_x_y_ranges(cx - 2.0..=cx + 2.0, track);
+    p.rect_filled(groove, 2.0, pal().surface_hi);
+    let knob_y = y(*db);
+    p.rect_filled(
+        Rect::from_x_y_ranges(cx - 2.0..=cx + 2.0, knob_y..=track.max),
+        2.0,
+        fill,
+    );
+    // Scale ticks; 0 dB is the long one.
+    for (tick, w) in [
+        (12.0, 3.0),
+        (0.0, 7.0),
+        (-10.0, 3.0),
+        (-20.0, 3.0),
+        (-40.0, 3.0),
+    ] {
+        let ty = y(tick);
+        for side in [-1.0, 1.0] {
+            let x0 = cx + side * 6.0;
+            p.line_segment(
+                [pos2(x0, ty), pos2(x0 + side * w, ty)],
+                Stroke::new(1.0_f32, pal().border_hi),
+            );
+        }
+    }
+    let hot =
+        ui.ctx()
+            .animate_bool_with_time(id.with("hot"), resp.hovered() || resp.dragged(), 0.12);
+    let knob = Rect::from_center_size(pos2(cx, knob_y), vec2(22.0 + 2.0 * hot, knob_h));
+    p.rect_filled(
+        knob.translate(vec2(0.0, 1.5)),
+        4.0,
+        Color32::from_black_alpha(90),
+    );
+    let face = if ui.is_enabled() {
+        Color32::from_rgb(232, 234, 239)
+    } else {
+        pal().text_faint
+    };
+    p.rect(
+        knob,
+        4.0,
+        face,
+        Stroke::new(1.0_f32, pal().border_hi),
+        egui::StrokeKind::Inside,
+    );
+    p.line_segment(
+        [
+            pos2(knob.left() + 4.0, knob_y),
+            pos2(knob.right() - 4.0, knob_y),
+        ],
+        Stroke::new(2.0_f32, Color32::from_rgb(108, 111, 121)),
+    );
+    resp
 }
 
 /// Flat icon button drawn by `paint` inside a square hit area.
@@ -701,6 +890,19 @@ pub fn icon_record(p: &egui::Painter, r: Rect, c: Color32) {
 
 pub fn icon_stop(p: &egui::Painter, r: Rect, c: Color32) {
     p.rect_filled(r.shrink(1.0), 2.0, c);
+}
+
+/// Three fader slots with their knobs at different heights.
+pub fn icon_mixer(p: &egui::Painter, r: Rect, c: Color32) {
+    for (i, knob) in [0.7_f32, 0.3, 0.55].into_iter().enumerate() {
+        let x = r.left() + r.width() * (0.18 + 0.32 * i as f32);
+        p.line_segment(
+            [pos2(x, r.top()), pos2(x, r.bottom())],
+            Stroke::new(1.5_f32, c),
+        );
+        let y = egui::lerp(r.top()..=r.bottom(), knob);
+        p.rect_filled(Rect::from_center_size(pos2(x, y), vec2(6.0, 4.0)), 1.0, c);
+    }
 }
 
 /// Device-kind glyphs for the rail.

@@ -12,6 +12,7 @@ use hako_core::ipc::{
     AppSettings, EventKind, IpcEvent, IpcRequest, IpcResponse, MeterLevels, MeterTargetSpec,
     Method, SetManyParams, SetParams, SubscribeMetersParams,
 };
+use hako_core::mixer::{MixerState, PatchMixerParams};
 use hako_core::remap::{
     CancelCaptureParams, ClearRemapParams, DeviceRemaps, SetRemapParams, StartCaptureParams,
 };
@@ -52,6 +53,8 @@ struct App {
     was_online: bool,
     /// The connection dropped after being up; the next connect is announced.
     lost: bool,
+    /// `ClientState::mixer_rev` the UI has seen.
+    mixer_rev: u64,
     rt: Handle,
     /// `(owner/repo, installed binary)` when this build can update itself.
     updater: Option<(&'static str, PathBuf)>,
@@ -93,6 +96,19 @@ struct ClientState {
     checking: bool,
     /// Installing `update`.
     updating: bool,
+    /// Latest mixer from `GetMixer` / `PatchMixer` / `MixerUpdated`, or why
+    /// `GetMixer` failed; `mixer_rev` counts changes.
+    mixer: Option<Result<MixerState, String>>,
+    mixer_rev: u64,
+    /// `PatchMixer` calls sent and not yet answered.
+    mixer_pending: usize,
+}
+
+impl ClientState {
+    fn set_mixer(&mut self, m: Result<MixerState, String>) {
+        self.mixer = Some(m);
+        self.mixer_rev += 1;
+    }
 }
 
 /// What to tell the user when a command finishes.
@@ -172,6 +188,7 @@ fn main() -> Result<()> {
                             state_bg.lock().unwrap().settings = Some(cfg);
                         }
                     }
+                    fetch_mixer(&mut stream, &state_bg).await;
                     let mut events = tokio::spawn(subscribe(socket.clone(), state_bg.clone()));
 
                     // Commands on this connection; a slow poll keeps health,
@@ -187,7 +204,20 @@ fn main() -> Result<()> {
                                     }
                                     ClientCmd::Call(m, p, f) => (m, p, f),
                                 };
+                                let mixer_call = matches!(method, Method::GetMixer | Method::PatchMixer);
                                 let alive = match call(&mut stream, method, params).await {
+                                    Some(resp) if mixer_call => {
+                                        // A refused patch: show why, then reload what the daemon has.
+                                        let refused = method == Method::PatchMixer && !resp.ok;
+                                        if refused {
+                                            let why = resp.error.map_or_else(|| "no reason given".into(), |e| e.message);
+                                            state_bg.lock().unwrap().notices.push((Tone::Error, format!("{}: {why}", feedback.failed)));
+                                            fetch_mixer(&mut stream, &state_bg).await
+                                        } else {
+                                            state_bg.lock().unwrap().set_mixer(mixer_result(resp));
+                                            true
+                                        }
+                                    }
                                     Some(resp) => {
                                         {
                                             let mut s = state_bg.lock().unwrap();
@@ -209,7 +239,13 @@ fn main() -> Result<()> {
                                     }
                                     None => false,
                                 };
-                                state_bg.lock().unwrap().pending -= 1;
+                                {
+                                    let mut s = state_bg.lock().unwrap();
+                                    s.pending -= 1;
+                                    if method == Method::PatchMixer {
+                                        s.mixer_pending -= 1;
+                                    }
+                                }
                                 if !alive {
                                     break;
                                 }
@@ -243,6 +279,7 @@ fn main() -> Result<()> {
         state,
         was_online: false,
         lost: false,
+        mixer_rev: 0,
         rt: rt.handle().clone(),
         updater,
         meters: meters.clone(),
@@ -285,6 +322,15 @@ impl eframe::App for App {
             self.ui.state = st.hub.clone();
             self.ui.daemon_error = st.error.clone();
             self.ui.pending = st.pending > 0;
+            self.ui.mixer.busy = st.mixer_pending > 0;
+            if st.mixer_rev != self.mixer_rev {
+                self.mixer_rev = st.mixer_rev;
+                match &st.mixer {
+                    Some(Ok(m)) => self.ui.mixer.receive(m.clone()),
+                    Some(Err(e)) => self.ui.mixer.unavailable(e.clone()),
+                    None => {}
+                }
+            }
             // Adopt server settings until the user starts editing, so a late
             // GetConfig doesn't clobber an in-progress edit.
             if self.ui.settings.is_none() || st.error.is_some() {
@@ -435,9 +481,23 @@ impl eframe::App for App {
                     self.state.lock().unwrap().update = None;
                     continue;
                 }
+                UiCommand::GetMixer => ClientCmd::Call(
+                    Method::GetMixer,
+                    serde_json::Value::Null,
+                    Feedback::quiet("Couldn't load the mixer"),
+                ),
+                UiCommand::PatchMixer(ops) => ClientCmd::Call(
+                    Method::PatchMixer,
+                    to(serde_json::to_value(PatchMixerParams { ops })),
+                    Feedback::quiet("Couldn't change the mixer"),
+                ),
             };
-            if matches!(cmd, ClientCmd::Call(..)) {
-                self.state.lock().unwrap().pending += 1;
+            if let ClientCmd::Call(method, ..) = &cmd {
+                let mut s = self.state.lock().unwrap();
+                s.pending += 1;
+                if *method == Method::PatchMixer {
+                    s.mixer_pending += 1;
+                }
             }
             let _ = self.cmd_tx.send(cmd);
         }
@@ -646,6 +706,28 @@ async fn refresh(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> bo
     true
 }
 
+/// A `GetMixer` / `PatchMixer` answer: the mixer, or why there is none
+/// (an older hakod answers `unsupported`).
+fn mixer_result(resp: IpcResponse) -> Result<MixerState, String> {
+    match (resp.result, resp.error) {
+        (Some(r), _) if resp.ok => serde_json::from_value(r)
+            .map_err(|e| format!("hakod sent a mixer this UI cannot read ({e}); update both")),
+        (_, Some(e)) if e.code == "unsupported" => {
+            Err("This hakod has no mixer yet. Update hako to use it.".into())
+        }
+        (_, e) => Err(e.map_or_else(|| "no reason given".into(), |e| e.message)),
+    }
+}
+
+/// Reload the mixer. Returns false when the connection dropped.
+async fn fetch_mixer(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> bool {
+    let Some(resp) = call(stream, Method::GetMixer, serde_json::Value::Null).await else {
+        return false;
+    };
+    state.lock().unwrap().set_mixer(mixer_result(resp));
+    true
+}
+
 /// Event stream on its own connection; snapshots are applied in place.
 async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
     let Ok(mut stream) = UnixStream::connect(&socket).await else {
@@ -669,6 +751,15 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
         if ev.kind == EventKind::DaemonShuttingDown {
             s.error = Some("Daemon stopped".into());
             break;
+        }
+        // ponytail: events and replies travel on two connections, so an event
+        // for an older edit can land after a newer reply; the UI shows it
+        // until the next event. Sequence numbers if that flicker matters.
+        if ev.kind == EventKind::MixerUpdated {
+            if let Ok(m) = serde_json::from_value::<MixerState>(ev.payload) {
+                s.set_mixer(Ok(m));
+            }
+            continue;
         }
         let Some(hub) = s.hub.as_mut() else { continue };
         match ev.kind {
@@ -698,7 +789,10 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
                     s.notices.push((Tone::Error, msg.to_string()));
                 }
             }
-            EventKind::RemapCaptured | EventKind::DaemonShuttingDown | EventKind::Meters => {}
+            EventKind::RemapCaptured
+            | EventKind::DaemonShuttingDown
+            | EventKind::Meters
+            | EventKind::MixerUpdated => {}
         }
     }
 }

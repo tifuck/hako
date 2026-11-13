@@ -181,6 +181,10 @@ pub fn pal() -> &'static Palette {
 pub const MODE_REPEAT: Color32 = rgb(251, 146, 60);
 pub const MODE_MACRO: Color32 = rgb(167, 139, 250);
 pub const MODE_OFF: Color32 = rgb(160, 120, 128);
+/// Mixer: virtual strips and B (virtual microphone) outputs; hardware ones
+/// use the accent.
+pub const VIRTUAL: Color32 = rgb(167, 139, 250);
+pub const ON_VIRTUAL: Color32 = rgb(20, 13, 38);
 
 // ── Spacing ──────────────────────────────────────────────────────
 pub const SPACE_XS: f32 = 4.0;

@@ -2,6 +2,7 @@
 
 use crate::drivers::{self, DeviceAdapter, DriverCtx, EventTx, Model, PlaceholderAdapter};
 use crate::hid::HidDeviceInfo;
+use crate::mixer::{MixerService, PatchError};
 use crate::remap::RemapEngine;
 use crate::worker::{DeviceHandle, Refused};
 use anyhow::{Context, Result};
@@ -17,6 +18,7 @@ use hako_core::ipc::{
     audio_latency_samples, AppSettings, IpcRequest, IpcResponse, Method, ProfileNameParams,
     SetManyParams, SetParams, SnapshotParams, AUDIO_LATENCIES,
 };
+use hako_core::mixer::PatchMixerParams;
 use hako_core::protocol::{is_new_error, AdapterEvent};
 use hako_core::remap::{CancelCaptureParams, ClearRemapParams, SetRemapParams, StartCaptureParams};
 use hako_core::VERSION;
@@ -48,6 +50,8 @@ pub struct DaemonHub {
     pub audio: Arc<AudioService>,
     /// Level meters; runs only while a `SubscribeMeters` connection is open.
     pub meters: MeterService,
+    /// `mixer.toml` and its PipeWire graph (own thread).
+    pub mixer: Arc<MixerService>,
     /// Never held across an await or device I/O (workers own the devices).
     devices: std::sync::Mutex<HashMap<String, DeviceHandle>>,
     events: EventTx,
@@ -76,8 +80,10 @@ impl DaemonHub {
         // ChatMix is not up yet, so these only record the preferences.
         let _ =
             audio.set_chatmix_default(cfg.as_ref().map_or(true, |c| c.chatmix_set_default_sink));
-        let _ = audio.set_latency(latency_samples(cfg.as_ref().ok()));
-        // Loopback / DSP processes of a crashed daemon (they would clash by name).
+        let latency = latency_samples(cfg.as_ref().ok());
+        let _ = audio.set_latency(latency);
+        // Loopback / DSP / mixer processes of a crashed daemon (they would
+        // clash by name).
         audio.kill_orphans();
         // AUX links older versions made outlive them (pw-link links linger).
         if let Ok(cfg) = &cfg {
@@ -85,10 +91,14 @@ impl DaemonHub {
                 warn!("orphan AUX links: {e:#}");
             }
         }
+        let audio = Arc::new(audio);
+        let mixer = MixerService::start(paths.clone(), audio.clone(), events.clone(), latency);
+        audio.on_dial(mixer.dial_hook());
         Self {
             paths,
-            audio: Arc::new(audio),
+            audio,
             meters: MeterService::new(),
+            mixer: Arc::new(mixer),
             devices: std::sync::Mutex::new(HashMap::new()),
             events,
             started: Instant::now(),
@@ -289,6 +299,7 @@ impl DaemonHub {
                 .reconfigure_aux(&cfg.aux, &cfg.aux.effects)
                 .context("saved, but AUX could not apply it")?;
         }
+        self.mixer.set_latency(latency_samples(Some(&cfg)));
         self.audio
             .set_latency(latency_samples(Some(&cfg)))
             .context("saved, but audio could not apply the new latency")?;
@@ -449,9 +460,11 @@ impl DaemonHub {
             },
             Method::ResetAudio => {
                 // pactl / pw-* subprocesses: keep them off the async runtime.
-                let audio = self.audio.clone();
+                let (audio, mixer) = (self.audio.clone(), self.mixer.clone());
                 let aux = load_app_config(&self.paths).map(|c| c.aux);
                 let reset = tokio::task::spawn_blocking(move || {
+                    // Its processes go first: the sweep below spares none.
+                    mixer.reset();
                     audio.reset_all()?;
                     // Links a crashed daemon left are not in this one's state.
                     match aux {
@@ -545,6 +558,23 @@ impl DaemonHub {
                 "invalid_value",
                 format!("{:?} is handled by the connection", req.method),
             ),
+            Method::GetMixer => match self.mixer.state() {
+                Ok(state) => IpcResponse::ok(id, state),
+                Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
+            },
+            Method::PatchMixer => match serde_json::from_value::<PatchMixerParams>(req.params) {
+                Ok(p) => {
+                    // Waits for the graph (child processes): off the runtime.
+                    let mixer = self.mixer.clone();
+                    match tokio::task::spawn_blocking(move || mixer.patch(&p.ops)).await {
+                        Ok(Ok(state)) => IpcResponse::ok(id, state),
+                        Ok(Err(PatchError::Invalid(e))) => IpcResponse::err(id, "invalid_value", e),
+                        Ok(Err(PatchError::Io(e))) => IpcResponse::err(id, "io", format!("{e:#}")),
+                        Err(e) => IpcResponse::err(id, "io", format!("mixer task: {e}")),
+                    }
+                }
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+            },
         }
     }
 
@@ -669,6 +699,8 @@ impl DaemonHub {
     pub async fn shutdown(&self) {
         let handles: Vec<_> = lock(&self.devices).drain().map(|(_, h)| h).collect();
         stop_all(&handles).await;
+        let mixer = self.mixer.clone();
+        let _ = tokio::task::spawn_blocking(move || mixer.shutdown()).await;
         if let Err(e) = self.audio.reset_all() {
             warn!("audio teardown: {e:#}");
         }
@@ -912,9 +944,17 @@ mod tests {
         save_profile(&paths, &profile).unwrap();
         // Built by hand: `new` would touch the session's PipeWire graph.
         let (events, _) = broadcast::channel(8);
+        let audio = Arc::new(AudioService::new());
         let hub = DaemonHub {
             paths: paths.clone(),
-            audio: Arc::new(AudioService::new()),
+            // Off (no mixer.toml): never builds anything.
+            mixer: Arc::new(MixerService::start(
+                paths.clone(),
+                audio.clone(),
+                events.clone(),
+                256,
+            )),
+            audio,
             meters: MeterService::new(),
             devices: Default::default(),
             remap: RemapEngine::start(paths.clone(), events.clone()),

@@ -465,7 +465,7 @@ fn stereo_peak(bytes: &[u8]) -> [f32; 2] {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -499,7 +499,7 @@ mod tests {
     }
 
     /// Highest reading over `secs` seconds of 30 Hz reads.
-    fn loudest(sub: &MeterSubscription, secs: f32) -> [f32; 2] {
+    pub(crate) fn loudest(sub: &MeterSubscription, secs: f32) -> [f32; 2] {
         let mut max = [0f32; 2];
         for _ in 0..(secs * 30.0) as usize {
             std::thread::sleep(Duration::from_millis(33));
@@ -539,26 +539,7 @@ mod tests {
         .unwrap();
 
         let wav = std::env::temp_dir().join(format!("{sink}.wav"));
-        let rate = 48_000u32;
-        let samples: Vec<i16> = (0..rate * 3)
-            .flat_map(|n| {
-                let s = (n as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin();
-                let s = (s * 0.5 * i16::MAX as f32) as i16;
-                [s, s]
-            })
-            .collect();
-        let mut file = Vec::new();
-        let data_len = samples.len() as u32 * 2;
-        file.extend_from_slice(b"RIFF");
-        file.extend_from_slice(&(36 + data_len).to_le_bytes());
-        file.extend_from_slice(b"WAVEfmt ");
-        for v in [16u32, 1 | (2 << 16), rate, rate * 4, 4 | (16 << 16)] {
-            file.extend_from_slice(&v.to_le_bytes());
-        }
-        file.extend_from_slice(b"data");
-        file.extend_from_slice(&data_len.to_le_bytes());
-        file.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
-        std::fs::write(&wav, file).unwrap();
+        write_tone(&wav);
         std::thread::sleep(Duration::from_millis(500));
         let mut tone = Command::new("pw-play")
             .args([
@@ -589,5 +570,29 @@ mod tests {
             assert!((0.45..0.55).contains(&p), "peak {peak:?}");
         }
         assert_eq!(after, 0, "meter stream outlived its subscription");
+    }
+
+    /// 3 s of a 440 Hz stereo tone at -6 dBFS (peak 0.5), 16-bit 48 kHz WAV.
+    pub(crate) fn write_tone(path: &std::path::Path) {
+        let rate = 48_000u32;
+        let samples: Vec<i16> = (0..rate * 3)
+            .flat_map(|n| {
+                let s = (n as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin();
+                let s = (s * 0.5 * i16::MAX as f32) as i16;
+                [s, s]
+            })
+            .collect();
+        let mut file = Vec::new();
+        let data_len = samples.len() as u32 * 2;
+        file.extend_from_slice(b"RIFF");
+        file.extend_from_slice(&(36 + data_len).to_le_bytes());
+        file.extend_from_slice(b"WAVEfmt ");
+        for v in [16u32, 1 | (2 << 16), rate, rate * 4, 4 | (16 << 16)] {
+            file.extend_from_slice(&v.to_le_bytes());
+        }
+        file.extend_from_slice(b"data");
+        file.extend_from_slice(&data_len.to_le_bytes());
+        file.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+        std::fs::write(path, file).unwrap();
     }
 }

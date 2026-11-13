@@ -1096,6 +1096,439 @@ fn line_in_page_asks_for_meters_only_while_monitoring() {
     );
 }
 
+// ── Mixer ────────────────────────────────────────────────────────
+
+/// A full console: 2 hardware + 3 virtual inputs, 4 outputs, one problem.
+fn sample_mixer() -> hako_core::mixer::MixerState {
+    use hako_core::mixer::*;
+    let source = |node: &str, description: &str, trim_db: f32| Source {
+        node: node.into(),
+        description: description.into(),
+        trim_db,
+        mute: false,
+    };
+    let fx = |kinds: &[(&str, AuxEffectKind, bool)]| EffectChain {
+        effects: kinds
+            .iter()
+            .map(|(id, kind, enabled)| AuxEffect {
+                id: (*id).into(),
+                enabled: *enabled,
+                kind: kind.clone(),
+            })
+            .collect(),
+    };
+    let input = |id: &str, label: &str, kind, chain, gain_db, routes: &[&str]| Input {
+        id: id.into(),
+        label: label.into(),
+        kind,
+        chain,
+        gain_db,
+        mute: false,
+        solo: false,
+        routes: routes.iter().map(|r| (*r).into()).collect(),
+        chatmix: None,
+    };
+    let virt = |node: &str| InputKind::Virtual {
+        node_name: node.into(),
+    };
+    let output = |id: &str, label: &str, kind, chain, gain_db| Output {
+        id: id.into(),
+        label: label.into(),
+        kind,
+        chain,
+        gain_db,
+        mute: false,
+        mono: false,
+    };
+    let mut inputs = vec![
+        input(
+            "voice",
+            "Voice",
+            InputKind::Hardware {
+                sources: vec![
+                    source("alsa_input.arctis-mic", "Arctis Nova Pro mic", 0.0),
+                    source("alsa_input.mg-xu", "MG-XU Input 1", -3.0),
+                ],
+            },
+            fx(&[
+                ("gate-1", AuxEffectKind::default_gate(), true),
+                ("eq-1", AuxEffectKind::default_equalizer(), true),
+                ("compressor-1", AuxEffectKind::default_compressor(), true),
+            ]),
+            -2.0,
+            &["B1"],
+        ),
+        input(
+            "line-in",
+            "Line-in",
+            InputKind::Hardware {
+                sources: vec![source("alsa_input.ryzen-line", "Ryzen HD Audio Line", 0.0)],
+            },
+            fx(&[
+                ("eq-1", AuxEffectKind::default_equalizer(), true),
+                ("gate-1", AuxEffectKind::default_gate(), false),
+            ]),
+            -6.0,
+            &["A1", "A2", "B2"],
+        ),
+        input(
+            "game",
+            "Game",
+            virt("Hako_Game"),
+            EffectChain::default(),
+            0.0,
+            &["A1", "B2"],
+        ),
+        input(
+            "chat",
+            "Chat",
+            virt("Hako_Chat"),
+            EffectChain::default(),
+            -3.0,
+            &["A1"],
+        ),
+        input(
+            "music",
+            "Music",
+            virt("Hako_Music"),
+            fx(&[("eq-1", AuxEffectKind::default_equalizer(), true)]),
+            -14.0,
+            &["A1", "A2", "B2"],
+        ),
+    ];
+    inputs[2].chatmix = Some(ChatMixSide::Game);
+    inputs[3].chatmix = Some(ChatMixSide::Chat);
+    inputs[0].solo = true;
+    let mut outputs = vec![
+        output(
+            "A1",
+            "Headset",
+            OutputKind::Hardware {
+                sink: "alsa_output.arctis".into(),
+            },
+            fx(&[("eq-1", AuxEffectKind::default_equalizer(), true)]),
+            0.0,
+        ),
+        output(
+            "A2",
+            "Speakers",
+            OutputKind::Hardware {
+                sink: "alsa_output.mg-xu".into(),
+            },
+            EffectChain::default(),
+            -10.0,
+        ),
+        output(
+            "B1",
+            "hako Mic",
+            OutputKind::Virtual {
+                node_name: "Hako_Mic".into(),
+            },
+            fx(&[("compressor-1", AuxEffectKind::default_compressor(), true)]),
+            0.0,
+        ),
+        output(
+            "B2",
+            "hako Stream",
+            OutputKind::Virtual {
+                node_name: "Hako_Stream".into(),
+            },
+            EffectChain::default(),
+            -2.0,
+        ),
+    ];
+    outputs[1].mute = true;
+    let device = |node: &str, description: &str, direction, channels| AudioDevice {
+        node: node.into(),
+        description: description.into(),
+        direction,
+        channels,
+    };
+    let file = MixerFile {
+        enabled: true,
+        live: Scene { inputs, outputs },
+        scenes: vec![NamedScene {
+            name: "Streaming".into(),
+            scene: Scene::default(),
+        }],
+        ..MixerFile::default()
+    };
+    file.validate().unwrap();
+    MixerState {
+        file,
+        status: MixerStatus {
+            running: true,
+            problems: vec![StripProblem {
+                strip: "A2".into(),
+                message: "MG-XU Digital is unplugged".into(),
+            }],
+            devices: vec![
+                device(
+                    "alsa_input.arctis-mic",
+                    "Arctis Nova Pro mic",
+                    DeviceDirection::Source,
+                    1,
+                ),
+                device(
+                    "alsa_input.mg-xu",
+                    "MG-XU Input 1",
+                    DeviceDirection::Source,
+                    2,
+                ),
+                device(
+                    "alsa_input.ryzen-line",
+                    "Ryzen HD Audio Line",
+                    DeviceDirection::Source,
+                    2,
+                ),
+                device(
+                    "alsa_input.webcam",
+                    "C920 Webcam",
+                    DeviceDirection::Source,
+                    2,
+                ),
+                device(
+                    "alsa_output.arctis",
+                    "Arctis Nova Pro",
+                    DeviceDirection::Sink,
+                    2,
+                ),
+            ],
+        },
+    }
+}
+
+fn mixer_app(mixer: Option<hako_core::mixer::MixerState>) -> HakoAppUi {
+    let mut app = HakoAppUi {
+        state: Some(sample_state()),
+        daemon_error: None,
+        show_mixer: true,
+        settings: Some(AppSettings::default()),
+        // Two strips in the ok zone, one reaching danger.
+        meter_levels: vec![
+            [0.3, 0.25],
+            [0.08, 0.06],
+            [0.5, 0.45],
+            [0.02, 0.03],
+            [0.2, 0.2],
+        ]
+        .into_iter()
+        .chain([[0.6, 0.95], [0.0, 0.0], [0.3, 0.3], [0.4, 0.38]])
+        .collect(),
+        ..Default::default()
+    };
+    if let Some(m) = mixer {
+        app.mixer.receive(m);
+    }
+    app
+}
+
+#[test]
+fn mixer_page_asks_for_meters_only_while_visible() {
+    use hako_core::mixer::MixerState;
+    let targets = |app: &mut HakoAppUi| {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+        assert!(out.is_empty(), "rendering sent {out:?}");
+        app.meter_targets.clone()
+    };
+    let mut app = mixer_app(Some(sample_mixer()));
+    let all = targets(&mut app);
+    let ids: Vec<String> = all
+        .iter()
+        .map(|t| match t {
+            MeterTargetSpec::MixerInput { id } => format!("in:{id}"),
+            MeterTargetSpec::MixerOutput { id } => format!("out:{id}"),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    // Display order: hardware inputs, virtual inputs, outputs.
+    assert_eq!(
+        ids,
+        [
+            "in:voice",
+            "in:line-in",
+            "in:game",
+            "in:chat",
+            "in:music",
+            "out:A1",
+            "out:A2",
+            "out:B1",
+            "out:B2"
+        ]
+    );
+    assert!(all.len() <= hako_core::ipc::MAX_METER_TARGETS);
+    // Another page, the settings page on top, or the mixer off: no meters.
+    app.show_mixer = false;
+    assert!(targets(&mut app).is_empty());
+    app.show_mixer = true;
+    app.show_settings = true;
+    assert!(targets(&mut app).is_empty());
+    app.show_settings = false;
+    let mut off = sample_mixer();
+    off.file.enabled = false;
+    let mut app = mixer_app(Some(off));
+    assert!(targets(&mut app).is_empty());
+    let mut app = mixer_app(Some(MixerState::default()));
+    assert!(targets(&mut app).is_empty());
+}
+
+#[test]
+fn mixer_page_renders_every_state() {
+    let ctx = egui::Context::default();
+    let mut out = Vec::new();
+    let mut render = |app: &mut HakoAppUi| {
+        for input in [input(), input(), {
+            let mut narrow = input();
+            narrow.screen_rect = Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 600.0),
+            ));
+            narrow
+        }] {
+            let _ = ctx.run(input, |ctx| app.ui(ctx, &mut out));
+        }
+        assert!(out.is_empty(), "rendering sent {out:?}");
+    };
+    // Loading, unavailable (an older hakod), off, and on.
+    render(&mut mixer_app(None));
+    let mut app = mixer_app(None);
+    app.mixer.unavailable("This hakod has no mixer yet.".into());
+    render(&mut app);
+    let mut off = sample_mixer();
+    off.file.enabled = false;
+    render(&mut mixer_app(Some(off)));
+    let mut app = mixer_app(Some(sample_mixer()));
+    render(&mut app);
+    // Every strip's drawer.
+    let m = sample_mixer();
+    let strips = m
+        .file
+        .live
+        .inputs
+        .iter()
+        .map(|i| mixer::Strip::Input(i.id.clone()))
+        .chain(
+            m.file
+                .live
+                .outputs
+                .iter()
+                .map(|o| mixer::Strip::Output(o.id.clone())),
+        );
+    for s in strips {
+        app.mixer.select(s);
+        render(&mut app);
+    }
+    // No strips at all.
+    let mut empty = hako_core::mixer::MixerState::default();
+    empty.file.enabled = true;
+    render(&mut mixer_app(Some(empty)));
+}
+
+/// The mixer page in its states, at the default and the minimum window.
+#[test]
+#[ignore = "needs a GPU (wgpu)"]
+fn snapshot_mixer() {
+    let on = || mixer_app(Some(sample_mixer()));
+    let mut off = sample_mixer();
+    off.file.enabled = false;
+    shoot_app("mixer_off", SHOT, mixer_app(Some(off)), |_| {}, |_| {});
+    let mut unavailable = mixer_app(None);
+    unavailable
+        .mixer
+        .unavailable("This hakod has no mixer yet. Update hako to use it.".into());
+    shoot_app("mixer_unavailable", SHOT, unavailable, |_| {}, |_| {});
+    shoot_app("mixer", SHOT, on(), |_| {}, |_| {});
+    shoot_app("mixer_min_window", [900.0, 600.0], on(), |_| {}, |_| {});
+    shoot_app("mixer_full", [1180.0, 1700.0], on(), |_| {}, |_| {});
+    let mut output = on();
+    output.mixer.select(mixer::Strip::Output("A2".into()));
+    shoot_app(
+        "mixer_output_drawer",
+        [1180.0, 1300.0],
+        output,
+        |_| {},
+        |_| {},
+    );
+    let mut virt = on();
+    virt.mixer.select(mixer::Strip::Input("game".into()));
+    virt.settings = Some(AppSettings {
+        theme: "daylight".into(),
+        ..AppSettings::default()
+    });
+    shoot_app("mixer_daylight", [1180.0, 1300.0], virt, |_| {}, |_| {});
+    for (name, output, virt) in [
+        ("mixer_add_input", false, false),
+        ("mixer_add_virtual_output", true, true),
+    ] {
+        let mut app = on();
+        app.mixer.open_add_dialog(output, virt);
+        shoot_app(name, SHOT, app, |_| {}, |_| {});
+    }
+}
+
+/// Picking "Mixer" in the rail opens the page and asks for the mixer once.
+#[test]
+fn mixer_rail_entry_opens_the_page() {
+    let click = |pos: egui::Pos2, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    // Below the device entries; found by clicking down the rail.
+    for y in (300..760).step_by(10) {
+        let ctx = egui::Context::default();
+        let mut app = mixer_app(Some(sample_mixer()));
+        app.show_mixer = false;
+        let mut out = Vec::new();
+        let at = egui::pos2(100.0, y as f32);
+        let mut press = input();
+        press.events = vec![egui::Event::PointerMoved(at), click(at, true)];
+        let mut release = input();
+        release.events = vec![click(at, false)];
+        for ev in [input(), press, release, input()] {
+            let _ = ctx.run(ev, |ctx| app.ui(ctx, &mut out));
+        }
+        if app.show_mixer {
+            assert!(matches!(out.as_slice(), [UiCommand::GetMixer]), "{out:?}");
+            // Clicking it again while open doesn't ask again.
+            out.clear();
+            let mut press = input();
+            press.events = vec![egui::Event::PointerMoved(at), click(at, true)];
+            let mut release = input();
+            release.events = vec![click(at, false)];
+            for ev in [press, release] {
+                let _ = ctx.run(ev, |ctx| app.ui(ctx, &mut out));
+            }
+            assert!(out.is_empty(), "{out:?}");
+            return;
+        }
+    }
+    panic!("no Mixer entry in the rail");
+}
+
+/// The daemon's state is held back while edits are in flight, then adopted.
+#[test]
+fn mixer_adopts_daemon_state_once_settled() {
+    let ctx = egui::Context::default();
+    let mut app = mixer_app(Some(sample_mixer()));
+    let mut out = Vec::new();
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    let before = app.mixer.state().unwrap().file.clone();
+    let mut answer = sample_mixer();
+    answer.file.live.inputs[0].gain_db = -9.0;
+    app.mixer.busy = true;
+    app.mixer.receive(answer.clone());
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    assert_eq!(app.mixer.state().unwrap().file, before);
+    app.mixer.busy = false;
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    assert_eq!(app.mixer.state().unwrap().file, answer.file);
+    assert!(out.is_empty(), "{out:?}");
+}
+
 // ── README screenshots ───────────────────────────────────────────
 
 /// Bottom of the page content: the last row right of the rail that differs

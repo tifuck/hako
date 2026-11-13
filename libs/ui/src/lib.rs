@@ -7,6 +7,7 @@
 use hako_core::catalog::{SettingGroup, SettingKey, SettingMeta, SettingValue};
 use hako_core::device::{DeviceKind, DeviceSnapshot, HubState};
 use hako_core::ipc::{AppSettings, MeterTargetSpec};
+use hako_core::mixer::MixerOp;
 use hako_core::remap::{CaptureRole, DeviceRemaps, EvdevKey, RemapBinding};
 use hako_core::DeviceId;
 
@@ -14,6 +15,7 @@ pub mod aux;
 pub mod bindings;
 pub mod brand;
 pub mod controls;
+pub mod mixer;
 pub mod theme;
 pub mod widgets;
 
@@ -69,6 +71,10 @@ pub enum UiCommand {
     InstallUpdate,
     /// Hide the offer until the next check.
     DismissUpdate,
+    /// Reload the mixer (`HakoAppUi::mixer` gets the answer).
+    GetMixer,
+    /// Mixer edits, applied in order, all or nothing.
+    PatchMixer(Vec<MixerOp>),
 }
 
 pub struct HakoAppUi {
@@ -82,6 +88,9 @@ pub struct HakoAppUi {
     pub settings: Option<AppSettings>,
     /// Settings view active instead of a device page.
     pub show_settings: bool,
+    /// Mixer page active instead of a device page (settings still win).
+    pub show_mixer: bool,
+    pub mixer: mixer::MixerUi,
     /// Newer release found by the client's update check.
     pub update: Option<widgets::UpdateOffer>,
     /// Commands sent but not yet answered (with the state after them);
@@ -104,6 +113,8 @@ impl Default for HakoAppUi {
             toasts: Vec::new(),
             settings: None,
             show_settings: false,
+            show_mixer: false,
+            mixer: mixer::MixerUi::default(),
             update: None,
             pending: false,
             meter_targets: Vec::new(),
@@ -129,9 +140,11 @@ impl HakoAppUi {
         theme::apply(ctx);
         controls::set_pending(ctx, self.pending);
         self.meter_targets.clear();
+        self.mixer.sync(ctx.dragged_id().is_some());
         self.ensure_selection();
         self.top_bar(ctx, out);
-        self.rail(ctx);
+        self.rail(ctx, out);
+        let mixer_page = self.show_mixer && !self.show_settings;
 
         egui::CentralPanel::default()
             .frame(
@@ -143,10 +156,17 @@ impl HakoAppUi {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.set_max_width((ui.available_width() - 14.0).min(1040.0));
+                        // The console uses all the width it gets.
+                        let cap = if mixer_page { f32::INFINITY } else { 1040.0 };
+                        ui.set_max_width((ui.available_width() - 14.0).min(cap));
                         if self.show_settings {
                             widgets::page_transition(ui, "settings");
                             self.settings_page(ui, out);
+                            return;
+                        }
+                        if mixer_page {
+                            widgets::page_transition(ui, "mixer");
+                            self.mixer_page(ui, out);
                             return;
                         }
                         let device = self.selected.as_ref().and_then(|id| {
@@ -173,6 +193,13 @@ impl HakoAppUi {
         }
         if ctx.input(|i| i.viewport().minimized == Some(true)) {
             self.meter_targets.clear();
+        }
+        // Fader moves go out at ~30 Hz, also after leaving the page mid-drag.
+        if let Some(ops) = self.mixer.flush(ctx.input(|i| i.time)) {
+            out.push(UiCommand::PatchMixer(ops));
+        }
+        if self.mixer.has_unsent() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
     }
 
@@ -291,7 +318,7 @@ impl HakoAppUi {
 
     // ── Device rail ──────────────────────────────────────────────
 
-    fn rail(&mut self, ctx: &egui::Context) {
+    fn rail(&mut self, ctx: &egui::Context, out: &mut Vec<UiCommand>) {
         egui::SidePanel::left("rail")
             .exact_width(236.0)
             .resizable(false)
@@ -307,18 +334,19 @@ impl HakoAppUi {
                     widgets::hint(ui, "Waiting for daemon…");
                     return;
                 };
-                if st.devices.is_empty() {
-                    widgets::hint(ui, "No supported devices found.");
-                    return;
-                }
                 let mut devices = st.devices.clone();
                 devices.sort_by_key(|d| kind_order(d.kind));
 
                 // Highlight is painted behind the entries and slides between them.
                 let highlight = ui.painter().add(egui::Shape::Noop);
                 let mut target = None;
+                if devices.is_empty() {
+                    widgets::hint(ui, "No supported devices found.");
+                }
                 for d in &devices {
-                    let selected = !self.show_settings && self.selected.as_ref() == Some(&d.id);
+                    let selected = !self.show_settings
+                        && !self.show_mixer
+                        && self.selected.as_ref() == Some(&d.id);
                     let resp = rail_entry(ui, d, selected);
                     if selected {
                         target = Some(resp.rect);
@@ -326,7 +354,25 @@ impl HakoAppUi {
                     if resp.clicked() {
                         self.selected = Some(d.id.clone());
                         self.show_settings = false;
+                        self.show_mixer = false;
                     }
+                }
+
+                ui.add_space(theme::SPACE_LG);
+                ui.label(theme::eyebrow("Audio"));
+                ui.add_space(theme::SPACE_SM);
+                let selected = self.show_mixer && !self.show_settings;
+                let (status, dot) = self.mixer.rail_status();
+                let resp = rail_item(ui, selected, "Mixer", &status, dot, widgets::icon_mixer);
+                if selected {
+                    target = Some(resp.rect);
+                }
+                if resp.clicked() {
+                    if !selected {
+                        out.push(UiCommand::GetMixer);
+                    }
+                    self.show_mixer = true;
+                    self.show_settings = false;
                 }
                 if let Some(r) = target {
                     let y = ui.ctx().animate_value_with_time(
@@ -378,41 +424,6 @@ impl HakoAppUi {
 }
 
 fn rail_entry(ui: &mut egui::Ui, d: &DeviceSnapshot, selected: bool) -> egui::Response {
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 58.0), egui::Sense::click());
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(resp.id, resp.hovered() && !selected, 0.12);
-    let p = ui.painter();
-    if hover > 0.0 {
-        p.rect_filled(rect, 10.0, pal().surface_hi.gamma_multiply(0.6 * hover));
-    }
-    let icon = egui::Rect::from_center_size(
-        rect.left_center() + egui::vec2(26.0, 0.0),
-        egui::vec2(22.0, 22.0),
-    );
-    widgets::icon_device(
-        p,
-        icon,
-        if selected {
-            pal().accent
-        } else {
-            pal().text_muted
-        },
-        d.kind,
-    );
-    let x = rect.left() + 52.0;
-    p.text(
-        egui::pos2(x, rect.top() + 20.0),
-        egui::Align2::LEFT_CENTER,
-        short_name(&d.name),
-        egui::FontId::proportional(13.5),
-        if selected {
-            pal().text
-        } else {
-            pal().text.gamma_multiply(0.85)
-        },
-    );
     let (status, color) = if d.connected {
         match d
             .batteries
@@ -428,15 +439,60 @@ fn rail_entry(ui: &mut egui::Ui, d: &DeviceSnapshot, selected: bool) -> egui::Re
     } else {
         ("Unavailable".into(), theme::pal().danger)
     };
-    p.circle_filled(
-        egui::pos2(x + 3.0, rect.top() + 39.0),
-        3.0,
-        if d.connected {
-            color
+    rail_item(
+        ui,
+        selected,
+        &short_name(&d.name),
+        &status,
+        color,
+        |p, r, c| widgets::icon_device(p, r, c, d.kind),
+    )
+}
+
+/// One rail entry: icon, name, and a status line with a coloured dot.
+fn rail_item(
+    ui: &mut egui::Ui,
+    selected: bool,
+    name: &str,
+    status: &str,
+    dot: egui::Color32,
+    icon: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32),
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 58.0), egui::Sense::click());
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(resp.id, resp.hovered() && !selected, 0.12);
+    let p = ui.painter();
+    if hover > 0.0 {
+        p.rect_filled(rect, 10.0, pal().surface_hi.gamma_multiply(0.6 * hover));
+    }
+    let icon_rect = egui::Rect::from_center_size(
+        rect.left_center() + egui::vec2(26.0, 0.0),
+        egui::vec2(22.0, 22.0),
+    );
+    icon(
+        p,
+        icon_rect,
+        if selected {
+            pal().accent
         } else {
-            theme::pal().danger
+            pal().text_muted
         },
     );
+    let x = rect.left() + 52.0;
+    p.text(
+        egui::pos2(x, rect.top() + 20.0),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(13.5),
+        if selected {
+            pal().text
+        } else {
+            pal().text.gamma_multiply(0.85)
+        },
+    );
+    p.circle_filled(egui::pos2(x + 3.0, rect.top() + 39.0), 3.0, dot);
     p.text(
         egui::pos2(x + 12.0, rect.top() + 39.0),
         egui::Align2::LEFT_CENTER,

@@ -31,6 +31,10 @@ pub enum Method {
     SubscribeEvents,
     /// Like `SubscribeEvents`, for `Meters` frames of `SubscribeMetersParams`.
     SubscribeMeters,
+    /// `MixerState` (`crate::mixer`).
+    GetMixer,
+    /// `PatchMixerParams`; returns the new `MixerState`.
+    PatchMixer,
 }
 
 /// Server-pushed event types (`"type":"DeviceUpdated"`).
@@ -45,6 +49,8 @@ pub enum EventKind {
     DaemonShuttingDown,
     /// ~30 Hz on a `SubscribeMeters` connection; payload `MeterLevels`.
     Meters,
+    /// The mixer file or its status changed; payload `MixerState`.
+    MixerUpdated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +136,10 @@ pub enum MeterTargetSpec {
     AuxOutput,
     /// A node by `node.name`; `monitor_sink` meters what a sink plays.
     Node { name: String, monitor_sink: bool },
+    /// A mixer input strip, after its fader (`crate::mixer::Input::id`).
+    MixerInput { id: String },
+    /// A mixer output master, after its fader.
+    MixerOutput { id: String },
 }
 
 /// Most targets one meter subscription may hold.

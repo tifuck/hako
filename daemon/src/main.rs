@@ -4,12 +4,13 @@ mod drivers;
 mod hid;
 mod hub;
 mod ipc_server;
+mod mixer;
 mod remap;
 mod worker;
 
 use anyhow::Result;
 use clap::Parser;
-use hako_audio::latency::{run_latency_test, LatencyTestOptions};
+use hako_audio::latency::{run_latency_test, LatencyPath, LatencyTestOptions};
 use hako_audio::AudioService;
 use hako_core::config::{load_app_config, ConfigPaths};
 use hako_core::default_socket_path;
@@ -49,10 +50,16 @@ struct Cli {
     #[arg(long)]
     diagnose: bool,
 
-    /// Measure the latency the default AUX chain adds over a direct link
-    /// (software only, no device plays anything); exit 1 if over one quantum
+    /// Measure the latency the default AUX chain (or a mixer path) adds
+    /// over a direct link (software only, no device plays anything); exit 1
+    /// if over one quantum
     #[arg(long)]
     latency_test: bool,
+
+    /// With --latency-test: `aux` (the line-in chain) or `mixer` (a virtual
+    /// input with that chain routed to a virtual output)
+    #[arg(long, default_value = "aux", value_parser = ["aux", "mixer"], requires = "latency_test")]
+    path: String,
 
     /// With --latency-test: the `node.latency` preset
     #[arg(long, default_value = "balanced", value_parser = ["low", "balanced", "safe"], requires = "latency_test")]
@@ -99,7 +106,11 @@ async fn main() -> Result<()> {
         return reset_audio_cli(&socket, &paths);
     }
     if cli.latency_test {
-        return latency_test_cli(&cli.latency, cli.seconds).await;
+        let path = match cli.path.as_str() {
+            "mixer" => LatencyPath::Mixer,
+            _ => LatencyPath::Aux,
+        };
+        return latency_test_cli(&cli.latency, cli.seconds, path).await;
     }
 
     paths.ensure()?;
@@ -153,7 +164,7 @@ async fn main() -> Result<()> {
 }
 
 /// Ctrl-C / SIGTERM stop the run; it cleans up before returning.
-async fn latency_test_cli(preset: &str, seconds: u32) -> Result<()> {
+async fn latency_test_cli(preset: &str, seconds: u32, path: LatencyPath) -> Result<()> {
     let latency = audio_latency_samples(preset)
         .ok_or_else(|| anyhow::anyhow!("unknown latency preset {preset}"))?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -166,7 +177,11 @@ async fn latency_test_cli(preset: &str, seconds: u32) -> Result<()> {
         }
         flag.store(true, Ordering::Relaxed);
     });
-    let opts = LatencyTestOptions { latency, seconds };
+    let opts = LatencyTestOptions {
+        latency,
+        seconds,
+        path,
+    };
     let report = tokio::task::spawn_blocking(move || run_latency_test(&opts, &stop)).await??;
     print!("{report}");
     if report.verdict().is_err() {

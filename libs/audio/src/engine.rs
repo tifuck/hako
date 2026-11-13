@@ -32,7 +32,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Longest a request waits for the engine thread (a hung server must not
 /// hold the audio lock forever).
@@ -43,6 +43,8 @@ const BACKOFF_MIN: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// Metadata key `wpctl set-default` writes; WirePlumber follows it.
 const CONFIGURED_SINK: &str = "default.configured.audio.sink";
+/// Linux `EPIPE`: the core error a lost connection reports.
+const EPIPE: i32 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -63,8 +65,7 @@ pub struct Port {
     pub node: u32,
     pub name: String,
     pub direction: Direction,
-    /// `audio.channel` (`FL`, `MONO`, ...); the mixer routes by it (phase 2).
-    #[allow(dead_code)]
+    /// `audio.channel` (`FL`, `MONO`, `AUX0`, ...); the mixer links by it.
     pub channel: String,
 }
 
@@ -128,6 +129,35 @@ impl Graph {
         ports
             .iter()
             .all(|port| self.port(node, port, direction).is_some())
+    }
+
+    /// Audio ports of `node` in `direction` (a sink's monitor ports are not),
+    /// as `(port id, channel)` in id order.
+    pub fn channels(&self, node: &str, direction: Direction) -> Vec<(u32, &str)> {
+        let Some(id) = self.node_id(node) else {
+            return Vec::new();
+        };
+        self.ports
+            .iter()
+            .filter(|(_, p)| {
+                p.node == id && p.direction == direction && !p.name.starts_with("monitor_")
+            })
+            .map(|(&port, p)| (port, p.channel.as_str()))
+            .collect()
+    }
+
+    /// `(node id, port id)` of `node`'s `channel` port in `direction`.
+    pub fn channel_port(
+        &self,
+        node: &str,
+        channel: &str,
+        direction: Direction,
+    ) -> Option<(u32, u32)> {
+        let id = self.node_id(node)?;
+        self.channels(node, direction)
+            .into_iter()
+            .find(|(_, c)| *c == channel)
+            .map(|(port, _)| (id, port))
     }
 
     fn port_label(&self, id: u32) -> Option<String> {
@@ -205,6 +235,17 @@ pub fn volume_pod(volume: f32, channels: usize) -> Result<Vec<u8>> {
         spa::sys::SPA_PROP_channelVolumes,
         Value::ValueArray(ValueArray::Float(vec![volume; channels])),
     )])
+}
+
+/// `Props` with `channelVolumes` (every channel `volume`, linear) and `mute`.
+pub fn fader_pod(volume: f32, mute: bool, channels: usize) -> Result<Vec<u8>> {
+    props_pod(vec![
+        Property::new(
+            spa::sys::SPA_PROP_channelVolumes,
+            Value::ValueArray(ValueArray::Float(vec![volume; channels])),
+        ),
+        Property::new(spa::sys::SPA_PROP_mute, Value::Bool(mute)),
+    ])
 }
 
 /// `Props` with a filter-chain `params` struct: `"node:port" value` pairs.
@@ -648,9 +689,15 @@ impl Conn {
                 })
                 .error(move |id, _seq, res, message| {
                     // Errors of other objects reach their proxy's listener.
-                    if id == pw::core::PW_ID_CORE {
+                    // The server also reports harmless ones on the core
+                    // ("unknown resource" when a proxy is destroyed after
+                    // its object went, e.g. links of a node that exited);
+                    // only a broken connection is fatal.
+                    if id == pw::core::PW_ID_CORE && res == -EPIPE {
                         warn!("PipeWire: {message} ({res})");
                         dead.set(true);
+                    } else {
+                        debug!("PipeWire: object {id}: {message} ({res})");
                     }
                 })
                 .register()
@@ -918,6 +965,8 @@ mod tests {
         let pod = volume_pod(0.125, 2).unwrap();
         assert!(Pod::from_bytes(&pod).is_some_and(|pod| pod.is_object()));
         let pod = params_pod(&[("fx0:Ratio".into(), 4.0)]).unwrap();
+        assert!(Pod::from_bytes(&pod).is_some_and(|pod| pod.is_object()));
+        let pod = fader_pod(0.5, true, 2).unwrap();
         assert!(Pod::from_bytes(&pod).is_some_and(|pod| pod.is_object()));
     }
 }

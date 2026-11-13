@@ -195,6 +195,13 @@ it through your headset. The signal can run through a drag-to-reorder chain:
 hako only manages its own nodes. It remembers your default output and puts it
 back when it stops, and `hakod --reset-audio` is a one-command kill switch.
 
+### Mixer (new)
+
+A VoiceMeeter-style console under **Audio → Mixer**: merge several microphones
+into one strip, send line-in or apps to several devices at once, and give
+Discord or OBS their own virtual microphones. Every strip has a fader, meters,
+mute, routing buttons and its own processing chain; save layouts as scenes.
+
 ### Make it yours
 
 <img src="docs/screenshots/themes.png" alt="The same page in the Onyx, Graphite, Synthwave and Daylight themes" width="100%">
