@@ -782,6 +782,10 @@ impl DeviceAdapter for UniversalMouse {
         Ok(())
     }
 
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings, &mut a.user])
+    }
+
     fn tick(&mut self) -> Result<()> {
         if self.dev.is_none() {
             return Ok(());
@@ -1030,6 +1034,10 @@ impl DeviceAdapter for DartMouse {
     }
 
     /// Heartbeat every [`POLL`]; silence means the mouse is off or asleep.
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings])
+    }
+
     fn tick(&mut self) -> Result<()> {
         let Some(dev) = self.dev.as_mut() else {
             return Ok(());

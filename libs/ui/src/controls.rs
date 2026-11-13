@@ -123,9 +123,10 @@ fn settled(ui: &Ui, d: &DeviceSnapshot, out: &[UiCommand]) -> bool {
             .ctx()
             .data(|m| m.get_temp::<bool>(pending_id()))
             .unwrap_or(false)
-        && !out
-            .iter()
-            .any(|c| matches!(c, UiCommand::Set { device_id, .. } if *device_id == d.id))
+        && !out.iter().any(|c| {
+            matches!(c, UiCommand::Set { device_id, .. } | UiCommand::SetMany { device_id, .. }
+                if *device_id == d.id)
+        })
 }
 
 fn is_int(meta: &SettingMeta) -> bool {
@@ -509,9 +510,14 @@ fn color_row(
                 m.insert_temp(draft_id, rgb);
                 m.insert_temp(sent_id, rgb);
             });
-            for (k, v) in trio.iter().zip(rgb) {
-                set(out, d, *k, SettingValue::Int(v as i64));
-            }
+            out.push(UiCommand::SetMany {
+                device_id: d.id.clone(),
+                values: trio
+                    .iter()
+                    .zip(rgb)
+                    .map(|(k, v)| (*k, SettingValue::Int(v.into())))
+                    .collect(),
+            });
         }
     }
     if settled(ui, d, out) {

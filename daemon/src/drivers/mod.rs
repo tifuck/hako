@@ -28,8 +28,8 @@ pub mod wooting;
 use crate::hid::HidDeviceInfo;
 use anyhow::{bail, Result};
 use hako_audio::AudioService;
-use hako_core::catalog::{SettingKey, SettingValue};
-use hako_core::config::ConfigPaths;
+use hako_core::catalog::{SettingKey, SettingValue, SettingsMap};
+use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
 use hako_core::protocol::AdapterEvent;
 use std::sync::{Arc, Mutex};
@@ -336,6 +336,12 @@ pub trait DeviceAdapter: Send {
     fn id(&self) -> &DeviceId;
     fn snapshot(&self) -> DeviceSnapshot;
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()>;
+    /// Several values the daemon has already checked, written together (a
+    /// colour's three channels). By default one `set` each; a driver whose
+    /// one write carries several of them overrides it (see [`set_colors`]).
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        set_each(self, values)
+    }
     fn tick(&mut self) -> Result<()>;
     fn shutdown(&mut self);
     /// How often `tick` runs. Shorten it (e.g. ~50 ms) for devices whose
@@ -343,6 +349,55 @@ pub trait DeviceAdapter: Send {
     fn tick_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(1)
     }
+}
+
+/// One `set` per value, in order: what `set_many` does by default.
+pub fn set_each<A: DeviceAdapter + ?Sized>(
+    a: &mut A,
+    values: &[(SettingKey, SettingValue)],
+) -> Result<()> {
+    values.iter().try_for_each(|(k, v)| a.set(*k, v.clone()))
+}
+
+const COLOR_KEYS: [SettingKey; 3] = [SettingKey::ColorR, SettingKey::ColorG, SettingKey::ColorB];
+
+/// `set_many` for a driver whose `set` of a colour channel stores it in
+/// `maps` (the live settings first) and re-sends the lighting built from all
+/// three channels: the other channels are stored first, so one `set` writes
+/// the lighting once. A changed channel goes through `set`, so its own change
+/// checks (e.g. what save mode stores) see the change, and its value shows
+/// whether `set` rolled back; the stored channels then roll back with it.
+/// Anything but distinct colour channels is set one by one.
+pub fn set_colors<A: DeviceAdapter>(
+    a: &mut A,
+    values: &[(SettingKey, SettingValue)],
+    maps: for<'a> fn(&'a mut A) -> Vec<&'a mut SettingsMap>,
+) -> Result<()> {
+    let colors = values
+        .iter()
+        .enumerate()
+        .all(|(i, (k, _))| COLOR_KEYS.contains(k) && values[..i].iter().all(|(o, _)| o != k));
+    if values.is_empty() || !colors {
+        return set_each(a, values);
+    }
+    let before: Vec<SettingsMap> = maps(a).into_iter().map(|m| m.clone()).collect();
+    let last = values
+        .iter()
+        .rposition(|(k, v)| get_setting(&before[0], *k) != Some(v))
+        .unwrap_or(values.len() - 1);
+    for (k, v) in values[..last].iter().chain(&values[last + 1..]) {
+        for m in maps(a) {
+            merge_setting(m, *k, v.clone());
+        }
+    }
+    let (key, value) = &values[last];
+    let result = a.set(*key, value.clone());
+    if result.is_err() && get_setting(&*maps(a)[0], *key) != Some(value) {
+        for (m, b) in maps(a).into_iter().zip(before) {
+            *m = b;
+        }
+    }
+    result
 }
 
 /// Shown when a known device is plugged in but hidraw cannot be opened (usually permissions).
@@ -408,6 +463,8 @@ impl DeviceAdapter for PlaceholderAdapter {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn device_list_file_matches_driver_registry() {
         assert_eq!(
@@ -440,5 +497,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Stores what it is set to and counts lighting writes; a failing write
+    /// keeps the value (`revert` false) or puts the old one back.
+    struct Lamp {
+        id: DeviceId,
+        settings: SettingsMap,
+        writes: usize,
+        fail: bool,
+        revert: bool,
+    }
+
+    impl DeviceAdapter for Lamp {
+        fn id(&self) -> &DeviceId {
+            &self.id
+        }
+        fn snapshot(&self) -> DeviceSnapshot {
+            unimplemented!()
+        }
+        fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+            let before = self.settings.clone();
+            merge_setting(&mut self.settings, key, value);
+            self.writes += 1;
+            if self.fail {
+                if self.revert {
+                    self.settings = before;
+                }
+                anyhow::bail!("unplugged");
+            }
+            Ok(())
+        }
+        fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+            set_colors(self, values, |a| vec![&mut a.settings])
+        }
+        fn tick(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn shutdown(&mut self) {}
+    }
+
+    #[test]
+    fn a_color_batch_is_one_write_and_fails_as_one() {
+        let int = SettingValue::Int;
+        let rgb = |r, g, b| {
+            [
+                (SettingKey::ColorR, int(r)),
+                (SettingKey::ColorG, int(g)),
+                (SettingKey::ColorB, int(b)),
+            ]
+        };
+        let lamp = |fail, revert| Lamp {
+            id: DeviceId {
+                vendor_id: 1,
+                product_id: 2,
+                instance: "lamp".into(),
+            },
+            settings: rgb(9, 9, 9)
+                .into_iter()
+                .map(|(k, v)| (k.as_str().into(), v))
+                .collect(),
+            writes: 0,
+            fail,
+            revert,
+        };
+        let stored = |a: &Lamp| {
+            [SettingKey::ColorR, SettingKey::ColorG, SettingKey::ColorB]
+                .map(|k| get_setting(&a.settings, k).and_then(|v| v.as_int()))
+        };
+
+        let mut a = lamp(false, true);
+        a.set_many(&rgb(1, 2, 3)).unwrap();
+        assert_eq!((a.writes, stored(&a)), (1, [Some(1), Some(2), Some(3)]));
+        // Only the first channel changes: it is the one `set` sees.
+        a.set_many(&rgb(4, 2, 3)).unwrap();
+        assert_eq!((a.writes, stored(&a)), (2, [Some(4), Some(2), Some(3)]));
+
+        // A failed write the driver rolls back takes the whole colour back.
+        let mut a = lamp(true, true);
+        assert!(a.set_many(&rgb(1, 9, 3)).is_err());
+        assert_eq!((a.writes, stored(&a)), (1, [Some(9); 3]));
+        // A driver that keeps a failed value keeps the whole colour.
+        let mut a = lamp(true, false);
+        assert!(a.set_many(&rgb(1, 9, 3)).is_err());
+        assert_eq!((a.writes, stored(&a)), (1, [Some(1), Some(9), Some(3)]));
+
+        // Anything else is one `set` per value.
+        let mut a = lamp(false, true);
+        let mixed = [
+            (SettingKey::Brightness, int(50)),
+            (SettingKey::ColorR, int(1)),
+        ];
+        a.set_many(&mixed).unwrap();
+        a.set_many(&[(SettingKey::ColorR, int(2)), (SettingKey::ColorR, int(3))])
+            .unwrap();
+        assert_eq!((a.writes, stored(&a)[0]), (4, Some(3)));
     }
 }

@@ -5,7 +5,7 @@
 //! (`/usr/bin`, updated through apt) or `install-user.sh` (`~/.local/bin`,
 //! updated from the tarball). Every other build never touches the network.
 //!
-//! Uses `curl`, `sha256sum` and `tar` like the daemon uses `pw-*`: present on
+//! Uses `curl`, `sha256sum`, `ssh-keygen` and `tar` like the daemon uses `pw-*`: present on
 //! every desktop, no TLS stack in the binary.
 
 use anyhow::{bail, Context, Result};
@@ -18,6 +18,12 @@ const UDEV_RULES: &str = "/etc/udev/rules.d/70-hako.rules";
 /// Set for the restarted UI so it can confirm the update.
 pub const UPDATED_ENV: &str = "HAKO_UPDATED";
 pub const WARN_ENV: &str = "HAKO_UPDATE_WARN";
+/// `publish.sh` signs every release's `SHA256SUMS` with this key, whose
+/// private half never leaves the maintainer's machine: a hijacked GitHub
+/// account or release token cannot ship an update without it.
+const SIGNING_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJMt1vykoBFjxuEOvgx8kwO1jhHc4NtrJ3s0TchN+Aqf hako-release";
+const SIG_NAMESPACE: &str = "hako-release";
 
 /// A published release newer than this build.
 #[derive(Clone, Debug)]
@@ -27,6 +33,8 @@ pub struct Release {
     name: String,
     url: String,
     sums_url: String,
+    /// Signature of `SHA256SUMS`, on the mirror's `signatures` branch.
+    sig_url: String,
 }
 
 /// A downloaded and verified release, installed on restart.
@@ -36,6 +44,13 @@ pub struct Ready {
     file: PathBuf,
     /// SHA-256 the download was verified against.
     sum: String,
+}
+
+impl Ready {
+    /// False once a failed install discarded the download.
+    pub fn on_disk(&self) -> bool {
+        self.file.exists()
+    }
 }
 
 /// Where this build updates from: `(owner/repo, installed hako path)`.
@@ -92,6 +107,7 @@ pub fn check(repo: &str) -> Result<Option<Release>> {
         name,
         url,
         sums_url,
+        sig_url: format!("https://raw.githubusercontent.com/{repo}/signatures/{tag}.sig"),
     }))
 }
 
@@ -132,7 +148,15 @@ pub fn download(rel: &Release) -> Result<Ready> {
     std::fs::create_dir_all(&dir)?;
     let file = dir.join(&rel.name);
     run(curl().arg("-o").arg(&file).arg(&rel.url)).context("download failed")?;
-    let sums = String::from_utf8(run(curl().arg(&rel.sums_url))?)?;
+    let sums = run(curl().arg(&rel.sums_url))?;
+    let signed = run(curl().arg(&rel.sig_url))
+        .with_context(|| format!("v{} is not signed yet", rel.version))
+        .and_then(|sig| verify_signature(&dir, SIGNING_KEY, &sums, &sig));
+    if let Err(e) = signed {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    let sums = String::from_utf8(sums)?;
     let want = expected_sum(&sums, &rel.name).context("checksums do not list the download")?;
     let got = String::from_utf8(run(Command::new("sha256sum").arg(&file))?)?;
     if got.split_whitespace().next() != Some(want.as_str()) {
@@ -167,7 +191,11 @@ fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
     // the file after `download` checked it. Root only gets these checked
     // bytes over stdin, never a path to read.
     let data = std::fs::read(file)?;
-    check_sum(&data, sum)?;
+    if let Err(e) = check_sum(&data, sum) {
+        // Spent: the next check downloads it again instead of retrying this.
+        let _ = std::fs::remove_dir_all(dir);
+        return Err(e);
+    }
     if name.ends_with(".deb") {
         // apt installs rules and units and restarts the daemons (postinst).
         run_input(
@@ -274,6 +302,36 @@ fn run_input(cmd: &mut Command, input: &[u8]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// Fails unless `sig` is `key`'s signature of `data` (`ssh-keygen -Y sign
+/// -n hako-release`). `dir` holds the files ssh-keygen reads.
+fn verify_signature(dir: &Path, key: &str, data: &[u8], sig: &[u8]) -> Result<()> {
+    let signers = dir.join("allowed_signers");
+    let sig_file = dir.join("SHA256SUMS.sig");
+    std::fs::write(
+        &signers,
+        format!("{SIG_NAMESPACE} namespaces=\"{SIG_NAMESPACE}\" {key}\n"),
+    )?;
+    std::fs::write(&sig_file, sig)?;
+    run_input(
+        Command::new("ssh-keygen")
+            .args([
+                "-Y",
+                "verify",
+                "-I",
+                SIG_NAMESPACE,
+                "-n",
+                SIG_NAMESPACE,
+                "-f",
+            ])
+            .arg(&signers)
+            .arg("-s")
+            .arg(&sig_file),
+        data,
+    )
+    .context("release signature check failed (needs ssh-keygen from openssh-client)")?;
+    Ok(())
+}
+
 /// Fails unless `data` still hashes to `want`, the sum `download` verified.
 fn check_sum(data: &[u8], want: &str) -> Result<()> {
     let got = String::from_utf8(run_input(&mut Command::new("sha256sum"), data)?)?;
@@ -331,6 +389,39 @@ mod tests {
         );
         assert_eq!(expected_sum(sums, "other.tar.gz").as_deref(), Some("cd34"));
         assert_eq!(expected_sum(sums, "missing.tar.gz"), None);
+    }
+
+    #[test]
+    fn only_the_release_key_signs_updates() {
+        let dir = std::env::temp_dir().join(format!("hako-sig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let keygen = |name: &str| {
+            let key = dir.join(name);
+            run(Command::new("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-C", name, "-f"])
+                .arg(&key))
+            .unwrap();
+            key
+        };
+        let (good, bad) = (keygen("good"), keygen("bad"));
+        let sign = |key: &Path, data: &[u8]| {
+            run_input(
+                Command::new("ssh-keygen")
+                    .args(["-q", "-Y", "sign", "-n", SIG_NAMESPACE, "-f"])
+                    .arg(key),
+                data,
+            )
+            .unwrap()
+        };
+        let public = std::fs::read_to_string(good.with_extension("pub")).unwrap();
+        let sums = b"abc  hako.deb\n";
+        let sig = sign(&good, sums);
+        assert!(verify_signature(&dir, public.trim(), sums, &sig).is_ok());
+        assert!(verify_signature(&dir, public.trim(), b"abd  hako.deb\n", &sig).is_err());
+        assert!(verify_signature(&dir, public.trim(), sums, &sign(&bad, sums)).is_err());
+        assert!(verify_signature(&dir, public.trim(), sums, b"not a signature").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -15,6 +15,8 @@ pub enum Method {
     ListDevices,
     GetSnapshot,
     Set,
+    /// Several values for one device, written together (a colour's R, G, B).
+    SetMany,
     ListProfiles,
     ApplyProfile,
     SaveProfile,
@@ -101,6 +103,13 @@ pub struct SetParams {
     pub device_id: DeviceId,
     pub key: SettingKey,
     pub value: SettingValue,
+}
+
+/// All checked before any is written; the device applies them together.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetManyParams {
+    pub device_id: DeviceId,
+    pub values: Vec<(SettingKey, SettingValue)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

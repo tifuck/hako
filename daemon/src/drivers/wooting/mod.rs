@@ -444,6 +444,10 @@ impl DeviceAdapter for Wooting {
         )
     }
 
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings])
+    }
+
     fn tick(&mut self) -> Result<()> {
         Ok(())
     }

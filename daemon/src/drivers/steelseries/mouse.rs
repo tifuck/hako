@@ -966,6 +966,10 @@ impl DeviceAdapter for MouseAdapter {
         Ok(())
     }
 
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings])
+    }
+
     fn tick(&mut self) -> Result<()> {
         if self.dev.is_some() && self.last_battery.elapsed() >= BATTERY_POLL {
             self.poll_battery();

@@ -32,6 +32,11 @@ pub enum UiCommand {
         key: SettingKey,
         value: SettingValue,
     },
+    /// Several values written together (a colour's R, G, B): one device write.
+    SetMany {
+        device_id: DeviceId,
+        values: Vec<(SettingKey, SettingValue)>,
+    },
     ApplyProfile(String),
     SaveProfile(String),
     ResetAudio,

@@ -519,6 +519,10 @@ impl DeviceAdapter for QmkKeyboard {
         Ok(())
     }
 
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings])
+    }
+
     fn tick(&mut self) -> Result<()> {
         if self.last_poll.elapsed() >= BATTERY_POLL {
             self.last_poll = Instant::now();

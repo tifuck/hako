@@ -3,6 +3,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use hako_core::{
     ipc::{AuxEffectChain, AuxEffectKind, EqBandKind},
+    protocol::is_new_error,
     AuxConfig,
 };
 use regex::Regex;
@@ -11,7 +12,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -122,6 +123,9 @@ struct AudioState {
     /// hides the other's error.
     chatmix_error: Option<String>,
     aux_error: Option<String>,
+    /// The errors above as last handed to `on_error` or returned to a caller.
+    chatmix_reported: Option<String>,
+    aux_reported: Option<String>,
     /// ChatMix takes the default sink when it comes up.
     chatmix_set_default: bool,
     /// Set by `reset_all` (the kill-switch): ChatMix stays down until
@@ -129,8 +133,11 @@ struct AudioState {
     chatmix_suppressed: bool,
 }
 
+type ErrorHook = Box<dyn Fn(String) + Send + Sync>;
+
 pub struct AudioService {
     state: Mutex<AudioState>,
+    on_error: OnceLock<ErrorHook>,
 }
 
 impl AudioService {
@@ -142,9 +149,33 @@ impl AudioService {
                 defaults: DefaultState::default(),
                 chatmix_error: None,
                 aux_error: None,
+                chatmix_reported: None,
+                aux_reported: None,
                 chatmix_set_default: true,
                 chatmix_suppressed: false,
             }),
+            on_error: OnceLock::new(),
+        }
+    }
+
+    /// Called (under the audio lock: it must not block) with each new ChatMix /
+    /// AUX failure of background work (retries, healing, the ChatMix dial).
+    /// Failures of calls whose caller gets the error are not passed. Set once.
+    pub fn on_error(&self, hook: impl Fn(String) + Send + Sync + 'static) {
+        let _ = self.on_error.set(Box::new(hook));
+    }
+
+    /// After background work: hand each part's new error to `on_error`.
+    fn report(&self, s: &mut AudioState) {
+        for (part, error, reported) in [
+            ("ChatMix", &s.chatmix_error, &mut s.chatmix_reported),
+            ("AUX", &s.aux_error, &mut s.aux_reported),
+        ] {
+            if is_new_error(reported, error.as_deref()) {
+                if let (Some(hook), Some(e)) = (self.on_error.get(), error) {
+                    hook(format!("{part}: {e}"));
+                }
+            }
         }
     }
 
@@ -205,6 +236,7 @@ impl AudioService {
 
         let result = ensure_chatmix_locked(&mut state, sink_regexes);
         record_result(&mut state.chatmix_error, &result);
+        self.report(&mut state);
         result
     }
 
@@ -229,6 +261,7 @@ impl AudioService {
             release_default(&mut state.defaults, DefaultOwner::ChatMix)
         };
         record_result(&mut state.chatmix_error, &result);
+        seen(&mut state);
         result
     }
 
@@ -252,6 +285,7 @@ impl AudioService {
         };
         state.chatmix.volumes = result.is_ok().then_some((game, chat));
         record_result(&mut state.chatmix_error, &result);
+        self.report(&mut state);
         result
     }
 
@@ -259,6 +293,7 @@ impl AudioService {
         let mut state = self.state();
         let result = destroy_chatmix_locked(&mut state);
         record_result(&mut state.chatmix_error, &result);
+        seen(&mut state);
         result
     }
 
@@ -269,15 +304,19 @@ impl AudioService {
         }
         let result = aux_enable_locked(&mut state, cfg, chain);
         record_result(&mut state.aux_error, &result);
+        seen(&mut state);
         result
     }
 
-    /// Keeps AUX requested after a failed `aux_enable` so `heal_aux` retries it.
+    /// Keeps AUX requested after a failed `aux_enable` so `heal_aux` retries
+    /// it. That enable was automatic, so its error goes to `on_error`.
     pub fn aux_keep_pending(&self, cfg: &AuxConfig, chain: &AuxEffectChain) {
         let mut state = self.state();
         if state.aux.is_none() {
             state.aux = Some(AuxState::pending(cfg.clone(), chain.clone()));
         }
+        state.aux_reported = None;
+        self.report(&mut state);
     }
 
     /// PipeWire silently drops `pw-link` links when a node is recreated
@@ -302,12 +341,14 @@ impl AudioService {
             state.aux = Some(AuxState::pending(cfg, chain));
         }
         record_result(&mut state.aux_error, &result);
+        self.report(&mut state);
     }
 
     pub fn aux_disable(&self) -> Result<()> {
         let mut state = self.state();
         let result = aux_disable_locked(&mut state);
         record_result(&mut state.aux_error, &result);
+        seen(&mut state);
         result
     }
 
@@ -327,6 +368,7 @@ impl AudioService {
             None => bail_result("AUX is not active"),
         };
         record_result(&mut state.aux_error, &result);
+        seen(&mut state);
         result
     }
 
@@ -351,6 +393,7 @@ impl AudioService {
                     aux.chain = chain.clone();
                 }
                 record_result(&mut state.aux_error, &result);
+                seen(&mut state);
                 return result;
             }
         }
@@ -385,6 +428,7 @@ impl AudioService {
             state.aux = Some(AuxState::pending(cfg.clone(), chain.clone()));
         }
         record_result(&mut state.aux_error, &result);
+        seen(&mut state);
         result
     }
 
@@ -400,6 +444,7 @@ impl AudioService {
         }
         record_result(&mut state.aux_error, &aux);
         record_result(&mut state.chatmix_error, &chatmix);
+        seen(&mut state);
         aux.and(chatmix)
     }
 
@@ -450,6 +495,12 @@ impl Drop for AudioService {
 
 fn record_result(slot: &mut Option<String>, result: &Result<()>) {
     *slot = result.as_ref().err().map(|error| format!("{error:#}"));
+}
+
+/// After a call whose caller gets the error: nothing left to report.
+fn seen(state: &mut AudioState) {
+    state.chatmix_reported = state.chatmix_error.clone();
+    state.aux_reported = state.aux_error.clone();
 }
 
 fn bail_result<T>(message: &str) -> Result<T> {
@@ -1716,5 +1767,29 @@ mod tests {
         defaults.claim(DefaultOwner::Aux, "dac".into(), None);
         assert_eq!(defaults.release(DefaultOwner::Aux), s("game"));
         assert_eq!(defaults.release(DefaultOwner::ChatMix), s("speakers"));
+    }
+
+    #[test]
+    fn only_new_background_errors_reach_the_hook() {
+        let audio = AudioService::new();
+        let got = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        audio.on_error(move |m| sink.lock().unwrap().push(m));
+        let background = |chatmix: Option<&str>| {
+            let mut state = audio.state();
+            state.chatmix_error = chatmix.map(str::to_owned);
+            audio.report(&mut state);
+        };
+
+        // The caller of a request gets its error; the hook does not.
+        assert!(audio.set_aux_capture_percent(50).is_err());
+        background(Some("no sink"));
+        background(Some("no sink"));
+        background(None);
+        background(Some("no sink"));
+        assert_eq!(
+            *got.lock().unwrap(),
+            ["ChatMix: no sink", "ChatMix: no sink"]
+        );
     }
 }

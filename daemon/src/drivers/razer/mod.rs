@@ -515,6 +515,10 @@ impl DeviceAdapter for RazerKeyboardAdapter {
         self.persist()
     }
 
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings])
+    }
+
     fn tick(&mut self) -> Result<()> {
         if self.last_poll.elapsed() < BRIGHTNESS_POLL {
             return Ok(());

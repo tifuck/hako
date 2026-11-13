@@ -64,7 +64,9 @@ Drivers live in one folder per manufacturer under `daemon/src/drivers/<vendor>/`
    before your `set` runs, so `set` only sees values you advertised. Mark a
    control `.hidden(true)` when it is settable but irrelevant right now (e.g.
    color while the effect is `spectrum`). The UI builds tabs from the groups
-   your controls use, so most devices need no UI changes.
+   your controls use, so most devices need no UI changes. The colour picker
+   sends `color_r/g/b` together (`set_many`): if your lighting write carries
+   all three, override `set_many` with `drivers::set_colors` so it goes out once.
 5. **Tests** — unit-test packet building and report parsing against byte
    layouts from your source. The registry test fails if two models claim the
    same VID:PID.

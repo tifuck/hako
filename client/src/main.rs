@@ -5,11 +5,11 @@ mod update;
 use anyhow::Result;
 use clap::Parser;
 use eframe::egui;
-use hako_core::catalog::{SettingKey, SettingValue};
+use hako_core::catalog::{ControlKind, SettingKey, SettingValue};
 use hako_core::default_socket_path;
 use hako_core::device::{DeviceSnapshot, HubState};
 use hako_core::ipc::{
-    AppSettings, EventKind, IpcEvent, IpcRequest, IpcResponse, Method, SetParams,
+    AppSettings, EventKind, IpcEvent, IpcRequest, IpcResponse, Method, SetManyParams, SetParams,
 };
 use hako_core::remap::{
     CancelCaptureParams, ClearRemapParams, DeviceRemaps, SetRemapParams, StartCaptureParams,
@@ -296,6 +296,19 @@ impl eframe::App for App {
                         feedback,
                     )
                 }
+                UiCommand::SetMany { device_id, values } => {
+                    let feedback = values.first().map_or_else(
+                        || Feedback::quiet("Couldn't change settings"),
+                        |(key, value)| {
+                            set_feedback(self.ui.state.as_ref(), &device_id, *key, value)
+                        },
+                    );
+                    ClientCmd::Call(
+                        Method::SetMany,
+                        to(serde_json::to_value(SetManyParams { device_id, values })),
+                        feedback,
+                    )
+                }
                 UiCommand::ApplyProfile(name) => ClientCmd::Call(
                     Method::ApplyProfile,
                     serde_json::json!({ "name": name }),
@@ -431,6 +444,9 @@ impl App {
             };
             let mut s = state.lock().unwrap();
             s.updating = false;
+            if !rel.on_disk() {
+                s.update = None;
+            }
             s.notices.push((Tone::Error, msg));
         });
     }
@@ -509,7 +525,12 @@ fn set_feedback(
     let meta = hub
         .and_then(|h| h.devices.iter().find(|d| &d.id == id))
         .and_then(|d| d.controls.iter().find(|m| m.key == key));
-    let label = meta.map_or_else(|| key.as_str().to_string(), |m| m.label.clone());
+    let label = match meta {
+        // One picker sets all three channels.
+        Some(m) if m.kind == ControlKind::ColorChannel => "color".into(),
+        Some(m) => m.label.clone(),
+        None => key.as_str().to_string(),
+    };
     let failed = format!("Couldn't change {label}");
     match meta {
         _ if key == SettingKey::OnboardWrites => Feedback::loud(

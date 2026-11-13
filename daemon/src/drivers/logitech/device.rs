@@ -966,6 +966,10 @@ impl DeviceAdapter for HidppAdapter {
         self.persist()
     }
 
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings, &mut a.chosen])
+    }
+
     fn tick(&mut self) -> Result<()> {
         if self.dev.is_none() {
             return Ok(());

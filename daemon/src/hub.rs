@@ -13,9 +13,10 @@ use hako_core::config::{
 };
 use hako_core::device::{AudioSummary, DaemonHealth, DeviceId, DeviceKind, HubState};
 use hako_core::ipc::{
-    AppSettings, IpcRequest, IpcResponse, Method, ProfileNameParams, SetParams, SnapshotParams,
+    AppSettings, IpcRequest, IpcResponse, Method, ProfileNameParams, SetManyParams, SetParams,
+    SnapshotParams,
 };
-use hako_core::protocol::AdapterEvent;
+use hako_core::protocol::{is_new_error, AdapterEvent};
 use hako_core::remap::{CancelCaptureParams, ClearRemapParams, SetRemapParams, StartCaptureParams};
 use hako_core::VERSION;
 use std::collections::HashMap;
@@ -36,6 +37,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Every hidraw node.
 type Present = Vec<HidDeviceInfo>;
 type Opened = Vec<(&'static Model, Box<dyn DeviceAdapter>)>;
+/// Every model tried: (yielded a device, open error).
+type Attempted = Vec<(&'static Model, bool, Option<String>)>;
+/// (consecutive failures, next attempt, open error last pushed).
+type Retry = (u32, Instant, Option<String>);
 
 pub struct DaemonHub {
     pub paths: ConfigPaths,
@@ -46,9 +51,8 @@ pub struct DaemonHub {
     started: Instant,
     last_profile_applied: Mutex<bool>,
     remap: RemapEngine,
-    /// Models whose last open failed, keyed by (vid, first pid):
-    /// (consecutive failures, next attempt).
-    retry: std::sync::Mutex<HashMap<(u16, u16), (u32, Instant)>>,
+    /// Models whose last open failed, keyed by (vid, first pid).
+    retry: std::sync::Mutex<HashMap<(u16, u16), Retry>>,
     /// Last rescan of each connected `multi` model (receivers).
     rescanned: std::sync::Mutex<HashMap<(u16, u16), Instant>>,
 }
@@ -58,6 +62,13 @@ impl DaemonHub {
         let (events, _) = broadcast::channel(64);
         let remap = RemapEngine::start(paths.clone(), events.clone());
         let audio = AudioService::new();
+        let audio_events = events.clone();
+        audio.on_error(move |message| {
+            let _ = audio_events.send(AdapterEvent::Error {
+                device: None,
+                message,
+            });
+        });
         let cfg = load_app_config(&paths);
         // ChatMix is not up yet, so this only records the preference.
         let _ =
@@ -143,7 +154,7 @@ impl DaemonHub {
             let retry = lock(&self.retry);
             skip.extend(
                 all_models(&present)
-                    .filter(|m| retry.get(&retry_key(m)).is_some_and(|&(_, at)| now < at)),
+                    .filter(|m| retry.get(&retry_key(m)).is_some_and(|&(_, at, _)| now < at)),
             );
         }
         let ctx = DriverCtx {
@@ -165,13 +176,16 @@ impl DaemonHub {
 
         {
             let mut retry = lock(&self.retry);
-            for (model, ok) in attempted {
+            for (model, ok, error) in attempted {
                 if ok {
                     retry.remove(&retry_key(model));
-                } else {
-                    let (n, at) = retry.entry(retry_key(model)).or_insert((0, now));
-                    *n += 1;
-                    *at = now + backoff(*n);
+                    continue;
+                }
+                let (n, at, reported) = retry.entry(retry_key(model)).or_insert((0, now, None));
+                *n += 1;
+                *at = now + backoff(*n);
+                if is_new_error(reported, error.as_deref()) {
+                    self.push_error(format!("{}: {}", model.name, error.unwrap_or_default()));
                 }
             }
         }
@@ -183,8 +197,12 @@ impl DaemonHub {
             .map(|(model, a)| {
                 let snap = a.snapshot();
                 if matches!(snap.kind, DeviceKind::Mouse | DeviceKind::Keyboard) && snap.connected {
-                    self.remap
-                        .attach(snap.id.clone(), snap.kind, model.remap_pids(&snap.id));
+                    self.remap.attach(
+                        snap.id.clone(),
+                        snap.kind,
+                        model.remap_pids(&snap.id),
+                        &snap.name,
+                    );
                 }
                 let nodes = model_nodes(model, &present);
                 DeviceHandle::spawn(model, a, self.events.clone(), nodes, self.paths.clone())
@@ -201,6 +219,14 @@ impl DaemonHub {
             map.insert(snap.id.key(), handle);
             let _ = self.events.send(AdapterEvent::Connected(snap));
         }
+    }
+
+    /// A background failure no request is waiting for.
+    fn push_error(&self, message: String) {
+        let _ = self.events.send(AdapterEvent::Error {
+            device: None,
+            message,
+        });
     }
 
     fn handles(&self) -> Vec<DeviceHandle> {
@@ -266,12 +292,14 @@ impl DaemonHub {
             Ok(cfg) => cfg,
             Err(e) => {
                 warn!("startup profile skipped: {e:#}");
+                self.push_error(format!("Startup profile skipped: {e:#}"));
                 AppConfig::default()
             }
         };
         if let Some(name) = cfg.last_profile {
             if let Err(error) = self.apply_profile(&name, true).await {
                 warn!("apply last profile {name}: {error:#}");
+                self.push_error(format!("Startup profile {name}: {error:#}"));
             }
         }
         *applied = true;
@@ -358,6 +386,16 @@ impl DaemonHub {
             }
             Method::Set => match serde_json::from_value::<SetParams>(req.params) {
                 Ok(p) => match self.set(p.device_id, p.key, p.value).await {
+                    Ok(snap) => {
+                        let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
+                        IpcResponse::ok(id, snap)
+                    }
+                    Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
+                },
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+            },
+            Method::SetMany => match serde_json::from_value::<SetManyParams>(req.params) {
+                Ok(p) => match self.set_many(p.device_id, p.values).await {
                     Ok(snap) => {
                         let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
                         IpcResponse::ok(id, snap)
@@ -508,6 +546,18 @@ impl DaemonHub {
         handle
             .ok_or_else(|| Refused::new("not_found", "device offline"))?
             .set(key, value)
+            .await
+    }
+
+    async fn set_many(
+        &self,
+        device_id: DeviceId,
+        values: Vec<(SettingKey, SettingValue)>,
+    ) -> Result<hako_core::DeviceSnapshot> {
+        let handle = lock(&self.devices).get(&device_id.key()).cloned();
+        handle
+            .ok_or_else(|| Refused::new("not_found", "device offline"))?
+            .set_many(values)
             .await
     }
 
@@ -715,14 +765,14 @@ fn all_models(present: &Present) -> impl Iterator<Item = &'static Model> + '_ {
 
 /// Blocking discovery body (called from spawn_blocking): open every present
 /// model not in `skip`; failures become placeholders. Also returns every
-/// model tried and whether it yielded a device. `connected` lists the open
-/// devices a rescanned `multi` model must not return again.
+/// model tried, whether it yielded a device, and its open error. `connected`
+/// lists the open devices a rescanned `multi` model must not return again.
 fn discover_blocking(
     mut ctx: DriverCtx,
     skip: &[&'static Model],
     connected: &[(&'static Model, DeviceId)],
     present: &Present,
-) -> (Opened, Vec<(&'static Model, bool)>) {
+) -> (Opened, Attempted) {
     let mut out = Vec::new();
     let mut attempted = Vec::new();
     for model in all_models(present) {
@@ -750,13 +800,12 @@ fn discover_blocking(
             Ok(adapters) => {
                 // A receiver with nothing reachable backs off like a failure;
                 // a rescan that finds nothing new is fine.
-                attempted.push((model, rescan || !adapters.is_empty()));
+                attempted.push((model, rescan || !adapters.is_empty(), None));
                 out.extend(adapters.into_iter().map(|a| (model, a)));
             }
             Err(e) if rescan => warn!("{} rescan: {e:#}", model.name),
             Err(e) => {
                 warn!("{}: {e:#}", model.name);
-                attempted.push((model, false));
                 let placeholder = PlaceholderAdapter::permission_denied(
                     DeviceId {
                         vendor_id: model.vendor_id,
@@ -767,6 +816,7 @@ fn discover_blocking(
                     model.name,
                     &e,
                 );
+                attempted.push((model, false, placeholder.snapshot().last_error));
                 out.push((model, Box::new(placeholder) as Box<dyn DeviceAdapter>));
             }
         }

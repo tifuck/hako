@@ -232,8 +232,10 @@ fn renders_every_device_tab_without_panicking() {
             }
             // Pure rendering must not emit device commands.
             assert!(
-                out.iter()
-                    .all(|c| !matches!(c, UiCommand::Set { .. } | UiCommand::SetRemap { .. })),
+                out.iter().all(|c| !matches!(
+                    c,
+                    UiCommand::Set { .. } | UiCommand::SetMany { .. } | UiCommand::SetRemap { .. }
+                )),
                 "{:?} tab {tab:?} emitted {out:?}",
                 d.kind
             );
@@ -299,7 +301,8 @@ fn onboard_memory_gate_renders_and_needs_confirmation() {
             let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
         }
         assert!(
-            out.iter().all(|c| !matches!(c, UiCommand::Set { .. })),
+            out.iter()
+                .all(|c| !matches!(c, UiCommand::Set { .. } | UiCommand::SetMany { .. })),
             "tab {tab:?} emitted {out:?}"
         );
     }
@@ -358,6 +361,43 @@ fn drafts_fall_back_to_the_daemon_value_once_answered() {
     let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
     assert_eq!(drafts(), (None, None, None));
     assert!(out.is_empty(), "{out:?}");
+}
+
+/// A picked colour goes out as one command carrying all three channels,
+/// and its draft holds until that command is answered.
+#[test]
+fn a_picked_color_is_one_command() {
+    let st = sample_state();
+    let kb = st.devices[0].clone();
+    let color = egui::Id::new(("color_draft", kb.id.key()));
+    let ctx = egui::Context::default();
+    ctx.data_mut(|m| {
+        m.insert_temp(egui::Id::new(("tab", kb.id.key())), Tab::Lighting);
+        m.insert_temp(color, [1_u8, 2, 3]);
+    });
+    let mut app = HakoAppUi {
+        state: Some(st),
+        selected: Some(kb.id.clone()),
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    let int = SettingValue::Int;
+    match &out[..] {
+        [UiCommand::SetMany { device_id, values }] => {
+            assert_eq!(device_id, &kb.id);
+            assert_eq!(
+                values,
+                &[
+                    (SettingKey::ColorR, int(1)),
+                    (SettingKey::ColorG, int(2)),
+                    (SettingKey::ColorB, int(3)),
+                ]
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(ctx.data(|m| m.get_temp::<[u8; 3]>(color)), Some([1, 2, 3]));
 }
 
 /// The open page is remembered by what it is, not its position.

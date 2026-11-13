@@ -40,7 +40,7 @@ Architecture: $ARCH
 Maintainer: hako maintainers <173309113+tifuck@users.noreply.github.com>
 Installed-Size: $(du -sk --exclude=DEBIAN "$PKG" | cut -f1)
 Depends: $LINKED, $RUNTIME, systemd, udev
-Recommends: pipewire-bin, wireplumber, alsa-utils, curl, pkexec | policykit-1
+Recommends: pipewire-bin, wireplumber, alsa-utils, curl, openssh-client, pkexec | policykit-1
 Suggests: lsp-plugins-ladspa
 Section: utils
 Priority: optional

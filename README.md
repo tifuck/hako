@@ -318,12 +318,12 @@ gh attestation verify hako_*_amd64.deb --repo tifuck/Hako
 | **PipeWire** with `pw-loopback`, `pw-link`, `pw-cli`, `wpctl` | ChatMix and line-in |
 | `amixer` (alsa-utils) | line-in capture level |
 | [LSP plugins](https://lsp-plug.in/) (LADSPA), optional | line-in gate, compressor and EQ |
-| `curl` | update checks |
+| `curl`, `ssh-keygen` (openssh-client) | update checks and release signature check |
 
 The `.deb` pulls these in for you. For the tarball on Ubuntu or Debian:
 
 ```bash
-sudo apt install pipewire-bin wireplumber alsa-utils curl lsp-plugins-ladspa
+sudo apt install pipewire-bin wireplumber alsa-utils curl openssh-client lsp-plugins-ladspa
 ```
 
 ### Updates

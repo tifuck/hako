@@ -14,13 +14,13 @@ use anyhow::{anyhow, bail, Result};
 use hako_core::catalog::{ControlKind, SettingKey, SettingMeta, SettingValue};
 use hako_core::config::{load_app_config, load_device_settings, update_app_config, ConfigPaths};
 use hako_core::device::DeviceSnapshot;
-use hako_core::protocol::AdapterEvent;
+use hako_core::protocol::{is_new_error, AdapterEvent};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
@@ -65,11 +65,19 @@ impl std::error::Error for Refused {}
 
 /// Longest an IPC `Set` waits for the device thread (it may be mid-tick).
 const SET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// A device whose ticks failed counts as recovered (its next failure is
+/// pushed again) only after this long without one: drivers poll on timers,
+/// so the ticks in between succeed.
+const RECOVERED_AFTER: Duration = Duration::from_secs(60);
 
 enum Cmd {
     Set {
         key: SettingKey,
         value: SettingValue,
+        reply: oneshot::Sender<Result<DeviceSnapshot>>,
+    },
+    SetMany {
+        values: Vec<(SettingKey, SettingValue)>,
         reply: oneshot::Sender<Result<DeviceSnapshot>>,
     },
     Shutdown(mpsc::Sender<()>),
@@ -115,6 +123,14 @@ impl DeviceHandle {
                     snap.connected = false;
                     snap.last_error = Some("driver crashed; reopening".into());
                     let _ = ev.send(AdapterEvent::Updated(snap.clone()));
+                    let mut crashed = CRASHED.lock().unwrap_or_else(|p| p.into_inner());
+                    if !crashed.contains(&snap.id.key()) {
+                        crashed.push(snap.id.key());
+                        let _ = ev.send(AdapterEvent::Error {
+                            device: Some(snap.id.clone()),
+                            message: format!("{}: driver crashed; reopening it", snap.name),
+                        });
+                    }
                 }
             })
             .expect("spawn device thread");
@@ -135,9 +151,24 @@ impl DeviceHandle {
     }
 
     pub async fn set(&self, key: SettingKey, value: SettingValue) -> Result<DeviceSnapshot> {
+        self.call(|reply| Cmd::Set { key, value, reply }).await
+    }
+
+    /// Every value is checked before any is written; the driver writes them together.
+    pub async fn set_many(
+        &self,
+        values: Vec<(SettingKey, SettingValue)>,
+    ) -> Result<DeviceSnapshot> {
+        self.call(|reply| Cmd::SetMany { values, reply }).await
+    }
+
+    async fn call(
+        &self,
+        cmd: impl FnOnce(oneshot::Sender<Result<DeviceSnapshot>>) -> Cmd,
+    ) -> Result<DeviceSnapshot> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Cmd::Set { key, value, reply })
+            .send(cmd(reply))
             .map_err(|_| anyhow!("device worker stopped"))?;
         // A wedged device must not hang the IPC connection that asked.
         match tokio::time::timeout(SET_TIMEOUT, rx).await {
@@ -153,6 +184,11 @@ impl DeviceHandle {
         done
     }
 }
+
+/// Devices whose driver crash was pushed as an `Error`, until a reopened
+/// worker has run for `RECOVERED_AFTER`: a driver that crashes soon after
+/// every reopen is reported once.
+static CRASHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Bumped whenever any worker changes an opt-in, so workers sharing a `vid_pid`
 /// stem (identical devices) reload theirs.
@@ -260,6 +296,11 @@ fn run(
         })
     };
     let mut next_tick = Instant::now() + adapter.tick_interval();
+    // Tick error last pushed as an `Error` event, and when a tick last failed.
+    let mut reported = None;
+    let mut failed = Instant::now();
+    let started = Instant::now();
+    let mut crash_cleared = false;
     loop {
         match rx.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
             // The caller timed out and was told the write failed: it must
@@ -276,6 +317,14 @@ fn run(
                 publish(gate.view(adapter.as_ref()));
                 let _ = reply.send(result.map(|()| gate.view(adapter.as_ref())));
             }
+            Ok(Cmd::SetMany { reply, .. }) if reply.is_closed() => {
+                info!("{}: dropped a batch nobody waits for", adapter.id().key());
+            }
+            Ok(Cmd::SetMany { values, reply }) => {
+                let result = set_many_checked(adapter.as_mut(), &mut gate, &values);
+                publish(gate.view(adapter.as_ref()));
+                let _ = reply.send(result.map(|()| gate.view(adapter.as_ref())));
+            }
             Ok(Cmd::Shutdown(ack)) => {
                 adapter.shutdown();
                 publish(gate.view(adapter.as_ref()));
@@ -285,10 +334,34 @@ fn run(
             Err(RecvTimeoutError::Timeout) => {
                 next_tick = Instant::now() + adapter.tick_interval();
                 gate.refresh(adapter.as_mut());
-                if let Err(e) = adapter.tick() {
-                    warn!("tick {}: {e:#}", adapter.id().key());
+                let ticked = adapter.tick();
+                let snap = gate.view(adapter.as_ref());
+                if !crash_cleared && started.elapsed() >= RECOVERED_AFTER {
+                    crash_cleared = true;
+                    let key = snap.id.key();
+                    CRASHED
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .retain(|k| *k != key);
                 }
-                if let Some(snap) = publish(gate.view(adapter.as_ref())) {
+                match ticked {
+                    Err(e) => {
+                        warn!("tick {}: {e:#}", adapter.id().key());
+                        failed = Instant::now();
+                        let error = format!("{e:#}");
+                        if is_new_error(&mut reported, Some(&error)) {
+                            let _ = events.send(AdapterEvent::Error {
+                                device: Some(snap.id.clone()),
+                                message: format!("{}: {error}", snap.name),
+                            });
+                        }
+                    }
+                    Ok(()) if snap.last_error.is_none() && failed.elapsed() >= RECOVERED_AFTER => {
+                        is_new_error(&mut reported, None);
+                    }
+                    Ok(()) => {}
+                }
+                if let Some(snap) = publish(snap) {
                     let _ = events.send(AdapterEvent::Updated(snap));
                 }
             }
@@ -361,6 +434,44 @@ fn set_checked(
     key: SettingKey,
     value: SettingValue,
 ) -> Result<()> {
+    let values = [(key, value)];
+    check(a, gate, &values)?;
+    let [(key, value)] = values;
+    if key == SettingKey::OnboardWrites {
+        gate.set(value.as_bool().unwrap_or(false))?;
+        gate.enforce(a);
+        return Ok(());
+    }
+    a.set(key, value)
+}
+
+/// [`set_checked`] for several values: all are checked before the driver
+/// writes any. The opt-in is a decision of its own, never part of a batch.
+fn set_many_checked(
+    a: &mut dyn DeviceAdapter,
+    gate: &mut Gate,
+    values: &[(SettingKey, SettingValue)],
+) -> Result<()> {
+    for (i, (key, _)) in values.iter().enumerate() {
+        if *key == SettingKey::OnboardWrites {
+            return Err(Refused::new("invalid_value", "onboard_writes is set on its own").into());
+        }
+        if values[..i].iter().any(|(k, _)| k == key) {
+            let e = format!("{} is given twice", key.as_str());
+            return Err(Refused::new("invalid_value", e).into());
+        }
+    }
+    check(a, gate, values)?;
+    a.set_many(values)
+}
+
+/// The device is connected and offers a control for every value, which
+/// accepts it and may be written now.
+fn check(
+    a: &mut dyn DeviceAdapter,
+    gate: &mut Gate,
+    values: &[(SettingKey, SettingValue)],
+) -> Result<()> {
     gate.refresh(a);
     let snap = gate.view(a);
     if !snap.connected {
@@ -372,31 +483,32 @@ fn set_checked(
                 .unwrap_or_default()
         );
     }
-    let meta = snap.controls.iter().find(|c| c.key == key).ok_or_else(|| {
-        Refused::new(
-            "invalid_value",
-            format!("{} has no {} control", snap.name, key.as_str()),
-        )
-    })?;
-    meta.validate(&value)
-        .map_err(|e| Refused::new("invalid_value", e))?;
-    if key == SettingKey::OnboardWrites {
-        gate.set(value.as_bool().unwrap_or(false))?;
-        gate.enforce(a);
-        return Ok(());
+    for (key, value) in values {
+        let meta = snap
+            .controls
+            .iter()
+            .find(|c| c.key == *key)
+            .ok_or_else(|| {
+                Refused::new(
+                    "invalid_value",
+                    format!("{} has no {} control", snap.name, key.as_str()),
+                )
+            })?;
+        meta.validate(value)
+            .map_err(|e| Refused::new("invalid_value", e))?;
+        if meta.persistent && !gate.allowed {
+            return Err(Refused::new(
+                "invalid_value",
+                format!(
+                    "{} is saved to the {}'s onboard memory: turn on \"Allow saving to device \
+                     memory\" (Device tab) first",
+                    meta.label, snap.name
+                ),
+            )
+            .into());
+        }
     }
-    if meta.persistent && !gate.allowed {
-        return Err(Refused::new(
-            "invalid_value",
-            format!(
-                "{} is saved to the {}'s onboard memory: turn on \"Allow saving to device \
-                 memory\" (Device tab) first",
-                meta.label, snap.name
-            ),
-        )
-        .into());
-    }
-    a.set(key, value)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -409,6 +521,8 @@ mod tests {
     struct Fake {
         id: DeviceId,
         writes: Vec<SettingKey>,
+        /// Keys of each `set_many`, shared so a test can watch the worker.
+        batches: Arc<Mutex<Vec<Vec<SettingKey>>>>,
         saving: bool,
     }
 
@@ -447,6 +561,11 @@ mod tests {
             self.writes.push(key);
             Ok(())
         }
+        fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+            let keys = values.iter().map(|(k, _)| *k).collect();
+            self.batches.lock().unwrap().push(keys);
+            Ok(())
+        }
         fn tick(&mut self) -> Result<()> {
             Ok(())
         }
@@ -474,6 +593,7 @@ mod tests {
                 instance: "x".into(),
             },
             writes: vec![],
+            batches: Arc::default(),
             saving: false,
         }
     }
@@ -564,6 +684,101 @@ mod tests {
         run(Box::new(a), gate, rx, shared, broadcast::channel(4).0);
         done.recv().unwrap();
         assert!(!Gate::load(paths.clone(), stem).allowed);
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    /// Fails its ticks with `errors` in order, then shuts its worker down.
+    struct Flaky {
+        fake: Fake,
+        errors: std::collections::VecDeque<&'static str>,
+        worker: mpsc::Sender<Cmd>,
+    }
+
+    impl DeviceAdapter for Flaky {
+        fn id(&self) -> &DeviceId {
+            self.fake.id()
+        }
+        fn snapshot(&self) -> DeviceSnapshot {
+            self.fake.snapshot()
+        }
+        fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+            self.fake.set(key, value)
+        }
+        fn tick(&mut self) -> Result<()> {
+            match self.errors.pop_front() {
+                Some(e) => bail!("{e}"),
+                None => {
+                    let _ = self.worker.send(Cmd::Shutdown(mpsc::channel().0));
+                    Ok(())
+                }
+            }
+        }
+        fn shutdown(&mut self) {}
+        fn tick_interval(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+
+    #[test]
+    fn a_tick_error_is_pushed_once_until_it_changes() {
+        let paths = temp_paths("tick-errors");
+        let (tx, rx) = mpsc::channel();
+        let a = Flaky {
+            fake: fake(),
+            errors: ["timeout", "timeout", "unplugged"].into(),
+            worker: tx,
+        };
+        let gate = Gate::load(paths.clone(), a.id().config_stem());
+        let shared = Arc::new(Mutex::new(gate.view(&a)));
+        let (events, mut sub) = broadcast::channel(16);
+        run(Box::new(a), gate, rx, shared, events);
+        let mut errors = Vec::new();
+        while let Ok(ev) = sub.try_recv() {
+            if let AdapterEvent::Error { device, message } = ev {
+                assert!(device.is_some());
+                errors.push(message);
+            }
+        }
+        assert_eq!(errors, ["Fake: timeout", "Fake: unplugged"]);
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    #[test]
+    fn a_batch_is_checked_whole_then_written_once() {
+        use SettingKey::{Brightness, Dpi, DpiStage1, OnboardWrites};
+        let paths = temp_paths("batch");
+        let mut a = fake();
+        let batches = a.batches.clone();
+        let mut gate = Gate::load(paths.clone(), a.id.config_stem());
+        let int = SettingValue::Int;
+        // One value the worker refuses stops the batch before any write.
+        for bad in [
+            vec![(Dpi, int(400)), (DpiStage1, int(400))],
+            vec![(Dpi, int(400)), (Dpi, int(500))],
+            vec![(Dpi, int(400)), (OnboardWrites, SettingValue::Bool(true))],
+            vec![(Dpi, int(400)), (Brightness, int(50))],
+            vec![(Dpi, int(5))],
+        ] {
+            let e = set_many_checked(&mut a, &mut gate, &bad).unwrap_err();
+            assert_eq!(Refused::code(&e), "invalid_value", "{bad:?}");
+        }
+        assert!(batches.lock().unwrap().is_empty() && a.writes.is_empty());
+        assert!(!gate.allowed);
+        set_many_checked(&mut a, &mut gate, &[(Dpi, int(400))]).unwrap();
+        assert_eq!(*batches.lock().unwrap(), [vec![Dpi]]);
+
+        // Nor is a batch written whose caller gave up.
+        let shared = Arc::new(Mutex::new(gate.view(&a)));
+        let (tx, rx) = mpsc::channel();
+        let (reply, gave_up) = oneshot::channel();
+        drop(gave_up);
+        let values = vec![(Dpi, int(500))];
+        tx.send(Cmd::SetMany { values, reply }).unwrap();
+        let (ack, done) = mpsc::channel();
+        tx.send(Cmd::Shutdown(ack)).unwrap();
+        run(Box::new(a), gate, rx, shared, broadcast::channel(4).0);
+        done.recv().unwrap();
+        assert_eq!(batches.lock().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(paths.root);
     }
 

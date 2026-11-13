@@ -1,6 +1,6 @@
 use hako_core::{
     AppConfig, AppSettings, AuxEffect, AuxEffectChain, AuxEffectKind, DeviceId, EqBand, EqBandKind,
-    IpcRequest, IpcResponse, Method, SetParams, SettingKey, SettingValue,
+    IpcRequest, IpcResponse, Method, SetManyParams, SetParams, SettingKey, SettingValue,
 };
 
 #[test]
@@ -17,6 +17,34 @@ fn set_params_roundtrip() {
     let v = serde_json::to_value(&p).unwrap();
     let back: SetParams = serde_json::from_value(v).unwrap();
     assert_eq!(back.key, SettingKey::MicVolume);
+}
+
+#[test]
+fn set_many_params_roundtrip() {
+    let values = vec![
+        (SettingKey::ColorR, SettingValue::Int(255)),
+        (SettingKey::ColorG, SettingValue::Int(64)),
+        (SettingKey::ColorB, SettingValue::Int(0)),
+    ];
+    let p = SetManyParams {
+        device_id: DeviceId {
+            vendor_id: 0x1532,
+            product_id: 0x026b,
+            instance: "test".into(),
+        },
+        values: values.clone(),
+    };
+    let req = IpcRequest {
+        id: serde_json::json!(1),
+        method: Method::SetMany,
+        params: serde_json::to_value(&p).unwrap(),
+    };
+    let s = serde_json::to_string(&req).unwrap();
+    assert!(s.contains(r#""method":"SetMany""#), "{s}");
+    let r: IpcRequest = serde_json::from_str(&s).unwrap();
+    let back: SetManyParams = serde_json::from_value(r.params).unwrap();
+    assert_eq!(back.device_id, p.device_id);
+    assert_eq!(back.values, values);
 }
 
 #[test]

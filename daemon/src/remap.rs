@@ -63,6 +63,8 @@ enum Cmd {
 
 struct DevState {
     id: DeviceId,
+    /// Product name, for error messages.
+    name: String,
     /// Every PID the driver model enumerates as; `pids[0]` names the config file.
     pids: Vec<u16>,
     bindings: HashMap<u16, RemapBinding>,
@@ -91,6 +93,16 @@ impl DevState {
             grabbed: self.grabbed,
             recorded: self.recorded.clone(),
         }
+    }
+
+    /// An `Error` event when `last_error` is set and differs from `before`:
+    /// each grab / open retry repeats the same error, which is pushed once.
+    fn error_event(&self, before: Option<&str>) -> Option<AdapterEvent> {
+        let error = self.last_error.as_deref().filter(|e| Some(*e) != before)?;
+        Some(AdapterEvent::Error {
+            device: Some(self.id.clone()),
+            message: format!("{} remaps: {error}", self.name),
+        })
     }
 }
 
@@ -144,7 +156,7 @@ impl RemapEngine {
 
     /// Register a mouse or keyboard (idempotent; a reconnect keeps its bindings).
     /// `pids` are the driver model's PIDs, so any enumeration path is one device.
-    pub fn attach(&self, id: DeviceId, kind: DeviceKind, pids: Vec<u16>) {
+    pub fn attach(&self, id: DeviceId, kind: DeviceKind, pids: Vec<u16>, name: &str) {
         let mut guard = lock(&self.inner);
         let g = &mut *guard;
         let idx = match g
@@ -167,6 +179,7 @@ impl RemapEngine {
                     };
                 g.devices.push(DevState {
                     id: id.clone(),
+                    name: name.into(),
                     bindings,
                     pids: pids.clone(),
                     capturing: None,
@@ -177,6 +190,10 @@ impl RemapEngine {
                     invalid,
                     load_error,
                 });
+                let d = g.devices.last().expect("just pushed");
+                if let Some(ev) = d.error_event(None) {
+                    let _ = self.events.send(ev);
+                }
                 g.devices.len() - 1
             }
         };
@@ -431,21 +448,32 @@ struct Worker {
 
 impl Worker {
     fn run(mut self, mut rx: mpsc::UnboundedReceiver<Cmd>) {
+        // A panic in every pass is pushed once, not every retry.
+        let mut reported = false;
         loop {
             match catch_unwind(AssertUnwindSafe(|| self.step(&mut rx))) {
-                Ok(true) => {}
+                Ok(true) => reported = false,
                 Ok(false) => return,
                 // A bug in one pass must not end remapping until the daemon
                 // restarts: let go of input and the session, then carry on.
                 Err(_) => {
                     error!("remap thread panicked; releasing grabs");
+                    // A session's own error event says what stopped.
                     if let Some(sess) = self.session.take() {
                         self.update(sess.idx, |d| {
                             d.capturing = None;
                             d.capture_source = None;
                             d.last_error = Some("Listening stopped after an internal error".into());
                         });
+                    } else if !reported {
+                        let _ = self.events.send(AdapterEvent::Error {
+                            device: None,
+                            message: "Remapping hit an internal error: held keys were released \
+                                      and remaps resume in a moment."
+                                .into(),
+                        });
                     }
+                    reported = true;
                     self.ungrab_all();
                     // ponytail: fixed pause so a panic that repeats every pass
                     // cannot spin; nothing is lost, commands queue meanwhile.
@@ -709,12 +737,17 @@ impl Worker {
     }
 
     fn update(&self, idx: usize, f: impl FnOnce(&mut DevState)) {
-        let snap = {
+        let (snap, error) = {
             let mut g = lock(&self.inner);
-            f(&mut g.devices[idx]);
-            g.devices[idx].snapshot()
+            let d = &mut g.devices[idx];
+            let before = d.last_error.clone();
+            f(d);
+            (d.snapshot(), d.error_event(before.as_deref()))
         };
         let _ = self.events.send(AdapterEvent::RemapsUpdated(snap));
+        if let Some(ev) = error {
+            let _ = self.events.send(ev);
+        }
     }
 
     fn wait(&self) {
@@ -819,6 +852,7 @@ impl Worker {
         let Some(role) = d.capturing else {
             return false;
         };
+        let before = d.last_error.clone();
         let mut sent = Vec::new();
         let mut new_bindings = None;
         let more = if down && code == KEY_ESC {
@@ -896,6 +930,7 @@ impl Worker {
             }
         };
         sent.push(AdapterEvent::RemapsUpdated(d.snapshot()));
+        sent.extend(d.error_event(before.as_deref()));
         drop(guard);
         for ev in sent {
             let _ = self.events.send(ev);
@@ -1640,6 +1675,7 @@ mod tests {
                 product_id: 0x40a8,
                 instance: "x".into(),
             },
+            name: "Mouse".into(),
             pids: vec![0x40a8],
             bindings: HashMap::new(),
             capturing: None,
@@ -1667,6 +1703,17 @@ mod tests {
         persist(&paths, &d, &edit).unwrap();
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("source = 275") && text.contains("source = 276"));
+
+        // A grab error is pushed when it appears or changes, not on retries.
+        d.last_error = Some("grab: busy".into());
+        assert!(matches!(
+            d.error_event(None),
+            Some(AdapterEvent::Error { message, .. }) if message == "Mouse remaps: grab: busy"
+        ));
+        assert!(d.error_event(Some("grab: busy")).is_none());
+        assert!(d.error_event(Some("uinput: gone")).is_some());
+        d.last_error = None;
+        assert!(d.error_event(Some("grab: busy")).is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

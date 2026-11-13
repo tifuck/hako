@@ -602,6 +602,10 @@ impl DeviceAdapter for MouseAdapter {
         stored
     }
 
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings])
+    }
+
     fn tick(&mut self) -> Result<()> {
         if self.spec.battery != Battery::None {
             let every = if self.online {

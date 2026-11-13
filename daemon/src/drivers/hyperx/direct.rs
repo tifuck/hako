@@ -207,6 +207,10 @@ impl<F: Frames> DeviceAdapter for Direct<F> {
     }
 
     /// Keepalive / next animation frame.
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings])
+    }
+
     fn tick(&mut self) -> Result<()> {
         if self.dev.is_none() {
             return Ok(());

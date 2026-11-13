@@ -808,6 +808,10 @@ impl DeviceAdapter for RazerAdapter {
         self.persist()
     }
 
+    fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
+        crate::drivers::set_colors(self, values, |a| vec![&mut a.settings, &mut a.chosen])
+    }
+
     fn tick(&mut self) -> Result<()> {
         if self.spec.battery == Battery::None || self.dev.is_none() {
             return Ok(());
@@ -1227,6 +1231,46 @@ mod tests {
         a.set(SettingKey::Brightness, SettingValue::Int(41))
             .unwrap();
         assert_eq!(stores(&fake), [(0x0f, 0x04, 0), (0x0f, 0x02, 0)]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colour's three channels go out as one lighting write, which save
+    /// mode stores when any channel changed.
+    #[test]
+    fn a_color_batch_is_one_lighting_write() {
+        let root = std::env::temp_dir().join(format!("hako-razer-rgb-{}", std::process::id()));
+        let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake::new()));
+        // DeathAdder V2 Mini: one logo LED.
+        let mut a = fake_adapter(0x008c, &fake, &root);
+        a.connect();
+        writes(&fake);
+        let rgb = |r, g, b| {
+            [
+                (SettingKey::ColorR, SettingValue::Int(r)),
+                (SettingKey::ColorG, SettingValue::Int(g)),
+                (SettingKey::ColorB, SettingValue::Int(b)),
+            ]
+        };
+        a.set_many(&rgb(1, 2, 3)).unwrap();
+        let sent = std::mem::take(&mut fake.lock().unwrap().sent);
+        let lit: Vec<_> = sent.iter().map(|r| (r[6], r[7])).collect();
+        assert_eq!(lit, [(0x0f, 0x04), (0x0f, 0x02)]);
+        assert_eq!(sent[1][14..17], [1, 2, 3]);
+        let file = hako_core::config::load_device_settings(&a.paths, VID, 0x008c).unwrap();
+        assert_eq!(
+            get_setting(&file, SettingKey::ColorG),
+            Some(&SettingValue::Int(2))
+        );
+
+        a.set(SettingKey::SaveToDevice, SettingValue::Bool(true))
+            .unwrap();
+        stores(&fake);
+        // Only green changes; the stored lighting carries all three.
+        a.set_many(&rgb(1, 5, 3)).unwrap();
+        assert_eq!(
+            stores(&fake),
+            [(0x0f, 0x04, 1), (0x0f, 0x02, 1), (0x0f, 0x84, 1)]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
