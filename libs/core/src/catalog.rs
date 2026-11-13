@@ -60,6 +60,8 @@ setting_keys! {
     EqBand9 = "eq_band_9" => Audio,
     EqBand10 = "eq_band_10" => Audio,
     NoiseCancelling = "noise_cancelling" => Audio,
+    // Legacy: no driver declares them (line-in is a mixer input); kept so
+    // old device files and profiles parse, and for the mixer migration.
     AuxEnabled = "aux_enabled" => LineIn,
     AuxCapturePercent = "aux_capture_percent" => LineIn,
     MicVolume = "mic_volume" => Microphone,

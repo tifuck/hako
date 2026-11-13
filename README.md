@@ -75,14 +75,14 @@ wireless range, voice prompts.
 
 **🎚️ ChatMix and line-in**<br>
 Real game and chat outputs driven by the headset's dial, plus line-in
-monitoring through a gate, EQ and compressor.
+as a mixer input with a gate, EQ and compressor.
 
 </td>
 <td valign="top">
 
 **🗂️ Profiles**<br>
-Save the state of every device under one name and switch from the top bar in
-one click.
+Save the state of every device and the mixer layout under one name and switch
+from the top bar in one click.
 
 </td>
 </tr>
@@ -179,12 +179,15 @@ allow them for that device.
   Route games to one and Discord to the other, and the dial on the headset
   balances them.
 
-### Line-in monitoring with a real processing chain
+### Mixer, with line-in and a real processing chain
 
-<img src="docs/screenshots/line-in.png" alt="Line-in page with the monitor switched on and a processing chain of equalizer, noise gate and compressor" width="100%">
-
-Plug a console, a second PC or a mixer into your sound card's line-in and hear
-it through your headset. The signal can run through a drag-to-reorder chain:
+A VoiceMeeter-style console under **Audio → Mixer**: merge several microphones
+into one strip, send line-in or apps to several devices at once, and give
+Discord or OBS their own virtual microphones. Every strip has one volume (its
+fader), meters, mute, solo, routing buttons and its own drag-to-reorder
+processing chain. A **profile** (top bar) saves the whole layout together with
+your device settings: apply, update or delete one from the same menu (it never
+turns the mixer on or off).
 
 | Stage | Controls |
 |---|---|
@@ -192,15 +195,16 @@ it through your headset. The signal can run through a drag-to-reorder chain:
 | **Compressor** | threshold, ratio, knee, attack, release, make-up gain |
 | **Parametric EQ** | up to 8 bands: peaking, low and high shelf, low and high pass |
 
+**Line-in** (a console, a second PC or a mixer plugged into your sound card)
+is a mixer input: the starting layout adds it next to Game, Chat and the
+headset mic. Its **Device** row picks the card's **Jack** (e.g. *Line* rather
+than *Rear Mic*) and **Input gain**; hako sets them while the mixer runs and
+puts the card's previous input back when it stops. If you used the
+headset page's old Line-in switch, the first start of this version turns the
+mixer on with line-in already in it.
+
 hako only manages its own nodes. It remembers your default output and puts it
 back when it stops, and `hakod --reset-audio` is a one-command kill switch.
-
-### Mixer (new)
-
-A VoiceMeeter-style console under **Audio → Mixer**: merge several microphones
-into one strip, send line-in or apps to several devices at once, and give
-Discord or OBS their own virtual microphones. Every strip has a fader, meters,
-mute, routing buttons and its own processing chain; save layouts as scenes.
 
 ### Make it yours
 
@@ -322,9 +326,9 @@ gh attestation verify hako_*_amd64.deb --repo tifuck/Hako
 | | Needed for |
 |---|---|
 | Linux with **systemd** (user session) and **udev** | everything |
-| **PipeWire** (with `pw-loopback` and the `pipewire` binary) and **WirePlumber** | ChatMix and line-in |
-| `amixer` (alsa-utils) | line-in capture level |
-| [LSP plugins](https://lsp-plug.in/) (LADSPA), optional | line-in gate, compressor and EQ |
+| **PipeWire** (with `pw-loopback` and the `pipewire` binary) and **WirePlumber** | ChatMix and the mixer (line-in) |
+| `amixer` (alsa-utils) | line-in input jack and capture level |
+| [LSP plugins](https://lsp-plug.in/) (LADSPA), optional | the mixer's gate and compressor |
 | `curl`, `ssh-keygen` (openssh-client) | update checks and release signature check |
 
 The `.deb` pulls these in for you. For the tarball on Ubuntu or Debian:
@@ -400,12 +404,14 @@ hakod --diagnose            # every HID device and which driver handles it
 hakod --list-devices        # the supported-device list
 hakod --udev-rules          # udev rules for every supported device
 hakod --reset-audio         # remove hako's audio nodes, restore the default output
-hakod --latency-test        # latency the AUX chain adds (software only, silent)
+hakod --latency-test        # latency the processing chain adds (software only, silent)
 hakod --log-level debug     # run in the foreground with verbose logs
 ```
 
 Settings live in `~/.config/hako/`: `config.toml`, `devices/` (last settings
-per device), `profiles/` and `remaps/`. All plain TOML, written atomically.
+per device), `mixer.toml` (the live mixer layout), `profiles/` (device
+settings and, if saved with the mixer on, its layout) and `remaps/`. All plain
+TOML, written atomically.
 
 ### Troubleshooting
 
@@ -454,12 +460,13 @@ hakod --reset-audio
 </details>
 
 <details>
-<summary><b>Line-in monitoring feels laggy</b></summary>
+<summary><b>Line-in or the mixer feels laggy</b></summary>
 
-`hakod --latency-test [--latency low|balanced|safe] [--seconds N]` runs the
-default AUX chain on private test nodes (nothing reaches a device) and prints
-the latency it adds over a direct link; it exits 1 if that is over one quantum
-or a link is async. Include its output in an issue.
+`hakod --latency-test [--path chain|mixer] [--latency low|balanced|safe] [--seconds N]`
+runs the default processing chain (or a mixer strip with it) on private test
+nodes (nothing reaches a device) and prints the latency it adds over a direct
+link; it exits 1 if that is over one quantum or a link is async. Include its
+output in an issue.
 
 </details>
 

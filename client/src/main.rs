@@ -10,7 +10,7 @@ use hako_core::default_socket_path;
 use hako_core::device::{DeviceSnapshot, HubState};
 use hako_core::ipc::{
     AppSettings, EventKind, IpcEvent, IpcRequest, IpcResponse, MeterLevels, MeterTargetSpec,
-    Method, SetManyParams, SetParams, SubscribeMetersParams,
+    Method, ProfileNameParams, SetManyParams, SetParams, SubscribeMetersParams,
 };
 use hako_core::mixer::{MixerState, PatchMixerParams};
 use hako_core::remap::{
@@ -235,7 +235,11 @@ fn main() -> Result<()> {
                                                 s.notices.push((Tone::Error, format!("{}: {why}", feedback.failed)));
                                             }
                                         }
+                                        // A profile carries a mixer layout: show it even if
+                                        // the `MixerUpdated` event is missed.
                                         refresh(&mut stream, &state_bg).await
+                                            && (method != Method::ApplyProfile
+                                                || fetch_mixer(&mut stream, &state_bg).await)
                                     }
                                     None => false,
                                 };
@@ -420,6 +424,16 @@ impl eframe::App for App {
                     Feedback::loud(
                         format!("Saved profile “{name}”"),
                         format!("Couldn't save “{name}”"),
+                    ),
+                ),
+                UiCommand::DeleteProfile(name) => ClientCmd::Call(
+                    Method::DeleteProfile,
+                    to(serde_json::to_value(ProfileNameParams {
+                        name: name.clone(),
+                    })),
+                    Feedback::loud(
+                        format!("Deleted profile “{name}”"),
+                        format!("Couldn't delete “{name}”"),
                     ),
                 ),
                 UiCommand::ResetAudio => ClientCmd::Call(

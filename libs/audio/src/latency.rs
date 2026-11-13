@@ -1,14 +1,14 @@
-//! `hakod --latency-test`: how much latency the AUX processing chain or a
-//! mixer path adds over a direct link, measured in software on the live
-//! PipeWire graph.
+//! `hakod --latency-test`: how much latency a processing chain or a mixer
+//! path adds over a direct link, measured in software on the live PipeWire
+//! graph.
 //!
 //! A generator stream plays short noise bursts into the path under test and
 //! straight into channel 1 of one capture stream; the path's output feeds
 //! channel 2. Both channels arrive in the same buffers, so the offset between
-//! them is the added latency. The AUX path is the default chain (gate, EQ,
-//! compressor; the same `generate_dsp_config` output in a `pipewire -c`
-//! child, as AUX runs it); the mixer path is a virtual input strip with that
-//! chain routed to a virtual output (`MixerGraph`, as the mixer runs them).
+//! them is the added latency. The chain path is the default chain (gate, EQ,
+//! compressor) alone in a `pipewire -c` filter-chain child; the mixer path
+//! is a virtual input strip with that chain routed to a virtual output
+//! (`MixerGraph`, as the mixer runs them).
 //!
 //! No test audio reaches a device: every node is `hako-test-latency-<pid>-*`,
 //! none autoconnects, links are this process's own (they die with it), and
@@ -58,9 +58,9 @@ const STRIDE: usize = 8;
 /// What the bursts go through.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LatencyPath {
-    /// The line-in's processing chain.
+    /// The default processing chain in one filter-chain.
     #[default]
-    Aux,
+    Chain,
     /// A mixer virtual input (that chain) routed to a virtual output.
     Mixer,
 }
@@ -152,7 +152,7 @@ impl LatencyReport {
 impl fmt::Display for LatencyReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let path = match self.path {
-            LatencyPath::Aux => "AUX chain (gate, EQ, compressor)",
+            LatencyPath::Chain => "processing chain (gate, EQ, compressor)",
             LatencyPath::Mixer => "mixer input (gate, EQ, compressor) -> virtual output",
         };
         writeln!(f, "hako latency test: {path} vs a direct link")?;
@@ -572,7 +572,7 @@ pub fn run_latency_test(opts: &LatencyTestOptions, stop: &AtomicBool) -> Result<
     // The path: where the bursts go in, where they come out, its stream
     // nodes (never autoconnected) and the links it made itself.
     let (mut session, into, from, streams, path_links) = match opts.path {
-        LatencyPath::Aux => {
+        LatencyPath::Chain => {
             let dsp = format!("{prefix}dsp");
             let session = Session {
                 mainloop,
@@ -894,7 +894,7 @@ mod tests {
     #[test]
     #[ignore = "needs a live PipeWire session and LSP plugins"]
     fn live_balanced_chain_adds_at_most_one_quantum() {
-        live_path_adds_at_most_one_quantum(LatencyPath::Aux);
+        live_path_adds_at_most_one_quantum(LatencyPath::Chain);
     }
 
     #[test]

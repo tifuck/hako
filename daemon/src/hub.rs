@@ -10,15 +10,16 @@ use hako_audio::meters::MeterService;
 use hako_audio::AudioService;
 use hako_core::catalog::{SettingKey, SettingMeta, SettingValue};
 use hako_core::config::{
-    list_profiles, load_app_config, load_profile, save_profile, settings_from_profile_device,
-    update_app_config, validate_profile_name, AppConfig, ConfigPaths, ProfileFile, TomlSetting,
+    delete_profile, list_profiles, load_app_config, load_profile, save_profile,
+    settings_from_profile_device, update_app_config, validate_profile_name, AppConfig, ConfigPaths,
+    ProfileFile, TomlSetting,
 };
 use hako_core::device::{AudioSummary, DaemonHealth, DeviceId, DeviceKind, HubState};
 use hako_core::ipc::{
     audio_latency_samples, AppSettings, IpcRequest, IpcResponse, Method, ProfileNameParams,
     SetManyParams, SetParams, SnapshotParams, AUDIO_LATENCIES,
 };
-use hako_core::mixer::PatchMixerParams;
+use hako_core::mixer::{MixerFile, PatchMixerParams, Scene};
 use hako_core::protocol::{is_new_error, AdapterEvent};
 use hako_core::remap::{CancelCaptureParams, ClearRemapParams, SetRemapParams, StartCaptureParams};
 use hako_core::VERSION;
@@ -85,7 +86,7 @@ impl DaemonHub {
         // Loopback / DSP / mixer processes of a crashed daemon (they would
         // clash by name).
         audio.kill_orphans();
-        // AUX links older versions made outlive them (pw-link links linger).
+        // Line-in links older versions made outlive them (pw-link links linger).
         if let Ok(cfg) = &cfg {
             if let Err(e) = audio.remove_orphan_aux_links(&cfg.aux) {
                 warn!("orphan AUX links: {e:#}");
@@ -120,7 +121,7 @@ impl DaemonHub {
         };
         // Unplugged or replugged: none of the nodes the adapter was opened on
         // is left (a replug between two passes brings new ones). Shut it down
-        // (its teardown, e.g. AUX, must run before a replugged device is
+        // (its teardown must run before a replugged device is
         // reopened below) so the device is reopened fresh.
         let gone: Vec<DeviceHandle> = {
             let mut map = lock(&self.devices);
@@ -276,7 +277,7 @@ impl DaemonHub {
     }
 
     /// Save first, then apply live (blocking: audio lock, child processes).
-    /// `reconfigure_aux` keeps the running chain when the new one fails.
+    /// The legacy line-in fields are stored as given (older UIs send them).
     fn set_config(&self, s: AppSettings) -> Result<AppSettings> {
         let (cfg, ()) = update_app_config(&self.paths, |cfg| {
             if !s.log_level.is_empty() {
@@ -294,11 +295,6 @@ impl DaemonHub {
         self.audio
             .set_chatmix_default(cfg.chatmix_set_default_sink)
             .context("saved, but the default sink could not follow")?;
-        if self.audio.aux_active() {
-            self.audio
-                .reconfigure_aux(&cfg.aux, &cfg.aux.effects)
-                .context("saved, but AUX could not apply it")?;
-        }
         self.mixer.set_latency(latency_samples(Some(&cfg)));
         self.audio
             .set_latency(latency_samples(Some(&cfg)))
@@ -341,10 +337,8 @@ impl DaemonHub {
         // Published status: never waits for audio work in progress.
         let audio = AudioSummary {
             chatmix_active: self.audio.chatmix_active(),
-            aux_active: self.audio.aux_active(),
-            aux_processing_active: self.audio.aux_processing_active(),
             last_error: self.audio.last_error(),
-            default_sink: None,
+            ..AudioSummary::default()
         };
         HubState {
             health: DaemonHealth {
@@ -438,7 +432,7 @@ impl DaemonHub {
                     Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
                 }
             }
-            Method::ApplyProfile | Method::SaveProfile
+            Method::ApplyProfile | Method::SaveProfile | Method::DeleteProfile
                 if serde_json::from_value::<ProfileNameParams>(req.params.clone())
                     .is_ok_and(|p| validate_profile_name(&p.name).is_err()) =>
             {
@@ -458,6 +452,15 @@ impl DaemonHub {
                 },
                 Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
+            Method::DeleteProfile => {
+                match serde_json::from_value::<ProfileNameParams>(req.params) {
+                    Ok(p) => match self.delete_profile(&p.name) {
+                        Ok(()) => IpcResponse::ok(id, serde_json::json!({"deleted": p.name})),
+                        Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
+                    },
+                    Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+                }
+            }
             Method::ResetAudio => {
                 // pactl / pw-* subprocesses: keep them off the async runtime.
                 let (audio, mixer) = (self.audio.clone(), self.mixer.clone());
@@ -605,11 +608,10 @@ impl DaemonHub {
 
     /// `startup`: the automatic re-apply at daemon start, which skips devices
     /// in save-to-device mode (their stored state is already on the device;
-    /// re-applying would write onboard memory at every boot).
+    /// re-applying would write onboard memory at every boot) and the mixer
+    /// layout (`mixer.toml` has the live one).
     async fn apply_profile(&self, name: &str, startup: bool) -> Result<()> {
         let profile = load_profile(&self.paths, name)?;
-        // At startup AUX follows `aux.auto_enable`, as it does on connect.
-        let skip_aux = startup && !load_app_config(&self.paths).is_ok_and(|c| c.aux.auto_enable);
         let mut failures = Vec::new();
         for h in self.handles() {
             let snap = h.snapshot();
@@ -646,7 +648,7 @@ impl DaemonHub {
             let controls = snap.controls;
             for (k, v) in settings_from_profile_device(dev_map) {
                 let result = match SettingKey::parse(&k) {
-                    Some(key) if profile_skips(key, &controls, skip_aux) => continue,
+                    Some(key) if profile_skips(key, &controls) => continue,
                     Some(key) => h.set(key, v).await.map(|_| ()),
                     None => Err(anyhow::anyhow!("unknown setting")),
                 };
@@ -656,12 +658,34 @@ impl DaemonHub {
             }
             let _ = self.events.send(AdapterEvent::Updated(h.snapshot()));
         }
+        if let Some(layout) = profile.mixer.filter(|_| !startup) {
+            // Waits for the graph (child processes): off the runtime.
+            let mixer = self.mixer.clone();
+            match tokio::task::spawn_blocking(move || mixer.set_live(layout)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(PatchError::Invalid(e))) => failures.push(format!("mixer layout: {e}")),
+                Ok(Err(PatchError::Io(e))) => failures.push(format!("mixer layout: {e:#}")),
+                Err(e) => failures.push(format!("mixer task: {e}")),
+            }
+        }
         if !failures.is_empty() {
             anyhow::bail!("profile partially applied: {}", failures.join("; "));
         }
         set_last_profile(&self.paths, name)?;
         info!("applied profile {name}");
         Ok(())
+    }
+
+    /// Delete a profile and forget it as the one applied at start.
+    fn delete_profile(&self, name: &str) -> Result<()> {
+        anyhow::ensure!(delete_profile(&self.paths, name)?, "no profile {name:?}");
+        update_app_config(&self.paths, |cfg| {
+            if cfg.last_profile.as_deref() == Some(name) {
+                cfg.last_profile = None;
+            }
+            Ok(())
+        })
+        .map(drop)
     }
 
     async fn save_profile(&self, name: &str) -> Result<()> {
@@ -691,6 +715,12 @@ impl DaemonHub {
             version: 1,
             name: name.to_string(),
             devices,
+            // The file in memory: a fader drag not yet written counts.
+            mixer: self
+                .mixer
+                .state()
+                .ok()
+                .and_then(|state| profile_layout(&state.file)),
         };
         save_profile(&self.paths, &profile)?;
         set_last_profile(&self.paths, name)
@@ -740,6 +770,16 @@ fn set_last_profile(paths: &ConfigPaths, name: &str) -> Result<()> {
     .map(drop)
 }
 
+/// The mixer layout a profile stores: the live one while the mixer is on,
+/// without solo (a momentary state).
+fn profile_layout(file: &MixerFile) -> Option<Scene> {
+    let mut live = file.enabled.then(|| file.live.clone())?;
+    for input in &mut live.inputs {
+        input.solo = false;
+    }
+    Some(live)
+}
+
 /// Settings checks that are the caller's fault (`invalid_value`).
 fn validate_settings(s: &AppSettings) -> Result<(), String> {
     s.aux_effects.validate()?;
@@ -775,12 +815,13 @@ fn backoff(n: u32) -> Duration {
 }
 
 /// Profile keys never applied: onboard memory writes (profiles re-apply at
-/// every start: flash wear) and the opt-in that allows them, plus AUX when
-/// `skip_aux` (startup without `aux.auto_enable`).
-fn profile_skips(key: SettingKey, controls: &[SettingMeta], skip_aux: bool) -> bool {
-    key == SettingKey::OnboardWrites
-        || (skip_aux && key == SettingKey::AuxEnabled)
-        || controls.iter().any(|c| c.key == key && c.persistent)
+/// every start: flash wear) and the opt-in that allows them, plus the old
+/// headset line-in keys older profiles hold (line-in is a mixer input now).
+fn profile_skips(key: SettingKey, controls: &[SettingMeta]) -> bool {
+    matches!(
+        key,
+        SettingKey::OnboardWrites | SettingKey::AuxEnabled | SettingKey::AuxCapturePercent
+    ) || controls.iter().any(|c| c.key == key && c.persistent)
 }
 
 fn retry_key(m: &Model) -> (u16, u16) {
@@ -903,50 +944,30 @@ mod tests {
     }
 
     #[test]
-    fn startup_profile_leaves_aux_to_auto_enable() {
-        let controls = [
-            SettingMeta::toggle(SettingKey::AuxEnabled, "AUX"),
-            SettingMeta::toggle(SettingKey::SaveToDevice, "Save").persistent(),
-        ];
-        assert!(profile_skips(SettingKey::AuxEnabled, &controls, true));
-        assert!(!profile_skips(SettingKey::AuxEnabled, &controls, false));
-        assert!(profile_skips(SettingKey::SaveToDevice, &controls, false));
-        assert!(profile_skips(SettingKey::OnboardWrites, &controls, false));
-        assert!(!profile_skips(SettingKey::Dpi, &controls, true));
+    fn profiles_skip_onboard_writes_and_the_old_line_in() {
+        let controls = [SettingMeta::toggle(SettingKey::SaveToDevice, "Save").persistent()];
+        assert!(profile_skips(SettingKey::SaveToDevice, &controls));
+        assert!(profile_skips(SettingKey::OnboardWrites, &controls));
+        assert!(profile_skips(SettingKey::AuxEnabled, &controls));
+        assert!(profile_skips(SettingKey::AuxCapturePercent, &controls));
+        assert!(!profile_skips(SettingKey::Dpi, &controls));
     }
 
-    #[tokio::test]
-    async fn offline_devices_do_not_fail_a_profile() {
-        let root = std::env::temp_dir().join(format!("hako-offline-{}", std::process::id()));
+    /// Built by hand: `new` would touch the session's PipeWire graph.
+    fn hub(name: &str) -> DaemonHub {
+        let root = std::env::temp_dir().join(format!("hako-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
         let paths = ConfigPaths {
             config_toml: root.join("config.toml"),
             devices_dir: root.join("devices"),
             profiles_dir: root.join("profiles"),
             remaps_dir: root.join("remaps"),
-            root: root.clone(),
+            root,
         };
         paths.ensure().unwrap();
-        let model = drivers::models().next().unwrap();
-        let id = DeviceId {
-            vendor_id: model.vendor_id,
-            product_id: model.product_ids[0],
-            instance: "pending".into(),
-        };
-        let profile = ProfileFile {
-            version: 1,
-            name: "p".into(),
-            devices: [(
-                id.config_stem(),
-                [("dpi".to_string(), TomlSetting::Int(800))].into(),
-            )]
-            .into(),
-        };
-        save_profile(&paths, &profile).unwrap();
-        // Built by hand: `new` would touch the session's PipeWire graph.
         let (events, _) = broadcast::channel(8);
         let audio = Arc::new(AudioService::new());
-        let hub = DaemonHub {
-            paths: paths.clone(),
+        DaemonHub {
             // Off (no mixer.toml): never builds anything.
             mixer: Arc::new(MixerService::start(
                 paths.clone(),
@@ -963,7 +984,149 @@ mod tests {
             last_profile_applied: Mutex::new(false),
             retry: Default::default(),
             rescanned: Default::default(),
+            paths,
+        }
+    }
+
+    fn close(hub: DaemonHub) {
+        hub.remap.shutdown();
+        hub.mixer.shutdown();
+        let _ = std::fs::remove_dir_all(&hub.paths.root);
+    }
+
+    /// A layout of one virtual output (never built: the mixer stays off).
+    fn layout(id: &str) -> Scene {
+        Scene {
+            inputs: Vec::new(),
+            outputs: vec![hako_core::mixer::Output {
+                id: id.into(),
+                label: "Test".into(),
+                kind: hako_core::mixer::OutputKind::Virtual {
+                    node_name: "hako-test-never-built".into(),
+                },
+                chain: Default::default(),
+                gain_db: 0.0,
+                mute: false,
+                mono: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_saved_profile_holds_the_layout_of_a_mixer_that_is_on_without_solo() {
+        let mut file = MixerFile {
+            live: layout("B1"),
+            ..MixerFile::default()
         };
+        file.live.inputs.push(hako_core::mixer::Input {
+            id: "game".into(),
+            label: "Game".into(),
+            kind: hako_core::mixer::InputKind::Virtual {
+                node_name: "hako-test-never-built-in".into(),
+            },
+            chain: Default::default(),
+            gain_db: -3.0,
+            mute: false,
+            solo: true,
+            routes: vec!["B1".into()],
+            chatmix: None,
+        });
+        assert_eq!(profile_layout(&file), None, "mixer off");
+        file.enabled = true;
+        let mut saved = file.live.clone();
+        saved.inputs[0].solo = false;
+        assert_eq!(profile_layout(&file), Some(saved));
+    }
+
+    #[tokio::test]
+    async fn profiles_save_and_apply_the_mixer_layout() {
+        let hub = hub("profile-mixer");
+        let paths = hub.paths.clone();
+        let live = || hub.mixer.state().unwrap().file;
+        hub.mixer.set_live(layout("B1")).unwrap();
+
+        // Mixer off: the profile has no layout, and applying it changes none.
+        hub.save_profile("plain").await.unwrap();
+        assert_eq!(load_profile(&paths, "plain").unwrap().mixer, None);
+
+        let mut profile = ProfileFile {
+            version: 1,
+            name: "mix".into(),
+            devices: Default::default(),
+            mixer: Some(layout("B2")),
+        };
+        save_profile(&paths, &profile).unwrap();
+        // The daemon's own apply at start leaves the mixer alone.
+        hub.apply_profile("mix", true).await.unwrap();
+        assert_eq!(live().live, layout("B1"));
+
+        let mut events = hub.subscribe();
+        hub.apply_profile("mix", false).await.unwrap();
+        assert_eq!(live().live, layout("B2"));
+        assert!(!live().enabled, "a profile never turns the mixer on");
+        assert_eq!(
+            hako_core::mixer::load_mixer(&paths).unwrap().live,
+            layout("B2")
+        );
+        let mut updated = false;
+        while let Ok(ev) = events.try_recv() {
+            updated |= matches!(ev, AdapterEvent::MixerUpdated(s) if s.file.live == layout("B2"));
+        }
+        assert!(updated, "no MixerUpdated");
+
+        hub.apply_profile("plain", false).await.unwrap();
+        assert_eq!(live().live, layout("B2"), "no layout in the profile");
+
+        // A hand-edited layout fails the apply and changes nothing.
+        profile.name = "bad".into();
+        profile.mixer = Some(layout("X9"));
+        save_profile(&paths, &profile).unwrap();
+        let err = hub.apply_profile("bad", false).await.unwrap_err();
+        assert!(format!("{err:#}").contains("mixer layout"), "{err:#}");
+        assert_eq!(live().live, layout("B2"));
+        assert_eq!(
+            load_app_config(&paths).unwrap().last_profile.as_deref(),
+            Some("plain")
+        );
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_profile_forgets_it_as_the_startup_one() {
+        let hub = hub("profile-delete");
+        hub.save_profile("p").await.unwrap();
+        hub.save_profile("q").await.unwrap();
+        let last = || load_app_config(&hub.paths).unwrap().last_profile;
+        hub.delete_profile("p").unwrap();
+        assert_eq!(list_profiles(&hub.paths).unwrap(), ["q"]);
+        assert_eq!(last().as_deref(), Some("q"), "another profile's stays");
+        hub.delete_profile("q").unwrap();
+        assert_eq!(last(), None);
+        assert!(hub.delete_profile("q").is_err(), "no such profile");
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn offline_devices_do_not_fail_a_profile() {
+        let hub = hub("offline");
+        let paths = hub.paths.clone();
+        let model = drivers::models().next().unwrap();
+        let id = DeviceId {
+            vendor_id: model.vendor_id,
+            product_id: model.product_ids[0],
+            instance: "pending".into(),
+        };
+        let profile = ProfileFile {
+            version: 1,
+            name: "p".into(),
+            devices: [(
+                id.config_stem(),
+                [("dpi".to_string(), TomlSetting::Int(800))].into(),
+            )]
+            .into(),
+            mixer: None,
+        };
+        save_profile(&paths, &profile).unwrap();
         let placeholder = PlaceholderAdapter::permission_denied(
             id.clone(),
             model.kind,
@@ -984,7 +1147,6 @@ mod tests {
             load_app_config(&paths).unwrap().last_profile.as_deref(),
             Some("p")
         );
-        hub.remap.shutdown();
-        let _ = std::fs::remove_dir_all(root);
+        close(hub);
     }
 }

@@ -50,15 +50,16 @@ struct Cli {
     #[arg(long)]
     diagnose: bool,
 
-    /// Measure the latency the default AUX chain (or a mixer path) adds
-    /// over a direct link (software only, no device plays anything); exit 1
-    /// if over one quantum
+    /// Measure the latency the default processing chain (or a mixer path)
+    /// adds over a direct link (software only, no device plays anything);
+    /// exit 1 if over one quantum
     #[arg(long)]
     latency_test: bool,
 
-    /// With --latency-test: `aux` (the line-in chain) or `mixer` (a virtual
-    /// input with that chain routed to a virtual output)
-    #[arg(long, default_value = "aux", value_parser = ["aux", "mixer"], requires = "latency_test")]
+    /// With --latency-test: `chain` (gate, EQ, compressor in one
+    /// filter-chain) or `mixer` (a virtual input with that chain routed to a
+    /// virtual output)
+    #[arg(long, default_value = "chain", value_parser = ["chain", "mixer"], requires = "latency_test")]
     path: String,
 
     /// With --latency-test: the `node.latency` preset
@@ -108,7 +109,7 @@ async fn main() -> Result<()> {
     if cli.latency_test {
         let path = match cli.path.as_str() {
             "mixer" => LatencyPath::Mixer,
-            _ => LatencyPath::Aux,
+            _ => LatencyPath::Chain,
         };
         return latency_test_cli(&cli.latency, cli.seconds, path).await;
     }
@@ -204,7 +205,7 @@ fn reset_audio_cli(socket: &std::path::Path, paths: &ConfigPaths) -> Result<()> 
             return Ok(());
         }
     }
-    // No daemon: also remove AUX links a crashed one left behind.
+    // No daemon: also remove line-in links an older version left behind.
     let audio = AudioService::new();
     let aux = load_app_config(paths).map(|c| c.aux).unwrap_or_default();
     if let Err(e) = audio.remove_orphan_aux_links(&aux) {

@@ -269,6 +269,13 @@ fn missing_fields_use_semantic_defaults() {
     assert_eq!(settings.aux_effects, AuxEffectChain::default());
     assert!(settings.check_updates);
     assert_eq!(settings.audio_latency, "balanced");
+    // The legacy line-in knobs may be left out (a UI without the line-in page).
+    let settings: AppSettings = serde_json::from_value(serde_json::json!({
+        "log_level": "info",
+        "chatmix_set_default_sink": true
+    }))
+    .unwrap();
+    assert!(!settings.aux_set_default_sink && !settings.aux_auto_enable);
 }
 
 #[test]

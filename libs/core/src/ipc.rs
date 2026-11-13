@@ -20,6 +20,8 @@ pub enum Method {
     ListProfiles,
     ApplyProfile,
     SaveProfile,
+    /// `ProfileNameParams`; also forgets it as the last profile.
+    DeleteProfile,
     ResetAudio,
     GetConfig,
     SetConfig,
@@ -130,9 +132,10 @@ pub struct ProfileNameParams {
 /// What a level meter measures; the daemon resolves it to a PipeWire node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MeterTargetSpec {
-    /// The line-in capture source.
+    /// Legacy (the headset's line-in page): resolves to nothing; line-in
+    /// is a mixer input now.
     AuxInput,
-    /// What the line-in plays into: after processing when a chain runs.
+    /// Legacy, like `AuxInput`.
     AuxOutput,
     /// A node by `node.name`; `monitor_sink` meters what a sink plays.
     Node { name: String, monitor_sink: bool },
@@ -435,11 +438,15 @@ pub struct AppSettings {
     pub log_level: String,
     /// ChatMix takes over the default sink when it comes up.
     pub chatmix_set_default_sink: bool,
-    /// AUX takes over the default sink when enabled.
+    /// Legacy (line-in is a mixer input now): kept so older UIs and
+    /// `config.toml` files round-trip; nothing reads it.
+    #[serde(default)]
     pub aux_set_default_sink: bool,
-    /// Enable AUX automatically when the headset connects (if device TOML asks).
+    /// Legacy, like `aux_set_default_sink`.
+    #[serde(default)]
     pub aux_auto_enable: bool,
-    /// Ordered AUX processing chain.
+    /// The old line-in processing chain: only the migration to the mixer
+    /// reads it (the line-in strip's starting chain).
     #[serde(default)]
     pub aux_effects: AuxEffectChain,
     /// Absolute config directory, for display only (ignored on write).

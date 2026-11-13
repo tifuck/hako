@@ -1,24 +1,24 @@
-//! PipeWire ChatMix + AUX (line-in) on a native control plane (no PulseAudio,
+//! PipeWire ChatMix and the mixer on a native control plane (no PulseAudio,
 //! `pw-link`, `pw-cli` or `wpctl`).
 //!
 //! The `engine` module keeps one PipeWire connection on its own thread with a registry
 //! cache; node lookups, links, volumes, DSP parameters and the default sink go
 //! through it. Audio itself runs in child processes for crash isolation:
-//! `pw-loopback` (the ChatMix sinks) and `pipewire -c` (the AUX filter-chain).
-//! The line-in mixer controls use `amixer`.
+//! `pw-loopback` (the ChatMix sinks) and `pipewire -c` (the mixer's
+//! filter-chains). A capture card's input selection and level use `amixer`.
 
 mod engine;
 pub mod mixer;
 
 use anyhow::{anyhow, bail, Context, Result};
-use engine::{engine, Direction, LinkHandle};
+use engine::{engine, Direction};
 use hako_core::{
     ipc::{AuxEffectChain, AuxEffectKind, EqBandKind},
     protocol::is_new_error,
     AuxConfig,
 };
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::info;
 
 pub mod latency;
 pub mod meters;
@@ -45,10 +45,8 @@ const LADSPA_DIRS: [&str; 4] = [
     "/usr/lib/x86_64-linux-gnu/ladspa",
     "/usr/local/lib/ladspa",
 ];
-const AUX_DSP_SINK: &str = "Hako_AUX_DSP";
 /// How long a spawned node may take to show its ports.
 const NODE_WAIT: Duration = Duration::from_secs(4);
-const AUX_DSP_DESC: &str = "hako AUX Processing";
 /// LSP's UI default. Unset, PipeWire falls back to the LADSPA minimum (0 ms),
 /// which makes the gate/compressor detector follow raw peaks and chatter.
 const SIDECHAIN_REACTIVITY_MS: f32 = 10.0;
@@ -56,7 +54,6 @@ const SIDECHAIN_REACTIVITY_MS: f32 = 10.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DefaultOwner {
     ChatMix,
-    Aux,
 }
 
 /// Sinks are tracked by node name: PipeWire ids go stale (and get reused)
@@ -116,49 +113,13 @@ impl ChatMixState {
 }
 
 #[derive(Debug)]
-struct AuxState {
-    /// `("node:port", "node:port")` of `handles`, for `aux_graph_intact`.
-    links: Vec<(String, String)>,
-    handles: Vec<LinkHandle>,
-    dsp: Option<Child>,
-    /// Capture source node name.
-    capture: String,
-    sink: String,
-    /// `None` marks a pending AUX that owns nothing yet; `heal_aux` builds it.
-    alsa_card: Option<String>,
-    previous_input_source: Option<String>,
-    cfg: AuxConfig,
-    chain: AuxEffectChain,
-}
-
-impl AuxState {
-    fn pending(cfg: AuxConfig, chain: AuxEffectChain) -> Self {
-        Self {
-            links: Vec::new(),
-            handles: Vec::new(),
-            dsp: None,
-            capture: String::new(),
-            sink: String::new(),
-            alsa_card: None,
-            previous_input_source: None,
-            cfg,
-            chain,
-        }
-    }
-}
-
-#[derive(Debug)]
 struct AudioState {
     chatmix: ChatMixState,
-    aux: Option<AuxState>,
     defaults: DefaultState,
-    /// Last ChatMix / AUX failure, kept apart so one part's success never
-    /// hides the other's error.
+    /// Last ChatMix failure.
     chatmix_error: Option<String>,
-    aux_error: Option<String>,
-    /// The errors above as last handed to `on_error` or returned to a caller.
+    /// The error above as last handed to `on_error` or returned to a caller.
     chatmix_reported: Option<String>,
-    aux_reported: Option<String>,
     /// ChatMix takes the default sink when it comes up.
     chatmix_set_default: bool,
     /// Set by `reset_all` (the kill-switch): ChatMix stays down until
@@ -166,7 +127,7 @@ struct AudioState {
     chatmix_suppressed: bool,
     /// `node.latency` of hako's nodes, in samples at 48 kHz.
     latency: u32,
-    /// The mixer owns ChatMix and the line-in (`hand_over`): neither is built
+    /// The mixer owns ChatMix (`hand_over`): the loopbacks are not built
     /// while set; the ChatMix dial goes to the mixer.
     handed_over: bool,
     /// ChatMix's sink when the mixer took over, to bring it back on that sink.
@@ -182,39 +143,16 @@ struct AudioState {
 #[derive(Debug, Clone, Default)]
 struct Status {
     chatmix_active: bool,
-    aux_active: bool,
-    aux_processing_active: bool,
     chatmix_error: Option<String>,
-    aux_error: Option<String>,
-    aux_capture: Option<String>,
-    aux_output: Option<String>,
 }
 
 impl Status {
     fn of(state: &mut AudioState) -> Self {
         reap_exited(&mut state.chatmix.game);
         reap_exited(&mut state.chatmix.chat);
-        let (mut aux_processing_active, mut aux_capture, mut aux_output) = (false, None, None);
-        if let Some(aux) = state.aux.as_mut() {
-            reap_exited(&mut aux.dsp);
-            aux_processing_active = aux.dsp.is_some();
-            if aux.alsa_card.is_some() {
-                aux_capture = Some(aux.capture.clone());
-                aux_output = Some(if aux.dsp.is_some() {
-                    AUX_DSP_SINK.to_string()
-                } else {
-                    aux.sink.clone()
-                });
-            }
-        }
         Self {
             chatmix_active: state.chatmix.active(),
-            aux_active: state.aux.is_some(),
-            aux_processing_active,
             chatmix_error: state.chatmix_error.clone(),
-            aux_error: state.aux_error.clone(),
-            aux_capture,
-            aux_output,
         }
     }
 }
@@ -259,12 +197,9 @@ impl AudioService {
         Self {
             state: Mutex::new(AudioState {
                 chatmix: ChatMixState::default(),
-                aux: None,
                 defaults: DefaultState::default(),
                 chatmix_error: None,
-                aux_error: None,
                 chatmix_reported: None,
-                aux_reported: None,
                 chatmix_set_default: true,
                 chatmix_suppressed: false,
                 latency: DEFAULT_LATENCY,
@@ -296,11 +231,10 @@ impl AudioService {
         state.chatmix.sink.clone().or(state.parked_sink.clone())
     }
 
-    /// The mixer takes ChatMix and the line-in over (`on`) or gives them back.
-    /// Taking over stops the ChatMix loopbacks and the line-in links / DSP;
-    /// the default-sink claim and the line-in's input selection stay, so the
-    /// mixer's `Hako_Game` and line-in strip pick up where they left off.
-    /// Giving back rebuilds both as they were.
+    /// The mixer takes ChatMix over (`on`) or gives it back. Taking over
+    /// stops the ChatMix loopbacks; the default-sink claim stays, so the
+    /// mixer's `Hako_Game` picks up where they left off. Giving back
+    /// rebuilds them as they were.
     pub fn hand_over(&self, on: bool) -> Result<()> {
         let mut state = self.state();
         if state.handed_over == on {
@@ -310,10 +244,7 @@ impl AudioService {
         if on {
             state.parked_sink = state.chatmix.sink.clone();
             cleanup_chatmix_children(&mut state.chatmix);
-            if let Some(aux) = state.aux.as_mut() {
-                cleanup_aux_parts(&mut aux.handles, &mut aux.dsp);
-            }
-            info!("ChatMix and AUX handed over to the mixer");
+            info!("ChatMix handed over to the mixer");
             seen(&mut state);
             return Ok(());
         }
@@ -331,12 +262,7 @@ impl AudioService {
                 result = chatmix;
             }
         }
-        if state.aux.is_some() {
-            let aux = rebuild_aux_locked(&mut state);
-            record_result(&mut state.aux_error, &aux);
-            result = result.and(aux);
-        }
-        info!("ChatMix and AUX back from the mixer");
+        info!("ChatMix back from the mixer");
         seen(&mut state);
         result
     }
@@ -362,23 +288,18 @@ impl AudioService {
         result
     }
 
-    /// Called (under the audio lock: it must not block) with each new ChatMix /
-    /// AUX failure of background work (retries, healing, the ChatMix dial).
+    /// Called (under the audio lock: it must not block) with each new ChatMix
+    /// failure of background work (retries, the ChatMix dial).
     /// Failures of calls whose caller gets the error are not passed. Set once.
     pub fn on_error(&self, hook: impl Fn(String) + Send + Sync + 'static) {
         let _ = self.on_error.set(Box::new(hook));
     }
 
-    /// After background work: hand each part's new error to `on_error`.
+    /// After background work: hand a new error to `on_error`.
     fn report(&self, s: &mut AudioState) {
-        for (part, error, reported) in [
-            ("ChatMix", &s.chatmix_error, &mut s.chatmix_reported),
-            ("AUX", &s.aux_error, &mut s.aux_reported),
-        ] {
-            if is_new_error(reported, error.as_deref()) {
-                if let (Some(hook), Some(e)) = (self.on_error.get(), error) {
-                    hook(format!("{part}: {e}"));
-                }
+        if is_new_error(&mut s.chatmix_reported, s.chatmix_error.as_deref()) {
+            if let (Some(hook), Some(e)) = (self.on_error.get(), &s.chatmix_error) {
+                hook(format!("ChatMix: {e}"));
             }
         }
     }
@@ -416,44 +337,16 @@ impl AudioService {
         self.status().chatmix_active
     }
 
-    pub fn aux_active(&self) -> bool {
-        self.status().aux_active
-    }
-
-    pub fn aux_processing_active(&self) -> bool {
-        self.status().aux_processing_active
-    }
-
-    pub fn aux_dsp_active(&self) -> bool {
-        self.aux_processing_active()
-    }
-
-    /// `node.name` of the source AUX captures, while AUX is up.
-    pub fn aux_capture_node(&self) -> Option<String> {
-        self.status().aux_capture
-    }
-
-    /// `node.name` AUX plays into while up: the DSP node when processing is
-    /// on, else the sink.
-    pub fn aux_output_node(&self) -> Option<String> {
-        self.status().aux_output
-    }
-
     pub fn last_error(&self) -> Option<String> {
-        let status = self.status();
-        match (status.chatmix_error, status.aux_error) {
-            (Some(c), Some(a)) => Some(format!("ChatMix: {c}; AUX: {a}")),
-            (c, a) => c.or(a),
-        }
+        self.status().chatmix_error
     }
 
     pub fn healthy(&self) -> bool {
-        let status = self.status();
-        status.chatmix_error.is_none() && status.aux_error.is_none()
+        self.status().chatmix_error.is_none()
     }
 
-    /// `node.latency` (samples at 48 kHz) of the ChatMix loopbacks and the AUX
-    /// filter-chain. A change rebuilds whichever is up (a brief dropout).
+    /// `node.latency` (samples at 48 kHz) of the ChatMix loopbacks. A change
+    /// rebuilds them while up (a brief dropout).
     pub fn set_latency(&self, samples: u32) -> Result<()> {
         let mut state = self.state();
         if state.latency == samples {
@@ -466,18 +359,8 @@ impl AudioService {
         }
         let mut result = Ok(());
         if state.chatmix.active() {
-            let chatmix = restart_chatmix_locked(&mut state);
-            record_result(&mut state.chatmix_error, &chatmix);
-            result = chatmix;
-        }
-        if state
-            .aux
-            .as_ref()
-            .is_some_and(|aux| aux.alsa_card.is_some())
-        {
-            let aux = rebuild_aux_locked(&mut state);
-            record_result(&mut state.aux_error, &aux);
-            result = result.and(aux);
+            result = restart_chatmix_locked(&mut state);
+            record_result(&mut state.chatmix_error, &result);
         }
         seen(&mut state);
         result
@@ -551,185 +434,35 @@ impl AudioService {
         result
     }
 
-    pub fn aux_enable(&self, cfg: &AuxConfig, chain: &AuxEffectChain) -> Result<()> {
-        let mut state = self.state();
-        if state.aux.is_some() {
-            return Ok(());
-        }
-        // Requested only: built when the mixer gives the line-in back.
-        if state.handed_over {
-            state.aux = Some(AuxState::pending(cfg.clone(), chain.clone()));
-            return Ok(());
-        }
-        let result = aux_enable_locked(&mut state, cfg, chain);
-        record_result(&mut state.aux_error, &result);
-        seen(&mut state);
-        result
-    }
-
-    /// Keeps AUX requested after a failed `aux_enable` so `heal_aux` retries
-    /// it. That enable was automatic, so its error goes to `on_error`.
-    pub fn aux_keep_pending(&self, cfg: &AuxConfig, chain: &AuxEffectChain) {
-        let mut state = self.state();
-        if state.aux.is_none() {
-            state.aux = Some(AuxState::pending(cfg.clone(), chain.clone()));
-        }
-        state.aux_reported = None;
-        self.report(&mut state);
-    }
-
-    /// PipeWire silently drops links when a node is recreated
-    /// (suspend/resume, device replug, server restart), and the DSP process can
-    /// exit. Rebuild the graph whenever any part of it is gone; on failure stay
-    /// pending so the next call retries once the nodes are back.
-    pub fn heal_aux(&self) {
-        let mut state = self.state();
-        if state.handed_over {
-            return;
-        }
-        let Some(aux) = state.aux.as_mut() else {
-            return;
-        };
-        if aux_graph_intact(aux) {
-            return;
-        }
-        if aux.alsa_card.is_some() {
-            warn!("AUX graph broken; rebuilding");
-        }
-        let result = rebuild_aux_locked(&mut state);
-        record_result(&mut state.aux_error, &result);
-        self.report(&mut state);
-    }
-
-    pub fn aux_disable(&self) -> Result<()> {
-        let mut state = self.state();
-        let result = aux_disable_locked(&mut state);
-        record_result(&mut state.aux_error, &result);
-        seen(&mut state);
-        result
-    }
-
-    /// Updates the selected capture card without rebuilding the PipeWire graph.
-    pub fn set_aux_capture_percent(&self, percent: u8) -> Result<()> {
-        let mut state = self.state();
-        let result = match state.aux.as_mut() {
-            Some(aux) => match aux.alsa_card.as_deref() {
-                Some(card) => set_capture_percent(card, percent).map(|()| {
-                    aux.cfg.capture_percent = percent.min(100);
-                }),
-                None => {
-                    aux.cfg.capture_percent = percent.min(100);
-                    Ok(())
-                }
-            },
-            None => bail_result("AUX is not active"),
-        };
-        record_result(&mut state.aux_error, &result);
-        seen(&mut state);
-        result
-    }
-
-    pub fn reconfigure_aux(&self, cfg: &AuxConfig, chain: &AuxEffectChain) -> Result<()> {
-        let mut state = self.state();
-        // The live capture level belongs to the headset setting (see
-        // set_aux_capture_percent), not config.toml; keep it across rebuilds.
-        let mut cfg = cfg.clone();
-        if let Some(aux) = state.aux.as_ref() {
-            cfg.capture_percent = aux.cfg.capture_percent;
-        }
-        let cfg = &cfg;
-        if state.handed_over {
-            if let Some(aux) = state.aux.as_mut() {
-                aux.cfg = cfg.clone();
-                aux.chain = chain.clone();
-            }
-            return Ok(());
-        }
-        if let Some(aux) = state.aux.as_mut() {
-            if aux.cfg.capture_name_regex == cfg.capture_name_regex
-                && aux.cfg.sink_name_regex == cfg.sink_name_regex
-                && aux.cfg.set_default_sink == cfg.set_default_sink
-                && same_effect_topology(&aux.chain, chain)
-            {
-                let result = update_effect_parameters(aux, chain);
-                if result.is_ok() {
-                    aux.cfg = cfg.clone();
-                    aux.chain = chain.clone();
-                }
-                record_result(&mut state.aux_error, &result);
-                seen(&mut state);
-                return result;
-            }
-        }
-        let old = state
-            .aux
-            .as_ref()
-            .map(|aux| (aux.cfg.clone(), aux.chain.clone()));
-
-        let disable_error = aux_disable_locked(&mut state).err();
-        let enable_result = if let Some(error) = disable_error {
-            Err(error.context("disable AUX before reconfiguration"))
-        } else {
-            aux_enable_locked(&mut state, cfg, chain)
-        };
-        let result = match enable_result {
-            Ok(()) => Ok(()),
-            Err(new_error) => {
-                if let Some((old_cfg, old_chain)) = &old {
-                    match aux_enable_locked(&mut state, old_cfg, old_chain) {
-                        Ok(()) => Err(new_error.context("new AUX configuration failed; restored previous configuration")),
-                        Err(rollback_error) => Err(anyhow!(
-                            "new AUX configuration failed: {new_error:#}; rollback failed: {rollback_error:#}"
-                        )),
-                    }
-                } else {
-                    Err(new_error)
-                }
-            }
-        };
-        // AUX stays requested: heal_aux retries once the nodes are back.
-        if result.is_err() && state.aux.is_none() && old.is_some() {
-            state.aux = Some(AuxState::pending(cfg.clone(), chain.clone()));
-        }
-        record_result(&mut state.aux_error, &result);
-        seen(&mut state);
-        result
-    }
-
-    /// Kill-switch: tear down AUX and ChatMix, restore the default sink, and
-    /// keep ChatMix down until `resume_chatmix`.
+    /// Kill-switch: tear down ChatMix, restore the default sink, and keep
+    /// ChatMix down until `resume_chatmix`.
     pub fn reset_all(&self) -> Result<()> {
         let mut state = self.state();
         state.chatmix_suppressed = true;
         state.mixer_game = false;
-        let aux = aux_disable_locked(&mut state);
         let mut chatmix = destroy_chatmix_locked(&mut state);
         kill_orphans_locked(&state);
         if let Some(original) = state.defaults.restore() {
             chatmix = chatmix.and(set_default_sink(&original));
         }
-        record_result(&mut state.aux_error, &aux);
         record_result(&mut state.chatmix_error, &chatmix);
         seen(&mut state);
-        aux.and(chatmix)
+        chatmix
     }
 
-    /// Kill ChatMix / AUX processes a crashed hakod left behind (they match
-    /// by name, so this also hits another running hakod's). No-op while this
-    /// instance owns any. Startup and the kill-switch only.
+    /// Kill ChatMix / mixer processes a crashed hakod left behind (they
+    /// match by name, so this also hits another running hakod's), and an
+    /// older version's line-in DSP. No-op while this instance owns any.
+    /// Startup and the kill-switch only.
     pub fn kill_orphans(&self) {
         kill_orphans_locked(&self.state());
     }
 
-    /// Versions before the native engine made AUX links with `pw-link`, which
-    /// outlive their creator: remove capture -> sink links matching the AUX
-    /// config. No-op while this service owns AUX, or when either node is
-    /// absent (nothing can be linked).
+    /// Versions before the native engine made line-in links with `pw-link`,
+    /// which outlive their creator: remove capture -> sink links matching the
+    /// `[aux]` config. No-op when either node is absent (nothing can be
+    /// linked).
     pub fn remove_orphan_aux_links(&self, cfg: &AuxConfig) -> Result<()> {
-        let state = self.state();
-        if state.aux.is_some() {
-            return Ok(());
-        }
         let (Ok((capture, mono)), Ok(sink)) = (
             find_source_node(&cfg.capture_name_regex),
             find_sink_node_name(&cfg.sink_name_regex),
@@ -768,7 +501,6 @@ impl Drop for AudioService {
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Only what this instance owns; process-wide sweeps are `kill_orphans`.
-        let _ = aux_disable_locked(state);
         let _ = destroy_chatmix_locked(state);
         if let Some(original) = state.defaults.restore() {
             let _ = set_default_sink(&original);
@@ -777,8 +509,7 @@ impl Drop for AudioService {
 }
 
 fn kill_orphans_locked(state: &AudioState) {
-    let owns_dsp = state.aux.as_ref().is_some_and(|aux| aux.dsp.is_some());
-    if state.chatmix.game.is_none() && state.chatmix.chat.is_none() && !owns_dsp {
+    if state.chatmix.game.is_none() && state.chatmix.chat.is_none() {
         kill_loopback_orphan(CHATMIX_GAME);
         kill_loopback_orphan(CHATMIX_CHAT);
         kill_aux_dsp_orphan();
@@ -794,11 +525,6 @@ fn record_result(slot: &mut Option<String>, result: &Result<()>) {
 /// After a call whose caller gets the error: nothing left to report.
 fn seen(state: &mut AudioState) {
     state.chatmix_reported = state.chatmix_error.clone();
-    state.aux_reported = state.aux_error.clone();
-}
-
-fn bail_result<T>(message: &str) -> Result<T> {
-    Err(anyhow!(message.to_string()))
 }
 
 fn ensure_chatmix_locked(state: &mut AudioState, sink_regexes: &[&str]) -> Result<()> {
@@ -906,163 +632,6 @@ fn cleanup_chatmix_children(chatmix: &mut ChatMixState) {
     }
 }
 
-fn aux_enable_locked(
-    state: &mut AudioState,
-    cfg: &AuxConfig,
-    chain: &AuxEffectChain,
-) -> Result<()> {
-    chain.validate().map_err(anyhow::Error::msg)?;
-    let (capture, mono) = find_source_node(&cfg.capture_name_regex)?;
-    let sink = find_sink_node_name(&cfg.sink_name_regex)?;
-    let alsa_card = node_alsa_card(&capture)?;
-    let previous_input_source = current_input_source(&alsa_card).ok();
-
-    let has_effects = chain.effects.iter().any(|effect| effect.enabled);
-    let mut dsp = None;
-    let destination = if has_effects {
-        let lsp = lsp_for(chain)?;
-        let config = generate_dsp_config(
-            AUX_DSP_SINK,
-            Some(&sink),
-            chain,
-            state.latency,
-            lsp.as_deref(),
-        )?;
-        let path = dsp_conf_path();
-        write_conf(&path, &config)?;
-        kill_aux_dsp_orphan();
-        let mut child = spawn_pipewire(&path).context("spawn PipeWire AUX filter graph")?;
-        if let Err(error) = wait_for_node(&mut child, AUX_DSP_SINK) {
-            let _ = stop_child(&mut child);
-            return Err(error);
-        }
-        dsp = Some(child);
-        AUX_DSP_SINK.to_string()
-    } else {
-        sink.clone()
-    };
-
-    let pairs = capture_links(&capture, mono, &destination);
-    let mut linked = Vec::new();
-    for (source, destination) in &pairs {
-        match link_ports(source, destination) {
-            Ok(handle) => linked.push(handle),
-            Err(error) => {
-                cleanup_aux_parts(&mut linked, &mut dsp);
-                return Err(error);
-            }
-        }
-    }
-
-    if let Err(error) = set_input_source(&alsa_card, "Line") {
-        cleanup_aux_parts(&mut linked, &mut dsp);
-        return Err(error);
-    }
-    if let Err(error) = set_capture_percent(&alsa_card, cfg.capture_percent) {
-        if let Some(source) = previous_input_source.as_deref() {
-            let _ = set_input_source(&alsa_card, source);
-        }
-        cleanup_aux_parts(&mut linked, &mut dsp);
-        return Err(error);
-    }
-
-    if cfg.set_default_sink {
-        if let Err(error) = claim_default(&mut state.defaults, DefaultOwner::Aux, &sink) {
-            if let Some(source) = previous_input_source.as_deref() {
-                let _ = set_input_source(&alsa_card, source);
-            }
-            cleanup_aux_parts(&mut linked, &mut dsp);
-            return Err(error);
-        }
-    }
-
-    info!("AUX enabled {capture} -> {destination}");
-    state.aux = Some(AuxState {
-        links: pairs,
-        handles: linked,
-        dsp,
-        capture,
-        sink,
-        alsa_card: Some(alsa_card),
-        previous_input_source,
-        cfg: cfg.clone(),
-        chain: chain.clone(),
-    });
-    Ok(())
-}
-
-fn aux_disable_locked(state: &mut AudioState) -> Result<()> {
-    let mut first_error = release_default(&mut state.defaults, DefaultOwner::Aux).err();
-    if let Some(mut aux) = state.aux.take() {
-        aux.handles.clear();
-        if let Some(mut child) = aux.dsp.take() {
-            if let Err(error) = stop_child(&mut child) {
-                first_error.get_or_insert(error);
-            }
-        }
-        if let (Some(card), Some(source)) = (aux.alsa_card.as_deref(), aux.previous_input_source) {
-            if let Err(error) = set_input_source(card, &source) {
-                first_error.get_or_insert(error);
-            }
-        }
-    }
-    info!("AUX disabled");
-    first_error.map_or(Ok(()), Err)
-}
-
-/// Tear AUX down and build it again from its own config; on failure it stays
-/// pending so `heal_aux` retries.
-fn rebuild_aux_locked(state: &mut AudioState) -> Result<()> {
-    let Some(aux) = state.aux.as_ref() else {
-        return Ok(());
-    };
-    let (cfg, chain) = (aux.cfg.clone(), aux.chain.clone());
-    if aux.alsa_card.is_some() {
-        let _ = aux_disable_locked(state);
-    }
-    let result = aux_enable_locked(state, &cfg, &chain);
-    if result.is_err() {
-        state.aux = Some(AuxState::pending(cfg, chain));
-    }
-    result
-}
-
-fn aux_graph_intact(aux: &mut AuxState) -> bool {
-    let Some(card) = aux.alsa_card.as_deref() else {
-        return false;
-    };
-    if let Some(dsp) = aux.dsp.as_mut() {
-        if !matches!(dsp.try_wait(), Ok(None)) {
-            return false;
-        }
-    }
-    // Can't see the graph right now; don't thrash it.
-    let Some(present) = engine()
-        .ok()
-        .and_then(|engine| engine.with_graph(|graph| graph.connected.then(|| graph.link_names())))
-    else {
-        return true;
-    };
-    let mut expected = aux.links.clone();
-    if aux.dsp.is_some() {
-        for channel in ["FL", "FR"] {
-            expected.push((
-                format!("{AUX_DSP_SINK}_out:output_{channel}"),
-                format!("{}:playback_{channel}", aux.sink),
-            ));
-        }
-    }
-    expected.iter().all(|link| present.contains(link))
-        && current_input_source(card).is_ok_and(|source| source == "Line")
-}
-
-fn cleanup_aux_parts(links: &mut Vec<LinkHandle>, dsp: &mut Option<Child>) {
-    links.clear();
-    if let Some(mut child) = dsp.take() {
-        let _ = stop_child(&mut child);
-    }
-}
-
 /// Make `sink` the default for `owner`, remembering the session's original.
 fn claim_default(defaults: &mut DefaultState, owner: DefaultOwner, sink: &str) -> Result<()> {
     let original = if defaults.claims.is_empty() {
@@ -1163,18 +732,6 @@ fn wait_for_chatmix_nodes(game: &mut Child, chat: &mut Child) -> Result<()> {
     Ok(())
 }
 
-/// Wait for a sink `child` creates (its playback ports).
-fn wait_for_node(child: &mut Child, node: &str) -> Result<()> {
-    let ready = engine()?.wait_for(NODE_WAIT, |graph| {
-        ensure_running(child, node)?;
-        Ok(graph.has_ports(node, Direction::In, &PLAYBACK))
-    })?;
-    if !ready {
-        bail!("PipeWire node {node} did not appear");
-    }
-    Ok(())
-}
-
 fn ensure_running(child: &mut Child, name: &str) -> Result<()> {
     if let Some(status) = child.try_wait().with_context(|| format!("poll {name}"))? {
         bail!("{name} exited early with {status}");
@@ -1211,6 +768,7 @@ fn kill_loopback_orphan(name: &str) {
     pkill(&format!("^pw-loopback -n {name} "));
 }
 
+/// The line-in DSP of versions before the mixer took the line-in over.
 fn kill_aux_dsp_orphan() {
     pkill(r"^pipewire -c .*/hako-aux-dsp\.conf$");
 }
@@ -1225,11 +783,6 @@ fn pkill(pattern: &str) {
 #[cfg(test)]
 fn pkill(_pattern: &str) {
     tests::PKILLS.with(|count| count.set(count.get() + 1));
-}
-
-/// Next to the daemon socket: the per-user runtime dir, never a shared /tmp.
-fn dsp_conf_path() -> PathBuf {
-    hako_core::default_socket_path().with_file_name("hako-aux-dsp.conf")
 }
 
 fn db_to_gain(db: f32) -> f32 {
@@ -1462,7 +1015,7 @@ fn generate_dsp_config(
             .to_string(),
     };
     filter_chain_config(
-        AUX_DSP_DESC,
+        "hako processing",
         &graph,
         "",
         &format!("node.name = \"{sink}\" media.class = Audio/Sink node.latency = \"{latency}\""),
@@ -1679,19 +1232,7 @@ fn resolve_node_id(exact_name: &str) -> Result<u32> {
         .ok_or_else(|| anyhow!("node id not found for {exact_name}"))
 }
 
-/// The ALSA card behind a PipeWire node. Its info props (where the card is)
-/// may trail the node's appearance briefly.
-fn node_alsa_card(node: &str) -> Result<String> {
-    let mut card = None;
-    engine()?.wait_for(Duration::from_secs(1), |graph| {
-        card = graph
-            .node_id(node)
-            .and_then(|id| alsa_card(&graph.nodes[&id].props));
-        Ok(card.is_some())
-    })?;
-    card.ok_or_else(|| anyhow!("no ALSA card for PipeWire node {node}"))
-}
-
+/// The ALSA card number behind a PipeWire node, from its props.
 fn alsa_card(props: &HashMap<String, String>) -> Option<String> {
     ["api.alsa.card", "alsa.card"]
         .iter()
@@ -1700,26 +1241,98 @@ fn alsa_card(props: &HashMap<String, String>) -> Option<String> {
         .cloned()
 }
 
-fn set_capture_percent(card: &str, percent: u8) -> Result<()> {
-    if card.is_empty() || !card.chars().all(|ch| ch.is_ascii_digit()) {
-        bail!("invalid ALSA card '{card}'");
+/// `amixer -c <card> <args>` (no shell); `card` must be a card number.
+#[cfg(not(test))]
+fn amixer(card: &str, args: &[&str]) -> Result<String> {
+    valid_card(card)?;
+    run_cmd("amixer", &[&["-c", card], args].concat())
+}
+
+/// Unit tests run on the user's machine: they never touch a real card.
+#[cfg(test)]
+fn amixer(card: &str, args: &[&str]) -> Result<String> {
+    valid_card(card)?;
+    tests::fake_amixer(card, args)
+}
+
+fn valid_card(card: &str) -> Result<()> {
+    if card.is_empty() || card.len() > 3 || !card.chars().all(|ch| ch.is_ascii_digit()) {
+        bail!("invalid ALSA card {card:?}");
     }
-    run_cmd(
-        "amixer",
-        &[
-            "-c",
-            card,
-            "sset",
-            "Capture",
-            &format!("{}%", percent.min(100)),
-        ],
-    )
-    .map(|_| ())
+    Ok(())
+}
+
+/// What a card offers its capture devices: the "Input Source" items (empty
+/// when it has none) and whether it has a "Capture" level.
+fn card_capture_controls(card: &str) -> Result<(Vec<String>, bool)> {
+    let controls = amixer(card, &["scontrols"])?;
+    let items = if has_control(&controls, "Input Source") {
+        enum_items(&amixer(card, &["sget", "Input Source"])?)
+    } else {
+        Vec::new()
+    };
+    Ok((items, has_control(&controls, "Capture")))
+}
+
+/// `amixer scontrols` lists `Simple mixer control 'NAME',INDEX`.
+fn has_control(scontrols: &str, name: &str) -> bool {
+    scontrols.lines().any(|line| {
+        line.trim()
+            .strip_prefix("Simple mixer control '")
+            .and_then(|rest| rest.rsplit_once("',"))
+            .is_some_and(|(control, _)| control == name)
+    })
+}
+
+/// The `Items: 'A' 'B'` of an enumerated control in `amixer sget` output.
+fn enum_items(sget: &str) -> Vec<String> {
+    sget.lines()
+        .find_map(|line| line.trim().strip_prefix("Items:"))
+        .map(|items| {
+            items
+                .split('\'')
+                .skip(1)
+                .step_by(2)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn set_capture_percent(card: &str, percent: u8) -> Result<()> {
+    let percent = percent.min(100);
+    amixer(card, &["sset", "Capture", &format!("{percent}%")])?;
+    card_levels().insert(card.to_string(), percent);
+    Ok(())
+}
+
+/// Capture level per card: read once, then followed through hako's own writes.
+/// ponytail: a level changed in another mixer app shows stale until restart.
+static CARD_LEVELS: Mutex<BTreeMap<String, u8>> = Mutex::new(BTreeMap::new());
+
+fn card_levels() -> MutexGuard<'static, BTreeMap<String, u8>> {
+    CARD_LEVELS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The card's "Capture" level in percent, if it reports one.
+fn capture_level(card: &str) -> Option<u8> {
+    if let Some(level) = card_levels().get(card) {
+        return Some(*level);
+    }
+    let level = parse_percent(&amixer(card, &["sget", "Capture"]).ok()?)?;
+    card_levels().insert(card.to_string(), level);
+    Some(level)
+}
+
+/// The first `[NN%]` of an `amixer sget` volume line.
+fn parse_percent(sget: &str) -> Option<u8> {
+    let (_, rest) = sget.split_once('[')?;
+    rest.split_once("%]")?.0.parse().ok().filter(|p| *p <= 100)
 }
 
 fn current_input_source(card: &str) -> Result<String> {
-    let output = run_cmd("amixer", &["-c", card, "sget", "Input Source"])?;
-    output
+    amixer(card, &["sget", "Input Source"])?
         .lines()
         .find_map(|line| {
             line.trim()
@@ -1730,8 +1343,8 @@ fn current_input_source(card: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("ALSA card {card} did not report its input source"))
 }
 
-fn set_input_source(card: &str, source: &str) -> Result<()> {
-    run_cmd("amixer", &["-c", card, "sset", "Input Source", source]).map(|_| ())
+fn set_input_source(card: &str, item: &str) -> Result<()> {
+    amixer(card, &["sset", "Input Source", item]).map(|_| ())
 }
 
 fn same_effect_topology(current: &AuxEffectChain, proposed: &AuxEffectChain) -> bool {
@@ -1756,15 +1369,6 @@ fn same_effect_topology(current: &AuxEffectChain, proposed: &AuxEffectChain) -> 
                         }
                     }
             })
-}
-
-fn update_effect_parameters(aux: &mut AuxState, chain: &AuxEffectChain) -> Result<()> {
-    chain.validate().map_err(anyhow::Error::msg)?;
-    if aux.dsp.is_none() {
-        return Ok(());
-    }
-    let id = resolve_node_id(AUX_DSP_SINK)?;
-    engine()?.set_props(id, engine::params_pod(&effect_params(chain))?)
 }
 
 /// Every control as filter-chain `params`: `("node:port", value)`.
@@ -1838,34 +1442,12 @@ fn graph_port(graph: &engine::Graph, name: &str, direction: Direction) -> Option
     graph.port(node, port, direction)
 }
 
-/// Link `output` to `input` (`node:port` names) for as long as the handle
-/// lives. A link someone else left there (an older hako's lingering
-/// `pw-link` link) is replaced by one this process owns.
-fn link_ports(output: &str, input: &str) -> Result<LinkHandle> {
-    let engine = engine()?;
-    let (ports, existing) = engine.with_graph(|graph| {
-        let ports =
-            graph_port(graph, output, Direction::Out).zip(graph_port(graph, input, Direction::In));
-        let existing = ports.map_or_else(Vec::new, |((_, out), (_, inp))| {
-            graph.links_between(out, inp)
-        });
-        (ports, existing)
-    });
-    let Some((out, inp)) = ports else {
-        bail!("link {output} -> {input}: port not found");
-    };
-    for id in existing {
-        let _ = engine.destroy(id);
-    }
-    engine
-        .link(out, inp)
-        .with_context(|| format!("link {output} -> {input}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use hako_core::ipc::{AuxEffect, AuxEffectKind, EqBand};
+
+    const DSP: &str = "Test_DSP";
 
     fn chain(effects: Vec<AuxEffect>) -> AuxEffectChain {
         AuxEffectChain { effects }
@@ -1918,7 +1500,7 @@ mod tests {
     #[test]
     fn config_preserves_enabled_order_and_repeated_effects() {
         let config = generate_dsp_config(
-            AUX_DSP_SINK,
+            DSP,
             Some("sink\"name"),
             &chain(vec![
                 effect("first-gate", true, AuxEffectKind::default_gate()),
@@ -1936,14 +1518,14 @@ mod tests {
         assert!(config.contains("output = \"fx0:Output R\" input = \"fx1:Input R\""));
         assert!(config.contains("inputs = [ \"fx0:Input L\" \"fx0:Input R\" ]"));
         assert!(config.contains("outputs = [ \"fx1:Output L\" \"fx1:Output R\" ]"));
-        assert!(config.contains("node.name = \"Hako_AUX_DSP\" media.class"));
+        assert!(config.contains("node.name = \"Test_DSP\" media.class"));
         assert!(config.contains("node.target = \"sink\\\"name\""));
         // Both sides of the filter-chain request the latency setting.
         assert_eq!(config.matches("node.latency = \"256/48000\"").count(), 2);
         assert!(config.contains("plugin = \"/usr/lib/ladspa/lsp-plugins-ladspa.so\""));
         // Gate and compressor need the LSP library.
         let gate = chain(vec![effect("gate", true, AuxEffectKind::default_gate())]);
-        assert!(generate_dsp_config(AUX_DSP_SINK, Some("t"), &gate, 256, None).is_err());
+        assert!(generate_dsp_config(DSP, Some("t"), &gate, 256, None).is_err());
         assert!(!config.contains("node.autoconnect"));
 
         // Untargeted (the latency test): nothing routes the playback side.
@@ -2000,14 +1582,8 @@ mod tests {
 
     #[test]
     fn config_builds_stereo_biquad_chain_for_eq() {
-        let config = generate_dsp_config(
-            AUX_DSP_SINK,
-            Some("target"),
-            &gate_eq_compressor(),
-            256,
-            lsp(),
-        )
-        .unwrap();
+        let config =
+            generate_dsp_config(DSP, Some("target"), &gate_eq_compressor(), 256, lsp()).unwrap();
 
         let order = [
             "gate_stereo",
@@ -2044,8 +1620,7 @@ mod tests {
             eq(&[(EqBandKind::LowShelf, 100.0)]),
         )]);
         // EQ alone needs no LADSPA library.
-        let config =
-            generate_dsp_config(AUX_DSP_SINK, Some("target"), &eq_only, 128, None).unwrap();
+        let config = generate_dsp_config(DSP, Some("target"), &eq_only, 128, None).unwrap();
         assert!(config.contains("node.latency = \"128/48000\""));
         assert!(config.contains("inputs = [ \"fx0_b0_l:In\" \"fx0_b0_r:In\" ]"));
         assert!(config.contains("outputs = [ \"fx0_b0_l:Out\" \"fx0_b0_r:Out\" ]"));
@@ -2054,9 +1629,8 @@ mod tests {
 
     #[test]
     fn config_rejects_invalid_or_empty_chain() {
-        let config = |chain: &AuxEffectChain| {
-            generate_dsp_config(AUX_DSP_SINK, Some("t"), chain, 256, lsp())
-        };
+        let config =
+            |chain: &AuxEffectChain| generate_dsp_config(DSP, Some("t"), chain, 256, lsp());
         assert!(config(&AuxEffectChain::default()).is_err());
         let disabled = chain(vec![effect("gate", false, AuxEffectKind::default_gate())]);
         assert!(config(&disabled).is_err());
@@ -2195,6 +1769,86 @@ mod tests {
         );
     }
 
+    // amixer output of a Realtek ALC897 (HD-Audio Generic), 2026-11-13.
+    const SCONTROLS: &str = "Simple mixer control 'Master',0\nSimple mixer control 'Front Mic',0\nSimple mixer control 'Line',0\nSimple mixer control 'Capture',0\nSimple mixer control 'Capture',1\nSimple mixer control 'Input Source',0\nSimple mixer control 'Input Source',1\nSimple mixer control 'Rear Mic',0\n";
+    const INPUT_SOURCE: &str = "Simple mixer control 'Input Source',0\n  Capabilities: cenum\n  Items: 'Rear Mic' 'Front Mic' 'Line'\n  Item0: 'Rear Mic'\n";
+    const CAPTURE: &str = "Simple mixer control 'Capture',0\n  Capabilities: cvolume cswitch\n  Capture channels: Front Left - Front Right\n  Limits: Capture 0 - 63\n  Front Left: Capture 30 [48%] [5.25dB] [on]\n  Front Right: Capture 30 [48%] [5.25dB] [on]\n";
+    /// A USB headset: no input selection, no capture level.
+    const USB_SCONTROLS: &str = "Simple mixer control 'PCM',0\nSimple mixer control 'Mic',0\n";
+
+    thread_local! {
+        /// `amixer` calls of this test thread: `card args...`.
+        pub(super) static AMIXER: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// `amixer` for unit tests: card 7 is the ALC897 above, card 8 the USB
+    /// headset; every call is recorded, `sset` succeeds.
+    pub(crate) fn fake_amixer(card: &str, args: &[&str]) -> Result<String> {
+        AMIXER.with(|calls| {
+            calls
+                .borrow_mut()
+                .push(format!("{card} {}", args.join(" ")))
+        });
+        match (card, args) {
+            ("7", ["scontrols"]) => Ok(SCONTROLS.into()),
+            ("7", ["sget", "Input Source"]) => Ok(INPUT_SOURCE.into()),
+            ("6", ["sget", "Capture"]) => Ok(CAPTURE.into()),
+            ("8", ["scontrols"]) => Ok(USB_SCONTROLS.into()),
+            (_, ["sset", ..]) => Ok(String::new()),
+            _ => bail!("amixer: no such card {card}"),
+        }
+    }
+
+    pub(crate) fn amixer_calls() -> Vec<String> {
+        AMIXER.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+    }
+
+    #[test]
+    fn the_cards_capture_level_is_read_once_then_follows_our_writes() {
+        assert_eq!(parse_percent(CAPTURE), Some(48));
+        assert_eq!(parse_percent(INPUT_SOURCE), None);
+        assert_eq!(parse_percent("  Mono: Capture 9 [300%] [on]"), None);
+        // Card 6 is only this test's (the cache is per process).
+        assert_eq!(capture_level("6"), Some(48));
+        set_capture_percent("6", 20).unwrap();
+        assert_eq!(capture_level("6"), Some(20));
+        assert_eq!(capture_level("9"), None, "no such card");
+        amixer_calls();
+    }
+
+    #[test]
+    fn amixer_output_gives_input_sources_and_capture() {
+        assert!(has_control(SCONTROLS, "Input Source"));
+        assert!(has_control(SCONTROLS, "Capture"));
+        assert!(!has_control(SCONTROLS, "Input"), "whole names only");
+        assert!(!has_control(USB_SCONTROLS, "Capture"));
+        assert_eq!(enum_items(INPUT_SOURCE), ["Rear Mic", "Front Mic", "Line"]);
+        assert!(enum_items("Simple mixer control 'Capture',0\n").is_empty());
+        assert_eq!(current_input_source("7").unwrap(), "Rear Mic");
+
+        assert_eq!(
+            card_capture_controls("7").unwrap(),
+            (
+                vec!["Rear Mic".into(), "Front Mic".into(), "Line".into()],
+                true
+            )
+        );
+        assert_eq!(card_capture_controls("8").unwrap(), (Vec::new(), false));
+        amixer_calls();
+        // Card ids are numbers, nothing else reaches amixer.
+        for bad in ["", "hw:2", "-1", "2 3", "1234"] {
+            assert!(card_capture_controls(bad).is_err(), "{bad:?}");
+            assert!(set_input_source(bad, "Line").is_err());
+        }
+        assert!(amixer_calls().is_empty());
+        set_capture_percent("7", 130).unwrap();
+        set_input_source("7", "Rear Mic").unwrap();
+        assert_eq!(
+            amixer_calls(),
+            ["7 sset Capture 100%", "7 sset Input Source Rear Mic"]
+        );
+    }
+
     #[test]
     fn effect_topology_ignores_parameter_only_changes() {
         let current = gate_eq_compressor();
@@ -2271,18 +1925,16 @@ mod tests {
     }
 
     #[test]
-    fn default_owners_release_non_lifo() {
+    fn a_released_default_goes_back_to_the_sessions() {
         let s = |n: &str| Some(n.to_string());
         let mut defaults = DefaultState::default();
         defaults.claim(DefaultOwner::ChatMix, "game".into(), s("speakers"));
-        defaults.claim(DefaultOwner::Aux, "dac".into(), None);
-        assert_eq!(defaults.release(DefaultOwner::ChatMix), None);
-        assert_eq!(defaults.release(DefaultOwner::Aux), s("speakers"));
-
-        defaults.claim(DefaultOwner::ChatMix, "game".into(), s("speakers"));
-        defaults.claim(DefaultOwner::Aux, "dac".into(), None);
-        assert_eq!(defaults.release(DefaultOwner::Aux), s("game"));
+        assert_eq!(defaults.held(), Some("game"));
         assert_eq!(defaults.release(DefaultOwner::ChatMix), s("speakers"));
+        assert_eq!(defaults.release(DefaultOwner::ChatMix), None);
+        defaults.claim(DefaultOwner::ChatMix, "game".into(), s("hdmi"));
+        assert_eq!(defaults.restore(), s("hdmi"));
+        assert_eq!(defaults.held(), None);
     }
 
     #[test]
@@ -2297,8 +1949,6 @@ mod tests {
             audio.report(&mut state);
         };
 
-        // The caller of a request gets its error; the hook does not.
-        assert!(audio.set_aux_capture_percent(50).is_err());
         background(Some("no sink"));
         background(Some("no sink"));
         background(None);
@@ -2317,10 +1967,7 @@ mod tests {
     fn only_the_kill_switch_sweeps_other_processes() {
         let pkills = || PKILLS.with(std::cell::Cell::get);
         let audio = AudioService::new();
-        audio.aux_keep_pending(&AuxConfig::default(), &AuxEffectChain::default());
-        let _ = audio.aux_disable();
         let _ = audio.destroy_chatmix();
-        let _ = audio.set_aux_capture_percent(10);
         drop(audio);
         assert_eq!(
             pkills(),
@@ -2329,7 +1976,7 @@ mod tests {
         );
 
         let audio = AudioService::new();
-        // ChatMix's two loopbacks, the AUX DSP, the mixer's strips.
+        // ChatMix's two loopbacks, an old line-in DSP, the mixer's strips.
         audio.kill_orphans();
         assert_eq!(pkills(), 4);
         // The kill-switch needs PipeWire only to restore a default it holds.
@@ -2340,7 +1987,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mixer_takes_the_dial_and_holds_chatmix_and_aux_back() {
+    fn the_mixer_takes_the_dial_and_holds_chatmix_back() {
         let audio = AudioService::new();
         let dial = std::sync::Arc::new(Mutex::new(Vec::new()));
         let seen = dial.clone();
@@ -2351,19 +1998,13 @@ mod tests {
         assert_eq!(audio.chatmix_dial(), (0.3, 1.0));
 
         audio.hand_over(true).unwrap();
-        // Neither ChatMix nor AUX is built (no PipeWire lookup happens).
+        // ChatMix is not built (no PipeWire lookup happens).
         assert!(audio.ensure_chatmix(&["no such sink"]).is_ok());
         assert!(!audio.chatmix_active() && audio.healthy());
-        audio
-            .aux_enable(&AuxConfig::default(), &AuxEffectChain::default())
-            .unwrap();
-        assert!(audio.aux_active(), "requested, built on hand-back");
-        assert_eq!(audio.aux_capture_node(), None);
         audio.set_chatmix_volumes(0.5, 2.0).unwrap();
         assert_eq!(*dial.lock().unwrap(), [(0.5, 1.0)]);
         assert_eq!(audio.chatmix_dial(), (0.5, 1.0));
 
-        audio.aux_disable().unwrap();
         audio.hand_over(false).unwrap();
         audio.set_chatmix_volumes(0.7, 0.7).unwrap();
         assert_eq!(dial.lock().unwrap().len(), 1, "the dial is ChatMix's again");
@@ -2372,11 +2013,9 @@ mod tests {
     #[test]
     fn status_reads_never_wait_for_audio_work() {
         let audio = AudioService::new();
-        audio.aux_keep_pending(&AuxConfig::default(), &AuxEffectChain::default());
         let busy = audio.state();
-        assert!(audio.aux_active());
         assert!(!audio.chatmix_active());
-        assert_eq!(audio.aux_capture_node(), None, "pending AUX owns no nodes");
+        assert!(audio.healthy());
         drop(busy);
         // Nothing is up, so a new latency rebuilds nothing.
         assert!(audio.set_latency(128).is_ok());
@@ -2498,7 +2137,7 @@ mod tests {
 
     #[test]
     #[ignore = "needs a running PipeWire session"]
-    fn live_links_are_owned_synchronous_and_replace_lingering_ones() {
+    fn live_links_are_owned_and_synchronous() {
         let (_a, _b) = (
             TestSink::spawn("hako-test-a"),
             TestSink::spawn("hako-test-b"),
@@ -2514,36 +2153,27 @@ mod tests {
                 .unwrap()
         };
 
-        // A lingering link, as older hako versions made them.
-        run_cmd("pw-link", &[pair.0, pair.1]).unwrap();
-        assert!(present(true));
-        // Ids are reused at once; serials are not.
-        let serials = |graph: &engine::Graph| -> Vec<String> {
-            let out = graph_port(graph, pair.0, Direction::Out).unwrap().1;
-            let inp = graph_port(graph, pair.1, Direction::In).unwrap().1;
-            graph
-                .links_between(out, inp)
-                .iter()
-                .map(|id| graph.links[id].props["object.serial"].clone())
-                .collect()
-        };
-        let old = engine.with_graph(serials);
-        assert_eq!(old.len(), 1);
-
-        let link = link_ports(pair.0, pair.1).unwrap();
-        let id = link.id;
-        let synced = engine
-            .wait_for(Duration::from_secs(2), |graph| {
-                let now = serials(graph);
-                Ok(now.len() == 1
-                    && now != old
-                    && graph
-                        .links
-                        .get(&id)
-                        .is_some_and(|l| l.props.contains_key("object.id")))
+        let (out, inp) = engine
+            .with_graph(|graph| {
+                graph_port(graph, pair.0, Direction::Out).zip(graph_port(
+                    graph,
+                    pair.1,
+                    Direction::In,
+                ))
             })
             .unwrap();
-        assert!(synced, "lingering link not replaced, or no link info");
+        let link = engine.link(out, inp).unwrap();
+        let id = link.id;
+        assert!(present(true));
+        let synced = engine
+            .wait_for(Duration::from_secs(2), |graph| {
+                Ok(graph
+                    .links
+                    .get(&id)
+                    .is_some_and(|l| l.props.contains_key("object.id")))
+            })
+            .unwrap();
+        assert!(synced, "no link info");
         engine.with_graph(|graph| {
             assert_ne!(
                 graph.links[&id].props.get("link.async").map(String::as_str),
@@ -2622,7 +2252,16 @@ mod tests {
             }
             gain
         };
-        let configured = wait_for_node(&mut child, SINK).map(|()| gain_becomes(3.0));
+        let configured = engine()
+            .unwrap()
+            .wait_for(NODE_WAIT, |graph| {
+                ensure_running(&mut child, SINK)?;
+                Ok(graph.has_ports(SINK, Direction::In, &PLAYBACK))
+            })
+            .and_then(|up| {
+                anyhow::ensure!(up, "{SINK} did not appear");
+                Ok(gain_becomes(3.0))
+            });
         let updated = configured.is_ok().then(|| {
             let id = resolve_node_id(SINK).unwrap();
             let pod = engine::params_pod(&effect_params(&chain(-4.5))).unwrap();

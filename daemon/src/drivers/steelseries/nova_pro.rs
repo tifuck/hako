@@ -13,7 +13,7 @@ use crate::hid::{find_hidraw, pad64, HidrawDevice};
 use anyhow::{bail, Context, Result};
 use hako_audio::AudioService;
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
-use hako_core::config::{get_setting, merge_setting, AuxConfig, ConfigPaths};
+use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{BatteryState, DeviceId, DeviceKind, DeviceSnapshot};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,17 +29,9 @@ const CHATMIX_SINKS: &[&str] = &[
 ];
 
 pub(super) fn open(pid: u16, ctx: &DriverCtx) -> Opened {
-    let aux = match hako_core::config::load_app_config(&ctx.paths) {
-        Ok(cfg) => cfg.aux,
-        Err(e) => {
-            warn!("AUX auto-enable skipped: {e:#}");
-            AuxConfig::default()
-        }
-    };
     Ok(vec![Box::new(SteelSeriesAdapter::try_open(
         pid,
         ctx.audio.clone(),
-        aux,
         ctx.paths.clone(),
     )?)])
 }
@@ -54,7 +46,6 @@ pub struct SteelSeriesAdapter {
     chat_mix: f64,
     batteries: Vec<BatteryState>,
     last_poll: Instant,
-    last_aux_check: Instant,
     last_chatmix_try: Instant,
     poll_failures: u8,
     audio: Arc<AudioService>,
@@ -64,12 +55,7 @@ pub struct SteelSeriesAdapter {
 }
 
 impl SteelSeriesAdapter {
-    pub fn try_open(
-        pid: u16,
-        audio: Arc<AudioService>,
-        aux_config: AuxConfig,
-        paths: ConfigPaths,
-    ) -> Result<Self> {
+    pub fn try_open(pid: u16, audio: Arc<AudioService>, paths: ConfigPaths) -> Result<Self> {
         // The utility HID collection that answers the 0x06 opcode set (status /
         // battery / ChatMix / setters) enumerates as bInterfaceNumber 4 on the
         // 12e5 GameDAC (the reference's libusb "interface 7" maps here); 7 is
@@ -114,7 +100,6 @@ impl SteelSeriesAdapter {
                 },
             ],
             last_poll: Instant::now() - Duration::from_secs(10),
-            last_aux_check: Instant::now(),
             last_chatmix_try: Instant::now(),
             poll_failures: 0,
             audio,
@@ -129,23 +114,6 @@ impl SteelSeriesAdapter {
         adapter.audio.resume_chatmix();
         if let Err(error) = adapter.audio.ensure_chatmix(CHATMIX_SINKS) {
             warn!("chatmix: {error}");
-        }
-        let aux_enabled = get_setting(&adapter.settings, SettingKey::AuxEnabled)
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        if aux_config.auto_enable && aux_enabled {
-            let mut aux_config = aux_config;
-            if let Some(percent) = get_setting(&adapter.settings, SettingKey::AuxCapturePercent)
-                .and_then(|value| value.as_int())
-            {
-                aux_config.capture_percent = percent.clamp(0, 100) as u8;
-            }
-            if let Err(error) = adapter.audio.aux_enable(&aux_config, &aux_config.effects) {
-                warn!("auto-enable AUX: {error}");
-                adapter
-                    .audio
-                    .aux_keep_pending(&aux_config, &aux_config.effects);
-            }
         }
         let _ = adapter.poll_status();
         info!("SteelSeries open {}", adapter.id.key());
@@ -388,8 +356,6 @@ fn defaults_into(s: &mut SettingsMap) {
         (SettingKey::WirelessModeRange, SettingValue::Bool(false)),
         (SettingKey::ChatMixGame, SettingValue::Float(1.0)),
         (SettingKey::ChatMixChat, SettingValue::Float(1.0)),
-        (SettingKey::AuxEnabled, SettingValue::Bool(false)),
-        (SettingKey::AuxCapturePercent, SettingValue::Int(66)),
     ];
     for (k, v) in d {
         s.entry(k.as_str().into()).or_insert(v);
@@ -423,8 +389,6 @@ fn controls(pid: u16) -> Vec<SettingMeta> {
             ],
         ),
         SettingMeta::toggle(WirelessModeRange, "Range mode"),
-        SettingMeta::toggle(AuxEnabled, "Monitor line-in"),
-        SettingMeta::slider(AuxCapturePercent, "Capture level", 0.0, 100.0, 1.0).unit("%"),
         SettingMeta::slider(MicVolume, "Mic level", 1.0, 10.0, 1.0),
         // Four discrete named levels read better as a dropdown than a 0–3 slider.
         SettingMeta::dropdown(
@@ -457,17 +421,7 @@ impl DeviceAdapter for SteelSeriesAdapter {
             name: self.name.clone(),
             connected: self.dev.is_some(),
             batteries: self.batteries.clone(),
-            // The toggle shows whether AUX is actually on (or pending a retry);
-            // the persisted value only feeds `aux.auto_enable` on connect.
-            settings: {
-                let mut s = self.settings.clone();
-                merge_setting(
-                    &mut s,
-                    SettingKey::AuxEnabled,
-                    SettingValue::Bool(self.audio.aux_active()),
-                );
-                s
-            },
+            settings: self.settings.clone(),
             controls: controls(self.id.product_id),
             // HID errors first; audio errors live in the audio service.
             last_error: self.last_error.clone().or_else(|| self.audio.last_error()),
@@ -512,26 +466,6 @@ impl DeviceAdapter for SteelSeriesAdapter {
                 self.write_cmd(&[0x06, 0xc3, v])?;
                 self.commit(save)?;
             }
-            SettingKey::AuxEnabled => {
-                let on = value.as_bool().unwrap_or(false);
-                let mut cfg = hako_core::config::load_app_config(&self.paths)?.aux;
-                if let Some(p) =
-                    get_setting(&proposed, SettingKey::AuxCapturePercent).and_then(|v| v.as_int())
-                {
-                    cfg.capture_percent = p.clamp(0, 100) as u8;
-                }
-                if on {
-                    self.audio.aux_enable(&cfg, &cfg.effects)?;
-                } else {
-                    self.audio.aux_disable()?;
-                }
-            }
-            SettingKey::AuxCapturePercent => {
-                let p = value.as_int().unwrap_or(66).clamp(0, 100) as u8;
-                if self.audio.aux_active() {
-                    self.audio.set_aux_capture_percent(p)?;
-                }
-            }
             _ => bail!("unsupported setting {}", key.as_str()),
         }
         // The device (or audio graph) already changed: show it even if saving fails.
@@ -550,10 +484,6 @@ impl DeviceAdapter for SteelSeriesAdapter {
         if self.dev.is_some() {
             let _ = self.drain_reports(Duration::ZERO);
         }
-        if self.last_aux_check.elapsed() >= Duration::from_secs(5) {
-            self.last_aux_check = Instant::now();
-            self.audio.heal_aux();
-        }
         if self.last_poll.elapsed() >= Duration::from_secs(5) {
             if let Err(e) = self.poll_status() {
                 self.poll_failures = self.poll_failures.saturating_add(1);
@@ -571,13 +501,12 @@ impl DeviceAdapter for SteelSeriesAdapter {
     }
 
     /// The ChatMix dial is read in `tick`: keep its latency low. The slow
-    /// parts of `tick` (status poll, ChatMix retry, AUX heal) run on timers.
+    /// parts of `tick` (status poll, ChatMix retry) run on timers.
     fn tick_interval(&self) -> Duration {
         Duration::from_millis(100)
     }
 
     fn shutdown(&mut self) {
-        let _ = self.audio.aux_disable();
         // ChatMix destroyed by daemon-level audio reset on stop
         self.dev = None;
     }
@@ -627,8 +556,6 @@ mod tests {
                 SettingKey::ChatMixChat,
                 SettingKey::PmShutdown,
                 SettingKey::WirelessModeRange,
-                SettingKey::AuxEnabled,
-                SettingKey::AuxCapturePercent,
                 SettingKey::MicVolume,
                 SettingKey::MicSideTone,
                 SettingKey::MicLedBrightness,

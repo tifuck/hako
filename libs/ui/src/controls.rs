@@ -289,30 +289,17 @@ fn toggle_row(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec
     {
         return;
     }
-    let mut close = false;
-    let modal = egui::Modal::new(pending.with("modal")).show(ui.ctx(), |ui| {
-        ui.set_width(420.0);
-        ui.label(
-            egui::RichText::new(&meta.label)
-                .size(16.0)
-                .strong()
-                .color(pal().text),
-        );
-        ui.add_space(theme::SPACE_SM);
-        ui.label(egui::RichText::new(warning).color(pal().text_muted));
-        ui.add_space(theme::SPACE_LG);
-        // Actions bottom-right, the confirming one last.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if widgets::primary_button(ui, "I understand, allow it").clicked() {
-                set(out, d, meta.key, SettingValue::Bool(true));
-                close = true;
-            }
-            if widgets::button(ui, "Cancel").clicked() {
-                close = true;
-            }
-        });
-    });
-    if close || modal.should_close() {
+    let answer = widgets::confirm(
+        ui.ctx(),
+        pending.with("modal"),
+        &meta.label,
+        warning,
+        "I understand, allow it",
+    );
+    if answer == Some(true) {
+        set(out, d, meta.key, SettingValue::Bool(true));
+    }
+    if answer.is_some() {
         ui.ctx().data_mut(|m| m.remove_temp::<bool>(pending));
     }
 }
@@ -706,15 +693,27 @@ pub fn paint_effect(p: &egui::Painter, r: Rect, effect: &str, color: Color32, t:
 
 // ── Headset: ChatMix ─────────────────────────────────────────────
 
-/// Where the base-station dial sits between game and chat (read-only).
-pub fn chatmix(ui: &mut Ui, d: &DeviceSnapshot) {
+/// What the ChatMix card says the dial does: with the mixer on it turns the
+/// mixer's faders, otherwise the two sinks apps play into.
+pub fn chatmix_hint(mixer_on: bool) -> &'static str {
+    if mixer_on {
+        "Turns the Game and Chat faders in the Mixer."
+    } else {
+        "Follows the dial on the base station. Send games to Hako_Game and voice chat to Hako_Chat."
+    }
+}
+
+/// Where the base-station dial sits between game and chat (read-only). The
+/// sink names show only while the headset's own sinks exist (mixer off).
+pub fn chatmix(ui: &mut Ui, d: &DeviceSnapshot, mixer_on: bool) {
     let game = num(d, SettingKey::ChatMixGame)
         .unwrap_or(1.0)
         .clamp(0.0, 1.0) as f32;
     let chat = num(d, SettingKey::ChatMixChat)
         .unwrap_or(1.0)
         .clamp(0.0, 1.0) as f32;
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 66.0), Sense::hover());
+    let height = if mixer_on { 46.0 } else { 66.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
     let pos = ui
         .ctx()
         .animate_value_with_time(resp.id, (1.0 + chat - game) / 2.0, 0.25);
@@ -739,6 +738,9 @@ pub fn chatmix(ui: &mut Ui, d: &DeviceSnapshot) {
         };
         p.galley(pos2(name_x, y), name_g, pal().text);
         p.galley(pos2(pct_x, y), pct_g, pal().text_muted);
+        if mixer_on {
+            continue;
+        }
         p.text(
             pos2(
                 if left_side { rect.left() } else { rect.right() },

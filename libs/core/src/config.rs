@@ -58,6 +58,10 @@ impl Default for AppConfig {
     }
 }
 
+/// The pre-mixer line-in (`[aux]`). Line-in is a mixer input now: only the
+/// starter layout and the migration read it (which capture device is the
+/// line-in, the headset sink it played on, its chain); the other fields are
+/// kept so old files load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuxConfig {
     #[serde(default)]
@@ -146,6 +150,10 @@ pub struct ProfileFile {
     pub name: String,
     #[serde(default)]
     pub devices: BTreeMap<String, BTreeMap<String, TomlSetting>>,
+    /// The mixer layout when the profile was saved (mixer on). Applied only
+    /// when the user applies the profile, never at daemon start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mixer: Option<crate::mixer::Scene>,
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +321,17 @@ pub fn save_profile(paths: &ConfigPaths, profile: &ProfileFile) -> Result<()> {
     let text = toml::to_string_pretty(profile)?;
     write_atomic(&p, &text)?;
     Ok(())
+}
+
+/// Remove a profile; `Ok(false)` when there was none.
+pub fn delete_profile(paths: &ConfigPaths, name: &str) -> Result<bool> {
+    validate_profile_name(name)?;
+    let p = paths.profiles_dir.join(format!("{name}.toml"));
+    match fs::remove_file(&p) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("delete {}", p.display())),
+    }
 }
 
 pub fn settings_from_profile_device(map: &BTreeMap<String, TomlSetting>) -> SettingsMap {

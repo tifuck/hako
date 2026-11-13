@@ -277,6 +277,26 @@ pub fn section(
     trailing: impl FnOnce(&mut Ui),
     body: impl FnOnce(&mut Ui),
 ) {
+    section_with(
+        ui,
+        |ui| {
+            ui.label(section_title(title));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+        },
+        body,
+    );
+}
+
+/// A card title's text style.
+pub fn section_title(text: &str) -> egui::RichText {
+    egui::RichText::new(text)
+        .size(15.0)
+        .strong()
+        .color(pal().text)
+}
+
+/// Card whose title line is drawn by `header` (left to right, centered).
+pub fn section_with(ui: &mut Ui, header: impl FnOnce(&mut Ui), body: impl FnOnce(&mut Ui)) {
     theme::card().show(ui, |ui| {
         let w = ui.available_width();
         ui.set_width(w);
@@ -285,19 +305,47 @@ pub fn section(
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.set_min_size(vec2(w, theme::CONTROL_H));
-                ui.label(
-                    egui::RichText::new(title)
-                        .size(15.0)
-                        .strong()
-                        .color(pal().text),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+                header(ui);
             },
         );
         ui.add_space(theme::SPACE_XS);
         body(ui);
     });
     ui.add_space(theme::SPACE_MD);
+}
+
+/// A question over the page with one action and Cancel. `Some(true)` once
+/// confirmed, `Some(false)` once dismissed, `None` while it is open.
+pub fn confirm(
+    ctx: &egui::Context,
+    id: egui::Id,
+    title: &str,
+    body: &str,
+    action: &str,
+) -> Option<bool> {
+    let mut end = None;
+    let modal = egui::Modal::new(id).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.label(
+            egui::RichText::new(title)
+                .size(16.0)
+                .strong()
+                .color(pal().text),
+        );
+        ui.add_space(theme::SPACE_SM);
+        ui.label(egui::RichText::new(body).color(pal().text_muted));
+        ui.add_space(theme::SPACE_LG);
+        // Actions bottom-right, the confirming one last.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if primary_button(ui, action).clicked() {
+                end = Some(true);
+            }
+            if button(ui, "Cancel").clicked() {
+                end = Some(false);
+            }
+        });
+    });
+    end.or(modal.should_close().then_some(false))
 }
 
 /// Small "i" badge that explains a control on hover.
@@ -705,6 +753,7 @@ pub fn icon_button(
         pal().text_muted.lerp_to_gamma(pal().text, hover)
     };
     paint(ui.painter(), rect.shrink(size * 0.28), color);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tooltip));
     let resp = if enabled {
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
     } else {
@@ -832,6 +881,21 @@ pub fn icon_close(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(1.6_f32, c);
     p.line_segment([r.left_top(), r.right_bottom()], s);
     p.line_segment([r.right_top(), r.left_bottom()], s);
+}
+
+/// A pencil, tip at the bottom left.
+pub fn icon_pencil(p: &egui::Painter, r: Rect, c: Color32) {
+    let at = |x: f32, y: f32| r.min + vec2(x * r.width(), y * r.height());
+    let s = Stroke::new(1.4_f32, c);
+    let body = [
+        at(0.0, 1.0),
+        at(0.1, 0.66),
+        at(0.7, 0.06),
+        at(0.94, 0.3),
+        at(0.34, 0.9),
+    ];
+    p.add(egui::Shape::closed_line(body.to_vec(), s));
+    p.line_segment([at(0.56, 0.2), at(0.8, 0.44)], s);
 }
 
 pub fn icon_chevron(p: &egui::Painter, r: Rect, c: Color32, down: bool) {

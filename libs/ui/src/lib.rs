@@ -40,7 +40,9 @@ pub enum UiCommand {
         values: Vec<(SettingKey, SettingValue)>,
     },
     ApplyProfile(String),
+    /// Save the current settings and mixer layout under a new or existing name.
     SaveProfile(String),
+    DeleteProfile(String),
     ResetAudio,
     Refresh,
     /// Persist edited app settings (daemon writes config.toml).
@@ -82,6 +84,8 @@ pub struct HakoAppUi {
     pub selected: Option<DeviceId>,
     pub daemon_error: Option<String>,
     pub profile_draft: String,
+    /// Profile whose deletion waits for a yes.
+    pub profile_delete: Option<String>,
     /// Floating notifications; add with `notify`.
     pub toasts: Vec<widgets::Toast>,
     /// Latest app settings from the daemon (also the edit draft).
@@ -110,6 +114,7 @@ impl Default for HakoAppUi {
             selected: None,
             daemon_error: Some("Connecting to hakod…".into()),
             profile_draft: String::new(),
+            profile_delete: None,
             toasts: Vec::new(),
             settings: None,
             show_settings: false,
@@ -203,15 +208,6 @@ impl HakoAppUi {
         }
     }
 
-    /// Meter for the `i`th of `meter_targets` (silent until frames arrive).
-    fn meter_row(&self, ui: &mut egui::Ui, label: &str, i: usize) {
-        let levels = self.meter_levels.get(i).copied().unwrap_or_default();
-        widgets::row(ui, label, None, |ui| {
-            let w = theme::SLIDER_W + theme::VALUE_W + ui.spacing().item_spacing.x;
-            widgets::stereo_meter(ui, ("meter", label), levels, w);
-        });
-    }
-
     // ── Top bar ──────────────────────────────────────────────────
 
     fn top_bar(&mut self, ctx: &egui::Context, out: &mut Vec<UiCommand>) {
@@ -246,13 +242,15 @@ impl HakoAppUi {
             });
     }
 
-    /// Profile picker + "save current settings", drawn like every dropdown.
-    /// Stays in place (disabled) while the daemon is offline.
+    /// Profile picker: apply or delete one, update the current one, or save
+    /// under a new name; drawn like every dropdown. Stays in place (disabled)
+    /// while the daemon is offline.
     fn profile_menu(&mut self, ui: &mut egui::Ui, out: &mut Vec<UiCommand>) {
         let st = self.state.clone().filter(|_| self.daemon_error.is_none());
         let current = st.as_ref().and_then(|s| s.last_profile.clone());
         let profiles = st.as_ref().map(|s| s.profiles.clone()).unwrap_or_default();
         let draft = &mut self.profile_draft;
+        let delete = &mut self.profile_delete;
         let popup_id = egui::Id::new("profile_popup");
         let open = ui.memory(|m| m.is_popup_open(popup_id));
         let resp = ui
@@ -286,23 +284,56 @@ impl HakoAppUi {
                 }
                 for p in &profiles {
                     let active = current.as_deref() == Some(p.as_str());
-                    if ui.selectable_label(active, p).clicked() {
-                        out.push(UiCommand::ApplyProfile(p.clone()));
-                        ui.memory_mut(|m| m.close_popup());
-                    }
+                    let x_w = 24.0;
+                    let h = ui.spacing().interact_size.y;
+                    let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(inner, h));
+                    let hot = ui.rect_contains_pointer(row);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let apply = ui
+                            .allocate_ui_with_layout(
+                                egui::vec2(inner - x_w - 2.0, h),
+                                egui::Layout::top_down_justified(egui::Align::LEFT),
+                                |ui| ui.selectable_label(active, p),
+                            )
+                            .inner;
+                        if apply.clicked() {
+                            out.push(UiCommand::ApplyProfile(p.clone()));
+                            ui.memory_mut(|m| m.close_popup());
+                        }
+                        // Shown under the pointer only; the question follows.
+                        if !hot {
+                            ui.set_opacity(0.0);
+                        }
+                        let tip = format!("Delete {p}");
+                        if widgets::icon_button(ui, x_w, &tip, true, widgets::icon_close).clicked()
+                        {
+                            *delete = Some(p.clone());
+                            ui.memory_mut(|m| m.close_popup());
+                        }
+                    });
                 }
                 ui.separator();
                 menu_heading(ui, "Save current settings");
+                if let Some(c) = current.as_ref().filter(|c| profiles.contains(c)) {
+                    if ui
+                        .selectable_label(false, format!("Update “{c}”"))
+                        .clicked()
+                    {
+                        out.push(UiCommand::SaveProfile(c.clone()));
+                        ui.memory_mut(|m| m.close_popup());
+                    }
+                }
                 ui.horizontal(|ui| {
-                    let save_w = 64.0;
+                    let save_w = 80.0;
                     let field_w = inner - save_w - ui.spacing().item_spacing.x;
-                    let edit = widgets::text_field(ui, draft, "Profile name", field_w);
+                    let edit = widgets::text_field(ui, draft, "New profile", field_w);
                     let valid = valid_profile_name(draft);
                     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let save = ui
                         .add_enabled(
                             valid,
-                            egui::Button::new("Save")
+                            egui::Button::new("Save as…")
                                 .min_size(egui::vec2(save_w, theme::CONTROL_H)),
                         )
                         .clicked();
@@ -312,8 +343,36 @@ impl HakoAppUi {
                         ui.memory_mut(|m| m.close_popup());
                     }
                 });
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(4, 0))
+                    .show(ui, |ui| {
+                        // The menu's own layout would justify the wrapped text.
+                        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                            widgets::hint(
+                                ui,
+                                "Profiles save device settings and the mixer layout.",
+                            );
+                        });
+                    });
             },
         );
+        // A profile that is gone (or the daemon) takes its question with it.
+        delete.take_if(|d| !profiles.contains(d));
+        if let Some(name) = delete.clone() {
+            let answer = widgets::confirm(
+                ui.ctx(),
+                egui::Id::new("profile_delete"),
+                &format!("Delete profile “{name}”?"),
+                "Its saved device settings and mixer layout are removed. Your devices and the mixer stay as they are now.",
+                "Delete",
+            );
+            if answer == Some(true) {
+                out.push(UiCommand::DeleteProfile(name));
+            }
+            if answer.is_some() {
+                *delete = None;
+            }
+        }
     }
 
     // ── Device rail ──────────────────────────────────────────────
@@ -520,7 +579,6 @@ enum Tab {
     Performance,
     Lighting,
     Audio,
-    LineIn,
     /// Host-side remaps; works for any mouse / keyboard.
     Bindings,
     /// Power, onboard memory and device details; every device has it.
@@ -528,14 +586,16 @@ enum Tab {
 }
 
 impl Tab {
-    fn of(g: SettingGroup) -> Tab {
-        match g {
+    /// The page a group's controls show on; `None` for a pre-mixer daemon's
+    /// line-in controls (line-in is a mixer input now).
+    fn of(g: SettingGroup) -> Option<Tab> {
+        Some(match g {
             SettingGroup::Performance => Tab::Performance,
             SettingGroup::Lighting => Tab::Lighting,
             SettingGroup::Audio | SettingGroup::Microphone => Tab::Audio,
-            SettingGroup::LineIn => Tab::LineIn,
+            SettingGroup::LineIn => return None,
             SettingGroup::Power | SettingGroup::Memory => Tab::Device,
-        }
+        })
     }
 
     fn label(self, kind: DeviceKind) -> &'static str {
@@ -543,7 +603,6 @@ impl Tab {
             (Tab::Performance, _) => "Performance",
             (Tab::Lighting, _) => "Lighting",
             (Tab::Audio, _) => "Audio",
-            (Tab::LineIn, _) => "Line-in",
             (Tab::Bindings, DeviceKind::Mouse) => "Buttons",
             (Tab::Bindings, _) => "Key bindings",
             (Tab::Device, _) => "Device",
@@ -556,9 +615,9 @@ impl Tab {
 fn tabs_for(d: &DeviceSnapshot) -> Vec<Tab> {
     use Tab::*;
     let order: &[Tab] = match d.kind {
-        DeviceKind::Mouse => &[Performance, Bindings, Lighting, Audio, LineIn, Device],
-        DeviceKind::Keyboard => &[Lighting, Bindings, Performance, Audio, LineIn, Device],
-        DeviceKind::Headset | DeviceKind::Other => &[Audio, LineIn, Lighting, Performance, Device],
+        DeviceKind::Mouse => &[Performance, Bindings, Lighting, Audio, Device],
+        DeviceKind::Keyboard => &[Lighting, Bindings, Performance, Audio, Device],
+        DeviceKind::Headset | DeviceKind::Other => &[Audio, Lighting, Performance, Device],
     };
     order
         .iter()
@@ -566,7 +625,7 @@ fn tabs_for(d: &DeviceSnapshot) -> Vec<Tab> {
         .filter(|&t| match t {
             Bindings => matches!(d.kind, DeviceKind::Mouse | DeviceKind::Keyboard),
             Device => true,
-            t => controls::visible(d).any(|m| Tab::of(m.key.group()) == t),
+            t => controls::visible(d).any(|m| Tab::of(m.key.group()) == Some(t)),
         })
         .collect()
 }
@@ -631,108 +690,16 @@ impl HakoAppUi {
             }
             Tab::Bindings => bindings::keyboard_page(ui, d, remaps, out),
             Tab::Lighting => lighting_tab(ui, d, &group(d, SettingGroup::Lighting), out),
-            Tab::LineIn => self.line_in_tab(ui, d, out),
             Tab::Performance => performance_tab(ui, d, out),
-            Tab::Audio => audio_tab(ui, d, out),
+            Tab::Audio => {
+                let mixer_on = self.mixer.state().is_some_and(|m| m.file.enabled);
+                if audio_tab(ui, d, mixer_on, out) {
+                    self.show_mixer = true;
+                    out.push(UiCommand::GetMixer);
+                }
+            }
             Tab::Device => device_tab(ui, d, out),
         }
-    }
-
-    fn line_in_tab(&mut self, ui: &mut egui::Ui, d: &DeviceSnapshot, out: &mut Vec<UiCommand>) {
-        let on = d
-            .settings
-            .get(SettingKey::AuxEnabled.as_str())
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let processing = self
-            .state
-            .as_ref()
-            .is_some_and(|s| s.audio.aux_processing_active);
-        if on {
-            // "After processing" only means something while a chain runs;
-            // without one the output is the headset's whole mix.
-            self.meter_targets.push(MeterTargetSpec::AuxInput);
-            if processing {
-                self.meter_targets.push(MeterTargetSpec::AuxOutput);
-            }
-        }
-        widgets::section(
-            ui,
-            "Line-in monitor",
-            |ui| {
-                if on {
-                    widgets::pill(
-                        ui,
-                        if processing { "Processing" } else { "Direct" },
-                        theme::pal().ok,
-                    );
-                }
-            },
-            |ui| {
-                let m: Vec<&SettingMeta> = [SettingKey::AuxEnabled, SettingKey::AuxCapturePercent]
-                    .iter()
-                    .filter_map(|k| controls::meta(d, *k))
-                    .collect();
-                controls::rows(ui, d, &m, out);
-                if on {
-                    widgets::divider(ui);
-                    self.meter_row(ui, "Input", 0);
-                }
-            },
-        );
-
-        // The chain slides open below the toggle once monitoring is on.
-        let reveal = egui::collapsing_header::CollapsingState::load_with_default_open(
-            ui.ctx(),
-            egui::Id::new(("aux_chain_reveal", d.id.key())),
-            on,
-        );
-        let mut reveal = reveal;
-        reveal.set_open(on);
-        reveal.show_body_unindented(ui, |ui| {
-            let have = self.settings.is_some();
-            let mut draft = self.settings.clone().unwrap_or_default();
-            let n = draft
-                .aux_effects
-                .effects
-                .iter()
-                .filter(|e| e.enabled)
-                .count();
-            widgets::section(
-                ui,
-                "Processing chain",
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{n} active"))
-                            .small()
-                            .color(pal().text_faint),
-                    );
-                },
-                |ui| {
-                    if !have {
-                        widgets::hint(ui, "Loading settings from the daemon…");
-                        return;
-                    }
-                    let commit = aux::chain_editor(ui, &mut draft.aux_effects);
-                    if let Some(err) = self.state.as_ref().and_then(|s| s.audio.last_error.clone())
-                    {
-                        ui.add_space(theme::SPACE_SM);
-                        ui.colored_label(theme::pal().warn, err);
-                    }
-                    if processing {
-                        ui.add_space(theme::SPACE_SM);
-                        widgets::divider(ui);
-                        self.meter_row(ui, "After processing", 1);
-                    }
-                    if self.settings.as_ref() != Some(&draft) {
-                        self.settings = Some(draft.clone());
-                    }
-                    if commit {
-                        out.push(UiCommand::SetConfig(draft.clone()));
-                    }
-                },
-            );
-        });
     }
 
     // ── Settings page ────────────────────────────────────────────
@@ -754,31 +721,18 @@ impl HakoAppUi {
         );
         widgets::section(
             ui,
-            "Audio routing",
+            "Audio",
             |_| {},
             |ui| {
                 ui.add_enabled_ui(have, |ui| {
                     widgets::row(
                         ui,
-                        "ChatMix takes the default output",
-                        Some("Applies next time ChatMix starts"),
+                        "Make hako Game the default output",
+                        Some("Apps without their own output setting play into Game"),
                         |ui| {
                             widgets::switch(ui, &mut draft.chatmix_set_default_sink);
                         },
                     );
-                    widgets::divider(ui);
-                    widgets::row(
-                        ui,
-                        "Line-in takes the default output",
-                        Some("Applies next time line-in turns on"),
-                        |ui| {
-                            widgets::switch(ui, &mut draft.aux_set_default_sink);
-                        },
-                    );
-                    widgets::divider(ui);
-                    widgets::row(ui, "Resume line-in on connect", None, |ui| {
-                        widgets::switch(ui, &mut draft.aux_auto_enable);
-                    });
                     widgets::divider(ui);
                     widgets::row(
                         ui,
@@ -885,7 +839,7 @@ impl HakoAppUi {
                 widgets::row(
                     ui,
                     "Reset audio graph",
-                    Some("Removes hako sinks and line-in links, restores the default output"),
+                    Some("Removes hako's sinks and mixer, restores the default output"),
                     |ui| {
                         if widgets::button(ui, "Reset").clicked() {
                             out.push(UiCommand::ResetAudio);
@@ -997,20 +951,31 @@ fn performance_tab(ui: &mut egui::Ui, d: &DeviceSnapshot, out: &mut Vec<UiComman
     }
 }
 
-/// ChatMix, then output, then the microphone.
-fn audio_tab(ui: &mut egui::Ui, d: &DeviceSnapshot, out: &mut Vec<UiCommand>) {
+/// ChatMix, then output, then the microphone. True when "Open Mixer" was
+/// clicked (shown while the mixer owns ChatMix).
+fn audio_tab(
+    ui: &mut egui::Ui,
+    d: &DeviceSnapshot,
+    mixer_on: bool,
+    out: &mut Vec<UiCommand>,
+) -> bool {
+    let mut open_mixer = false;
     if controls::meta(d, SettingKey::ChatMixGame).is_some() {
         widgets::section(
             ui,
             "ChatMix",
             |_| {},
             |ui| {
-                controls::chatmix(ui, d);
+                controls::chatmix(ui, d, mixer_on);
                 ui.add_space(theme::SPACE_SM);
-                widgets::hint(
-                    ui,
-                    "Follows the dial on the base station. Send games to Hako_Game and voice chat to Hako_Chat.",
-                );
+                ui.horizontal_wrapped(|ui| {
+                    widgets::hint(ui, controls::chatmix_hint(mixer_on));
+                    let text = egui::RichText::new("Open Mixer")
+                        .small()
+                        .color(pal().accent);
+                    let link = egui::Link::new(text);
+                    open_mixer = mixer_on && ui.add(link).clicked();
+                });
             },
         );
     }
@@ -1030,6 +995,7 @@ fn audio_tab(ui: &mut egui::Ui, d: &DeviceSnapshot, out: &mut Vec<UiCommand>) {
             |ui| controls::rows(ui, d, &mic, out),
         );
     }
+    open_mixer
 }
 
 /// Power, onboard memory and what the device is.

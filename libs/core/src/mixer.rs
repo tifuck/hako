@@ -6,7 +6,7 @@
 //! [`MixerOp`]s, which [`MixerFile::apply`] interprets the same way on both
 //! sides.
 
-use crate::ipc::AuxEffectChain;
+use crate::ipc::{AuxEffectChain, AuxEffectKind};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -37,16 +37,20 @@ static MIXER_LOCK: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MixerFile {
     pub version: u32,
-    /// The mixer owns ChatMix / line-in routing while on. Off (the default
-    /// after an upgrade) leaves the headset's ChatMix and line-in as before.
+    /// The mixer owns ChatMix routing while on; line-in plays only through
+    /// it. Off (the default) leaves ChatMix to the headset's own loopbacks.
     #[serde(default)]
     pub enabled: bool,
     /// The layout being played and edited.
     #[serde(default)]
     pub live: Scene,
-    /// Saved layouts, by name.
+    /// Layouts saved by name before profiles carried the layout; the daemon
+    /// turns them into profiles at start. Kept for older files and UIs.
     #[serde(default)]
     pub scenes: Vec<NamedScene>,
+    /// The headset's pre-mixer line-in settings were moved in; never redone.
+    #[serde(default)]
+    pub line_in_moved: bool,
 }
 
 impl Default for MixerFile {
@@ -56,6 +60,7 @@ impl Default for MixerFile {
             enabled: false,
             live: Scene::default(),
             scenes: Vec::new(),
+            line_in_moved: false,
         }
     }
 }
@@ -118,6 +123,14 @@ pub struct Source {
     pub trim_db: f32,
     #[serde(default)]
     pub mute: bool,
+    /// ALSA "Input Source" item selected on the device's card while the
+    /// mixer runs (e.g. `Line`); the card's previous item comes back when
+    /// the source goes or the mixer stops. `None`: the card is left alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alsa_input: Option<String>,
+    /// ALSA "Capture" level of the device's card, in percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,8 +160,13 @@ pub struct Output {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputKind {
-    /// Plays on a device sink (`node.name`).
-    Hardware { sink: String },
+    /// Plays on a device sink (`node.name`); `description` is the device's
+    /// name when it was picked, shown while it is absent.
+    Hardware {
+        sink: String,
+        #[serde(default)]
+        description: String,
+    },
     /// A virtual microphone other apps record from, named `node_name`.
     Virtual { node_name: String },
 }
@@ -196,6 +214,13 @@ pub enum MixerOp {
         input: String,
         source: usize,
         mute: bool,
+    },
+    /// The ALSA capture settings of a source's card (applied live).
+    SetSourceCapture {
+        input: String,
+        source: usize,
+        alsa_input: Option<String>,
+        capture_percent: Option<u8>,
     },
     SetInputChain {
         input: String,
@@ -254,6 +279,7 @@ impl MixerFile {
     pub fn apply(&mut self, op: &MixerOp) -> Result<(), String> {
         let mut next = self.clone();
         next.apply_unchecked(op)?;
+        next.live.normalize();
         next.validate()?;
         *self = next;
         Ok(())
@@ -284,6 +310,16 @@ impl MixerFile {
                 source,
                 mute,
             } => live.source(input, *source)?.mute = *mute,
+            MixerOp::SetSourceCapture {
+                input,
+                source,
+                alsa_input,
+                capture_percent,
+            } => {
+                let s = live.source(input, *source)?;
+                s.alsa_input = alsa_input.clone();
+                s.capture_percent = *capture_percent;
+            }
             MixerOp::SetInputChain { input, chain } => live.input(input)?.chain = chain.clone(),
             MixerOp::SetOutputGain { output, gain_db } => live.output(output)?.gain_db = *gain_db,
             MixerOp::SetOutputMute { output, mute } => live.output(output)?.mute = *mute,
@@ -384,6 +420,36 @@ impl MixerFile {
 }
 
 impl Scene {
+    /// An input with one source has one volume, its fader: the source's trim
+    /// and mute (which only balance merged sources) fold into the strip. The
+    /// trim sat before the effects, so gate and compressor thresholds move
+    /// with it and the strip sounds the same.
+    pub fn normalize(&mut self) {
+        for input in &mut self.inputs {
+            let InputKind::Hardware { sources } = &mut input.kind else {
+                continue;
+            };
+            let [source] = sources.as_mut_slice() else {
+                continue;
+            };
+            input.mute |= std::mem::take(&mut source.mute);
+            let trim = std::mem::take(&mut source.trim_db);
+            if trim == 0.0 || !trim.is_finite() {
+                continue;
+            }
+            input.gain_db = (input.gain_db + trim).clamp(GAIN_MIN_DB, GAIN_MAX_DB);
+            for effect in &mut input.chain.effects {
+                match &mut effect.kind {
+                    AuxEffectKind::NoiseGate { threshold_db, .. }
+                    | AuxEffectKind::Compressor { threshold_db, .. } => {
+                        *threshold_db = (*threshold_db - trim).clamp(-60.0, 0.0);
+                    }
+                    AuxEffectKind::Equalizer { .. } => {}
+                }
+            }
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.inputs.len() > MAX_INPUTS {
             return Err(format!("at most {MAX_INPUTS} inputs"));
@@ -410,7 +476,7 @@ impl Scene {
                 return Err(format!("duplicate output {:?}", o.id));
             }
             match &o.kind {
-                OutputKind::Hardware { sink } => validate_node_name(sink)?,
+                OutputKind::Hardware { sink, .. } => validate_node_name(sink)?,
                 OutputKind::Virtual { node_name } => {
                     validate_node_name(node_name)?;
                     if !created.insert(node_name.as_str()) {
@@ -452,6 +518,12 @@ impl Scene {
                             return Err(format!(
                                 "trim must be in {TRIM_MIN_DB}..={TRIM_MAX_DB} dB"
                             ));
+                        }
+                        if let Some(item) = &s.alsa_input {
+                            validate_alsa_item(item)?;
+                        }
+                        if s.capture_percent.is_some_and(|p| p > 100) {
+                            return Err("capture level must be 0..=100 %".into());
                         }
                     }
                 }
@@ -552,6 +624,20 @@ fn validate_node_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// ALSA mixer item names (`amixer` argument, no shell): printable ASCII,
+/// no `'` (amixer quotes items with it).
+fn validate_alsa_item(item: &str) -> Result<(), String> {
+    if item.trim().is_empty()
+        || item.len() > 64
+        || !item
+            .chars()
+            .all(|c| (c.is_ascii_graphic() || c == ' ') && c != '\'')
+    {
+        return Err(format!("invalid ALSA input source {item:?}"));
+    }
+    Ok(())
+}
+
 fn validate_scene_name(name: &str) -> Result<(), String> {
     validate_label(name).map_err(|_| format!("scene name must be 1..={MAX_LABEL} characters"))
 }
@@ -564,18 +650,42 @@ pub fn mixer_path(paths: &crate::ConfigPaths) -> PathBuf {
 /// The mixer file; absent = default (off, empty). Unparsable or invalid is an
 /// error, never replaced by defaults.
 pub fn load_mixer(paths: &crate::ConfigPaths) -> Result<MixerFile> {
+    read_mixer(paths).map(|(file, _)| file)
+}
+
+/// The file as [`load_mixer`] gives it, and whether normalising changed it.
+fn read_mixer(paths: &crate::ConfigPaths) -> Result<(MixerFile, bool)> {
     let path = mixer_path(paths);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(MixerFile::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((MixerFile::default(), false))
+        }
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    let file: MixerFile =
+    let raw: MixerFile =
         toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let mut file = raw.clone();
+    file.live.normalize();
+    for s in &mut file.scenes {
+        s.scene.normalize();
+    }
     if let Err(e) = file.validate() {
         bail!("{}: {e}", path.display());
     }
-    Ok(file)
+    let changed = file != raw;
+    Ok((file, changed))
+}
+
+/// Write back what [`load_mixer`] normalises in memory (an older file's
+/// single-source trim), so the file does not keep it. `true`: rewritten.
+pub fn normalize_mixer_file(paths: &crate::ConfigPaths) -> Result<bool> {
+    let _guard = MIXER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (file, changed) = read_mixer(paths)?;
+    if changed {
+        crate::config::write_atomic(&mixer_path(paths), &toml::to_string_pretty(&file)?)?;
+    }
+    Ok(changed)
 }
 
 /// Read-modify-write `mixer.toml` atomically; `edit` sees the current file.
@@ -642,6 +752,16 @@ pub struct AudioDevice {
     pub direction: DeviceDirection,
     /// 1 = mono, 2 = stereo, ...
     pub channels: u8,
+    /// Capture devices on an ALSA card: its "Input Source" items (empty
+    /// when it has none), for [`Source::alsa_input`].
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    /// The card has a "Capture" level, for [`Source::capture_percent`].
+    #[serde(default)]
+    pub capture: bool,
+    /// That level as the card has it (0-100), shown while a source sets none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_now: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -669,6 +789,8 @@ mod tests {
                         description: String::new(),
                         trim_db: 0.0,
                         mute: false,
+                        alsa_input: None,
+                        capture_percent: None,
                     })
                     .collect(),
             },
@@ -702,6 +824,7 @@ mod tests {
                         "A1",
                         OutputKind::Hardware {
                             sink: "alsa_output.usb-headset.analog-stereo".into(),
+                            description: "USB headset".into(),
                         },
                     ),
                     out(
@@ -773,11 +896,107 @@ mod tests {
         let mut bad = sample();
         bad.live.outputs[0].kind = OutputKind::Hardware {
             sink: "has space".into(),
+            description: String::new(),
         };
         assert!(bad.validate().is_err(), "node name with a space");
         let mut bad = sample();
         bad.version = MIXER_VERSION + 1;
         assert!(bad.validate().is_err(), "newer file");
+    }
+
+    #[test]
+    fn a_single_source_has_one_volume_the_fader() {
+        let mut m = sample();
+        m.live.inputs[0].chain.effects = vec![
+            crate::ipc::AuxEffect {
+                id: "gate".into(),
+                enabled: true,
+                kind: AuxEffectKind::default_gate(),
+            },
+            crate::ipc::AuxEffect {
+                id: "comp".into(),
+                enabled: true,
+                kind: AuxEffectKind::default_compressor(),
+            },
+        ];
+        m.apply(&MixerOp::SetSourceTrim {
+            input: "voice".into(),
+            source: 0,
+            trim_db: 4.0,
+        })
+        .unwrap();
+        m.apply(&MixerOp::SetSourceMute {
+            input: "voice".into(),
+            source: 0,
+            mute: true,
+        })
+        .unwrap();
+        let voice = &m.live.inputs[0];
+        assert_eq!((voice.gain_db, voice.mute), (4.0, true));
+        let InputKind::Hardware { sources } = &voice.kind else {
+            unreachable!()
+        };
+        assert_eq!((sources[0].trim_db, sources[0].mute), (0.0, false));
+        // The trim was ahead of the effects: thresholds follow it down.
+        let thresholds: Vec<f32> = voice
+            .chain
+            .effects
+            .iter()
+            .map(|e| match e.kind {
+                AuxEffectKind::NoiseGate { threshold_db, .. }
+                | AuxEffectKind::Compressor { threshold_db, .. } => threshold_db,
+                AuxEffectKind::Equalizer { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(thresholds, [-49.0, -24.0]);
+
+        // Merged sources keep their own balance.
+        let mut merged = hw("pair", &["alsa_input.a", "alsa_input.b"], &[]);
+        if let InputKind::Hardware { sources } = &mut merged.kind {
+            sources[1].trim_db = -3.0;
+        }
+        m.apply(&MixerOp::PutInput { input: merged }).unwrap();
+        let InputKind::Hardware { sources } = &m.live.inputs[1].kind else {
+            unreachable!()
+        };
+        assert_eq!(sources[1].trim_db, -3.0);
+        assert_eq!(m.live.inputs[1].gain_db, 0.0);
+    }
+
+    #[test]
+    fn a_normalised_file_is_written_back_once() {
+        let root = std::env::temp_dir().join(format!("hako-mixer-norm-{}", std::process::id()));
+        let paths = crate::ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        paths.ensure().unwrap();
+        assert!(!normalize_mixer_file(&paths).unwrap(), "no file: none made");
+        assert!(!mixer_path(&paths).exists());
+
+        let mut old = sample();
+        if let InputKind::Hardware { sources } = &mut old.live.inputs[0].kind {
+            sources[0].trim_db = 4.0;
+        }
+        let on_disk = || -> MixerFile {
+            toml::from_str(&std::fs::read_to_string(mixer_path(&paths)).unwrap()).unwrap()
+        };
+        std::fs::write(mixer_path(&paths), toml::to_string_pretty(&old).unwrap()).unwrap();
+        // Loading alone never writes.
+        assert_eq!(load_mixer(&paths).unwrap().live.inputs[0].gain_db, 4.0);
+        assert_eq!(on_disk(), old);
+
+        assert!(normalize_mixer_file(&paths).unwrap());
+        assert_eq!(on_disk(), load_mixer(&paths).unwrap());
+        assert_eq!(on_disk().live.inputs[0].gain_db, 4.0);
+        assert!(
+            !normalize_mixer_file(&paths).unwrap(),
+            "nothing left to fold"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -837,11 +1056,56 @@ mod tests {
                     description: "USB mic".into(),
                     direction: DeviceDirection::Source,
                     channels: 1,
+                    inputs: vec!["Rear Mic".into(), "Line".into()],
+                    capture: true,
+                    capture_now: None,
                 }],
             },
         };
         let json = serde_json::to_string(&state).unwrap();
         assert_eq!(serde_json::from_str::<MixerState>(&json).unwrap(), state);
+    }
+
+    #[test]
+    fn source_capture_settings_apply_and_are_checked() {
+        let mut m = sample();
+        let set = |alsa_input: Option<&str>, capture_percent| MixerOp::SetSourceCapture {
+            input: "voice".into(),
+            source: 0,
+            alsa_input: alsa_input.map(str::to_string),
+            capture_percent,
+        };
+        m.apply(&set(Some("Line"), Some(66))).unwrap();
+        let InputKind::Hardware { sources } = &m.live.inputs[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(sources[0].alsa_input.as_deref(), Some("Line"));
+        assert_eq!(sources[0].capture_percent, Some(66));
+        let before = m.clone();
+        for bad in [
+            set(Some("Line"), Some(101)),
+            set(Some(""), None),
+            set(Some("Line\n"), None),
+            set(Some("it's"), None),
+            set(Some("Mic ☺"), None),
+            set(Some(&"x".repeat(65)), None),
+        ] {
+            assert!(m.apply(&bad).is_err(), "{bad:?}");
+        }
+        // No such source, or a virtual input.
+        let mut far = set(None, None);
+        if let MixerOp::SetSourceCapture { source, .. } = &mut far {
+            *source = 3;
+        }
+        assert!(m.apply(&far).is_err());
+        assert_eq!(m, before);
+        // Both cleared: the card is left alone again.
+        m.apply(&set(None, None)).unwrap();
+        let text = toml::to_string_pretty(&m).unwrap();
+        assert!(
+            !text.contains("alsa_input =") && !text.contains("capture_percent"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -853,5 +1117,19 @@ mod tests {
         // An old file without the newer fields still loads.
         let old: MixerFile = toml::from_str("version = 1\n").unwrap();
         assert!(!old.enabled && old.live.inputs.is_empty());
+        // Sources and outputs from before capture settings and descriptions.
+        let old: MixerFile = toml::from_str(
+            "version = 1\n[[live.inputs]]\nid = \"l\"\nlabel = \"L\"\n[live.inputs.kind]\ntype = \"hardware\"\n[[live.inputs.kind.sources]]\nnode = \"alsa_input.x\"\n[[live.outputs]]\nid = \"A1\"\nlabel = \"A\"\n[live.outputs.kind]\ntype = \"hardware\"\nsink = \"alsa_output.x\"\n",
+        )
+        .unwrap();
+        old.validate().unwrap();
+        assert!(
+            matches!(&old.live.inputs[0].kind, InputKind::Hardware { sources }
+            if sources[0].alsa_input.is_none() && sources[0].capture_percent.is_none())
+        );
+        assert!(
+            matches!(&old.live.outputs[0].kind, OutputKind::Hardware { description, .. }
+            if description.is_empty())
+        );
     }
 }

@@ -6,7 +6,7 @@
 
 use crate::theme::{self, pal};
 use crate::widgets::{self, Tone};
-use crate::{aux, menu_heading, HakoAppUi, UiCommand};
+use crate::{aux, HakoAppUi, UiCommand};
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, Ui};
 use hako_core::ipc::{AuxEffectKind, MeterTargetSpec};
 use hako_core::mixer::{
@@ -236,7 +236,7 @@ pub struct MixerUi {
     selected: Option<Strip>,
     live: LiveGains,
     dialog: Option<Dialog>,
-    scene_draft: String,
+    drawer: Drawer,
 }
 
 impl MixerUi {
@@ -329,8 +329,6 @@ const PAD: f32 = 8.0;
 const FADER_H: f32 = 168.0;
 const BTN_H: f32 = 22.0;
 const BTN_GAP: f32 = 4.0;
-/// Scene menu width (wide enough for the save field inside).
-const SCENE_MENU_W: f32 = 232.0;
 
 /// Strip height: name, source, effects, fader, readout, mute row, then one
 /// row of route buttons per two outputs.
@@ -368,7 +366,7 @@ impl HakoAppUi {
                 "Mixer is off",
                 &[
                     "Combine microphones, send line-in to several devices at once, and give Discord or OBS their own virtual microphones.",
-                    "Turning it on takes over ChatMix and line-in from the headset page, with a starting layout that keeps them working as they do now.",
+                    "Line-in plays through the mixer. Turning it on takes over ChatMix from the headset, with a starting layout that keeps Game and Chat working as they do now.",
                 ],
                 Some("Turn on mixer"),
             );
@@ -488,18 +486,49 @@ impl HakoAppUi {
             ui.add_space(theme::SPACE_MD);
             // The drawer reads like the other pages, however wide the console is.
             ui.set_max_width(ui.available_width().min(1040.0));
-            match selected {
+            let drawer = &mut self.mixer.drawer;
+            // A name being edited belongs to the strip it was opened on.
+            drawer
+                .rename
+                .take_if(|r| Some(&r.strip) != selected.as_ref());
+            match &selected {
                 Some(Strip::Input(id)) => {
-                    if let Some(i) = scene.inputs.iter().find(|i| i.id == id) {
-                        input_drawer(ui, i, &st, &mut edits);
+                    if let Some(i) = scene.inputs.iter().find(|i| &i.id == id) {
+                        input_drawer(ui, drawer, i, &st, &mut edits);
                     }
                 }
                 Some(Strip::Output(id)) => {
-                    if let Some(o) = scene.outputs.iter().find(|o| o.id == id) {
-                        output_drawer(ui, o, &st, &mut edits);
+                    if let Some(o) = scene.outputs.iter().find(|o| &o.id == id) {
+                        output_drawer(ui, drawer, o, &st, &mut edits);
                     }
                 }
                 None => {}
+            }
+        }
+
+        if let Some(strip) = self.mixer.drawer.removing.clone() {
+            let (label, op, body) = match &strip {
+                Strip::Input(id) => (
+                    scene.inputs.iter().find(|i| &i.id == id).map(|i| &i.label),
+                    MixerOp::RemoveInput { input: id.clone() },
+                    "Its routing and processing chain go with it.",
+                ),
+                Strip::Output(id) => (
+                    scene.outputs.iter().find(|o| &o.id == id).map(|o| &o.label),
+                    MixerOp::RemoveOutput { output: id.clone() },
+                    "Its processing chain goes with it, and inputs stop sending to it.",
+                ),
+            };
+            // `None`: the strip is gone already, and its question with it.
+            let answer = label.map_or(Some(false), |label| {
+                let id = egui::Id::new("mixer_remove");
+                widgets::confirm(ui.ctx(), id, &format!("Remove {label}?"), body, "Remove")
+            });
+            if answer == Some(true) {
+                edits.push(Edit::Send(op));
+            }
+            if answer.is_some() {
+                self.mixer.drawer.removing = None;
             }
         }
 
@@ -527,6 +556,21 @@ impl HakoAppUi {
                 widgets::pill(ui, "Not running", pal().warn)
                     .on_hover_text("hakod hasn't built the audio graph for this layout yet.");
             }
+            // Every solo, also of strips scrolled out of view.
+            let soloed: Vec<&Input> = scene.inputs.iter().filter(|i| i.solo).collect();
+            if !soloed.is_empty() {
+                ui.add_space(theme::SPACE_XS);
+                let labels: Vec<&str> = soloed.iter().map(|i| i.label.as_str()).collect();
+                if solo_pill(ui)
+                    .on_hover_text(format!(
+                        "Only {} can be heard. Click to clear every solo.",
+                        labels.join(", ")
+                    ))
+                    .clicked()
+                {
+                    edits.extend(clear_solos(&scene.inputs).into_iter().map(Edit::Send));
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let off = ui
                     .add(
@@ -538,7 +582,7 @@ impl HakoAppUi {
                         .frame(false),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Hands ChatMix and line-in back to the headset page");
+                    .on_hover_text("Hands ChatMix back to the headset; line-in stops");
                 if off.clicked() {
                     edits.push(Edit::Send(MixerOp::SetEnabled { on: false }));
                 }
@@ -568,82 +612,8 @@ impl HakoAppUi {
                         picked: Vec::new(),
                     });
                 }
-                self.scene_menu(ui, st, edits);
             });
         });
-    }
-
-    /// Scenes: apply or delete a saved layout, or save the current one.
-    fn scene_menu(&mut self, ui: &mut Ui, st: &MixerState, edits: &mut Vec<Edit>) {
-        let popup_id = egui::Id::new("mixer_scene_popup");
-        let open = ui.memory(|m| m.is_popup_open(popup_id));
-        let resp = widgets::dropdown_button(ui, "Scenes", 120.0, open);
-        if resp.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup_id));
-        }
-        let draft = &mut self.mixer.scene_draft;
-        egui::popup::popup_below_widget(
-            ui,
-            popup_id,
-            &resp,
-            egui::PopupCloseBehavior::CloseOnClickOutside,
-            |ui| {
-                let inner = SCENE_MENU_W - ui.spacing().menu_margin.sum().x;
-                ui.set_width(inner);
-                menu_heading(ui, "Scenes");
-                if st.file.scenes.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(4.0);
-                        widgets::hint(ui, "No saved scenes yet");
-                    });
-                }
-                for s in &st.file.scenes {
-                    ui.horizontal(|ui| {
-                        let apply = ui
-                            .add_sized(
-                                vec2(inner - 32.0, 26.0),
-                                egui::Button::new(&s.name).frame(false),
-                            )
-                            .on_hover_text("Make this the live layout");
-                        if apply.clicked() {
-                            edits.push(Edit::Send(MixerOp::ApplyScene {
-                                name: s.name.clone(),
-                            }));
-                            ui.memory_mut(|m| m.close_popup());
-                        }
-                        if widgets::icon_button(ui, 24.0, "Delete scene", true, widgets::icon_close)
-                            .clicked()
-                        {
-                            edits.push(Edit::Send(MixerOp::DeleteScene {
-                                name: s.name.clone(),
-                            }));
-                        }
-                    });
-                }
-                ui.separator();
-                menu_heading(ui, "Save current layout");
-                ui.horizontal(|ui| {
-                    let save_w = 64.0;
-                    let field_w = inner - save_w - ui.spacing().item_spacing.x;
-                    let edit = widgets::text_field(ui, draft, "Scene name", field_w);
-                    let valid = valid_label(draft);
-                    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let save = ui
-                        .add_enabled(
-                            valid,
-                            egui::Button::new("Save").min_size(vec2(save_w, theme::CONTROL_H)),
-                        )
-                        .clicked();
-                    if valid && (save || enter) {
-                        edits.push(Edit::Send(MixerOp::SaveScene {
-                            name: draft.trim().to_string(),
-                        }));
-                        draft.clear();
-                        ui.memory_mut(|m| m.close_popup());
-                    }
-                });
-            },
-        );
     }
 
     /// Apply this frame's edits to the local copy and send what is final.
@@ -770,6 +740,8 @@ struct StripLook<'a> {
     chain: &'a EffectChain,
     gain_db: f32,
     mute: bool,
+    /// Silent by another input's solo (inputs only): why.
+    solo_mute: Option<String>,
     virt: bool,
     problem: Option<String>,
     levels: [f32; 2],
@@ -801,13 +773,39 @@ fn device<'a>(st: &'a MixerState, node: &str) -> Option<&'a AudioDevice> {
     st.status.devices.iter().find(|d| d.node == node)
 }
 
+/// Ops that clear every solo (sent as one patch).
+pub(crate) fn clear_solos(inputs: &[Input]) -> Vec<MixerOp> {
+    inputs
+        .iter()
+        .filter(|i| i.solo)
+        .map(|i| MixerOp::SetInputSolo {
+            input: i.id.clone(),
+            solo: false,
+        })
+        .collect()
+}
+
+/// Why `i` is silent although not muted itself: another input's solo
+/// ("Muted by solo on <labels>"). `None` when nothing is soloed or `i` is.
+pub(crate) fn solo_mute_reason(i: &Input, inputs: &[Input]) -> Option<String> {
+    if i.solo {
+        return None;
+    }
+    let by: Vec<&str> = inputs
+        .iter()
+        .filter(|o| o.solo)
+        .map(|o| o.label.as_str())
+        .collect();
+    (!by.is_empty()).then(|| format!("Muted by solo on {}", by.join(", ")))
+}
+
 fn input_look<'a>(i: &'a Input, st: &MixerState, levels: [f32; 2]) -> StripLook<'a> {
     let (summary, virt) = match &i.kind {
         InputKind::Hardware { sources } => (
             match sources.as_slice() {
-                [] => "No source".to_string(),
+                [] => "No device".to_string(),
                 [s] => source_name(s).to_string(),
-                more => format!("{} sources merged", more.len()),
+                more => format!("{} devices merged", more.len()),
             },
             false,
         ),
@@ -821,6 +819,7 @@ fn input_look<'a>(i: &'a Input, st: &MixerState, levels: [f32; 2]) -> StripLook<
         chain: &i.chain,
         gain_db: i.gain_db,
         mute: i.mute,
+        solo_mute: solo_mute_reason(i, &st.file.live.inputs),
         virt,
         problem: problems(st, &i.id),
         levels,
@@ -829,8 +828,11 @@ fn input_look<'a>(i: &'a Input, st: &MixerState, levels: [f32; 2]) -> StripLook<
 
 fn output_look<'a>(o: &'a Output, st: &MixerState, levels: [f32; 2]) -> StripLook<'a> {
     let (summary, virt) = match &o.kind {
-        OutputKind::Hardware { sink } => (
-            device(st, sink).map_or_else(|| sink.clone(), |d| d.description.clone()),
+        OutputKind::Hardware { sink, description } => (
+            device(st, sink).map_or_else(
+                || sink_name(sink, description).to_string(),
+                |d| d.description.clone(),
+            ),
             false,
         ),
         OutputKind::Virtual { .. } => ("Virtual microphone".to_string(), true),
@@ -843,9 +845,19 @@ fn output_look<'a>(o: &'a Output, st: &MixerState, levels: [f32; 2]) -> StripLoo
         chain: &o.chain,
         gain_db: o.gain_db,
         mute: o.mute,
+        solo_mute: None,
         virt,
         problem: problems(st, &o.id),
         levels,
+    }
+}
+
+/// An output's device by the name it had when picked (it may be unplugged).
+fn sink_name<'a>(sink: &'a str, description: &'a str) -> &'a str {
+    if description.is_empty() {
+        sink
+    } else {
+        description
     }
 }
 
@@ -875,6 +887,15 @@ enum Lit {
     Tint(Color32),
     /// Solid fill with this text colour (routes).
     Solid(Color32, Color32),
+    /// Outline and text only: on because of something else (a solo's mute).
+    Outline(Color32),
+}
+
+/// "Solo on · Clear": a pill that clears every solo.
+fn solo_pill(ui: &mut Ui) -> egui::Response {
+    let pill = widgets::pill(ui, "Solo on · Clear", pal().warn);
+    ui.interact(pill.rect, ui.id().with("solo_clear"), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn chip_button(
@@ -897,6 +918,7 @@ fn chip_button(
         ),
         (true, Lit::Tint(c)) => (c.gamma_multiply(0.18), c.gamma_multiply(0.5), c),
         (true, Lit::Solid(c, ink)) => (c, c, ink),
+        (true, Lit::Outline(c)) => (pal().surface_hi, c, c),
     };
     let p = ui.painter();
     p.rect(
@@ -1050,8 +1072,21 @@ fn strip_view(
     widgets::vertical_meter(ui, id.with("meter"), meter, s.levels);
     let fader = Rect::from_min_size(pos2(left + 18.0, y), vec2(26.0, FADER_H));
     let mut db = s.gain_db;
-    let fill = if s.mute { pal().text_faint } else { tint };
+    let implied = !s.mute && s.solo_mute.is_some();
+    let fill = if s.mute || implied {
+        pal().text_faint
+    } else {
+        tint
+    };
     let f = widgets::vertical_fader(ui, fader, id.with("fader"), &mut db, fill);
+    if implied {
+        // Silenced by a solo elsewhere: the strip's level reads as off.
+        ui.painter().rect_filled(
+            meter.union(fader).expand(2.0),
+            4.0,
+            pal().surface.gamma_multiply(0.6),
+        );
+    }
     if f.changed() || f.drag_stopped() {
         edits.push(Edit::Gain(s.strip.clone(), db, !f.dragged()));
     }
@@ -1068,16 +1103,16 @@ fn strip_view(
     let half = (inner.width() - BTN_GAP) / 2.0;
     let first = Rect::from_min_size(pos2(inner.left(), y), vec2(half, BTN_H));
     let second = first.translate(vec2(half + BTN_GAP, 0.0));
-    if chip_button(
-        ui,
-        first,
-        id.with("mute"),
-        "M",
-        s.mute,
-        Lit::Tint(pal().danger),
-    )
-    .on_hover_text(if s.mute { "Unmute" } else { "Mute" })
-    .clicked()
+    let (lit, tip) = match &s.solo_mute {
+        Some(why) if implied => (Lit::Outline(pal().danger), why.clone()),
+        _ => (
+            Lit::Tint(pal().danger),
+            if s.mute { "Unmute" } else { "Mute" }.to_string(),
+        ),
+    };
+    if chip_button(ui, first, id.with("mute"), "M", s.mute || implied, lit)
+        .on_hover_text(tip)
+        .clicked()
     {
         edits.push(Edit::Send(s.strip.mute_op(!s.mute)));
     }
@@ -1181,20 +1216,181 @@ fn strip_view(
 
 // ── Drawer ───────────────────────────────────────────────────────
 
-/// Name field that commits on Enter or when it loses focus.
-fn label_field(ui: &mut Ui, key: &Strip, label: &str, width: f32) -> Option<String> {
-    let id = egui::Id::new(("mixer_label", key));
-    let mut draft = ui
-        .data(|m| m.get_temp::<String>(id))
-        .unwrap_or_else(|| label.to_string());
-    let resp = widgets::text_field(ui, &mut draft, "Name", width);
-    if resp.has_focus() {
-        ui.data_mut(|m| m.insert_temp(id, draft));
-        return None;
+/// The drawer's transient state: the name being edited, and the strip whose
+/// removal waits for a yes.
+#[derive(Default)]
+struct Drawer {
+    rename: Option<Rename>,
+    removing: Option<Strip>,
+}
+
+struct Rename {
+    strip: Strip,
+    draft: String,
+    /// The field has asked for the keyboard (once).
+    focused: bool,
+}
+
+/// How a rename field ends this frame.
+#[derive(Debug, PartialEq)]
+pub(crate) enum RenameEnd {
+    Open,
+    Commit(String),
+    Cancel,
+}
+
+/// Enter or leaving the field commits a changed, usable name; Escape (or
+/// nothing to change) leaves the strip as it was.
+pub(crate) fn rename_end(label: &str, draft: &str, lost_focus: bool, escape: bool) -> RenameEnd {
+    if !lost_focus {
+        return RenameEnd::Open;
     }
-    ui.data_mut(|m| m.remove_temp::<String>(id));
-    (resp.lost_focus() && valid_label(&draft) && draft.trim() != label)
-        .then(|| draft.trim().to_string())
+    let name = fit_label(draft);
+    if escape || !valid_label(&name) || name == label {
+        RenameEnd::Cancel
+    } else {
+        RenameEnd::Commit(name)
+    }
+}
+
+/// What apps and PipeWire tools call a strip's nodes: `hako <label>`, once
+/// (the rule `hako-audio`'s mixer graph describes them by).
+pub(crate) fn shown_as(label: &str) -> String {
+    if label
+        .get(..4)
+        .is_some_and(|p| p.eq_ignore_ascii_case("hako"))
+    {
+        label.to_string()
+    } else {
+        format!("hako {label}")
+    }
+}
+
+/// What an input's drawer shows for where its sound comes from.
+#[derive(Debug, PartialEq)]
+pub(crate) enum DeviceRows {
+    /// "Shown to apps as".
+    Virtual,
+    /// One "Device" row (also while no device is picked): the fader is the
+    /// only volume, so no trim, mute or remove.
+    Single,
+    /// The "Devices" list: mix balance, mute and remove per device.
+    Merged,
+}
+
+pub(crate) fn device_rows(i: &Input) -> DeviceRows {
+    match &i.kind {
+        InputKind::Virtual { .. } => DeviceRows::Virtual,
+        InputKind::Hardware { sources } if sources.len() > 1 => DeviceRows::Merged,
+        InputKind::Hardware { .. } => DeviceRows::Single,
+    }
+}
+
+/// The "Headset dial" row: for inputs apps play into, and any input already
+/// linked to the dial (so it can be unlinked).
+pub(crate) fn shows_dial(i: &Input) -> bool {
+    i.chatmix.is_some() || matches!(i.kind, InputKind::Virtual { .. })
+}
+
+fn new_source(d: &AudioDevice) -> Source {
+    Source {
+        node: d.node.clone(),
+        description: d.description.clone(),
+        trim_db: 0.0,
+        mute: false,
+        alsa_input: None,
+        capture_percent: None,
+    }
+}
+
+/// `i` with its devices edited, as one whole-strip op (everything else kept).
+fn with_sources(i: &Input, edit: impl FnOnce(&mut Vec<Source>)) -> MixerOp {
+    let mut input = i.clone();
+    if let InputKind::Hardware { sources } = &mut input.kind {
+        edit(sources);
+    }
+    MixerOp::PutInput { input }
+}
+
+/// Record from `d` instead (single-device inputs). The old card's jack and
+/// input gain don't carry over.
+pub(crate) fn set_device(i: &Input, d: &AudioDevice) -> MixerOp {
+    with_sources(i, |s| *s = vec![new_source(d)])
+}
+
+/// Mix `d` into the strip as well.
+pub(crate) fn merge_device(i: &Input, d: &AudioDevice) -> MixerOp {
+    with_sources(i, |s| s.push(new_source(d)))
+}
+
+/// Take device `k` out of the mix. With one left, the model folds its trim
+/// and mute into the strip (`Scene::normalize`).
+pub(crate) fn unmerge_device(i: &Input, k: usize) -> MixerOp {
+    with_sources(i, |s| {
+        if k < s.len() {
+            s.remove(k);
+        }
+    })
+}
+
+/// A drawer card's title line: the strip's name (click it or the pencil to
+/// rename in place), what kind of strip it is, and "Remove…" (asked again
+/// before anything goes). Returns the new name once one is committed.
+fn drawer_header(
+    ui: &mut Ui,
+    drawer: &mut Drawer,
+    key: &Strip,
+    label: &str,
+    kind: &str,
+    virt: bool,
+) -> Option<String> {
+    if let Strip::Output(id) = key {
+        ui.label(egui::RichText::new(id).size(15.0).color(pal().text_muted));
+    }
+    let mut end = RenameEnd::Open;
+    match drawer.rename.as_mut().filter(|r| &r.strip == key) {
+        Some(r) => {
+            let field = widgets::text_field(ui, &mut r.draft, "Name", theme::DROPDOWN_W);
+            if r.focused {
+                let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                end = rename_end(label, &r.draft, field.lost_focus(), escape);
+            } else {
+                field.request_focus();
+                r.focused = true;
+            }
+        }
+        None => {
+            let title = ui
+                .add(egui::Label::new(widgets::section_title(label)).sense(Sense::click()))
+                .on_hover_cursor(egui::CursorIcon::Text)
+                .on_hover_text("Rename");
+            let pencil = widgets::icon_button(ui, 24.0, "Rename", true, widgets::icon_pencil);
+            if title.clicked() || pencil.clicked() {
+                drawer.rename = Some(Rename {
+                    strip: key.clone(),
+                    draft: label.to_string(),
+                    focused: false,
+                });
+            }
+        }
+    }
+    kind_pill(ui, kind, virt);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if widgets::button(ui, "Remove…").clicked() {
+            drawer.removing = Some(key.clone());
+        }
+    });
+    match end {
+        RenameEnd::Open => None,
+        RenameEnd::Cancel => {
+            drawer.rename = None;
+            None
+        }
+        RenameEnd::Commit(name) => {
+            drawer.rename = None;
+            Some(name)
+        }
+    }
 }
 
 /// What the daemon reports wrong with this strip, atop its drawer.
@@ -1207,6 +1403,15 @@ fn problem_line(ui: &mut Ui, st: &MixerState, id: &str) {
 
 fn kind_pill(ui: &mut Ui, text: &str, virt: bool) {
     widgets::pill(ui, text, if virt { theme::VIRTUAL } else { pal().accent });
+}
+
+/// The name apps list a virtual strip under (read-only: it follows the
+/// strip's name).
+fn shown_row(ui: &mut Ui, label: &str, node_name: &str, hint: &str) {
+    widgets::row(ui, "Shown to apps as", Some(hint), |ui| {
+        ui.label(widgets::value_text(shown_as(label)))
+            .on_hover_text(format!("PipeWire node {node_name}"));
+    });
 }
 
 /// The stage editor bound to a strip's chain: drags apply locally, finished
@@ -1243,118 +1448,79 @@ fn chain_section(
     );
 }
 
-fn input_drawer(ui: &mut Ui, i: &Input, st: &MixerState, edits: &mut Vec<Edit>) {
+fn input_drawer(
+    ui: &mut Ui,
+    drawer: &mut Drawer,
+    i: &Input,
+    st: &MixerState,
+    edits: &mut Vec<Edit>,
+) {
     let key = Strip::Input(i.id.clone());
     let put = |f: &dyn Fn(&mut Input)| {
         let mut next = i.clone();
         f(&mut next);
         Edit::Send(MixerOp::PutInput { input: next })
     };
-    let virt = matches!(i.kind, InputKind::Virtual { .. });
-    widgets::section(
+    let virt = device_rows(i) == DeviceRows::Virtual;
+    let kind = if virt {
+        "Virtual input"
+    } else {
+        "Hardware input"
+    };
+    let mut renamed = None;
+    widgets::section_with(
         ui,
-        &i.label,
-        |ui| {
-            kind_pill(
-                ui,
-                if virt {
-                    "Virtual input"
-                } else {
-                    "Hardware input"
-                },
-                virt,
-            )
-        },
+        |ui| renamed = drawer_header(ui, drawer, &key, &i.label, kind, virt),
         |ui| {
             problem_line(ui, st, &i.id);
-            let hint = match &i.kind {
-                InputKind::Virtual { node_name } => {
-                    format!("Apps that play to “{}” land here ({node_name})", i.label)
-                }
-                InputKind::Hardware { .. } => {
-                    "Sources are summed after their own trim, then processed once".into()
-                }
-            };
-            widgets::row(ui, "Name", Some(&hint), |ui| {
-                if let Some(label) = label_field(ui, &key, &i.label, theme::DROPDOWN_W) {
-                    edits.push(put(&|n| n.label = label.clone()));
-                }
-            });
-            if let InputKind::Hardware { sources } = &i.kind {
-                widgets::divider(ui);
-                ui.add_space(theme::SPACE_SM);
-                for (k, s) in sources.iter().enumerate() {
-                    ui.push_id(k, |ui| source_row(ui, i, k, s, st, edits));
-                }
-                if sources.is_empty() {
-                    widgets::hint(ui, "No sources: add a capture device.");
-                }
-                ui.add_space(theme::SPACE_XS);
-                let created = created_nodes(&st.file.live);
-                let free: Vec<&AudioDevice> = st
-                    .status
-                    .devices
-                    .iter()
-                    .filter(|d| {
-                        d.direction == DeviceDirection::Source
-                            && !created.contains(d.node.as_str())
-                            && !sources.iter().any(|s| s.node == d.node)
-                    })
-                    .collect();
-                ui.add_enabled_ui(sources.len() < MAX_SOURCES, |ui| {
-                    ui.menu_button("+  Add source", |ui| {
-                        if free.is_empty() {
-                            widgets::hint(ui, "No other capture devices found");
+            match &i.kind {
+                InputKind::Virtual { node_name } => shown_row(
+                    ui,
+                    &i.label,
+                    node_name,
+                    "Pick this as the output in a game, a call or a music app",
+                ),
+                InputKind::Hardware { sources } => {
+                    if device_rows(i) == DeviceRows::Merged {
+                        ui.add_space(theme::SPACE_SM);
+                        ui.label(egui::RichText::new("Devices").color(pal().text));
+                        for (k, s) in sources.iter().enumerate() {
+                            ui.push_id(k, |ui| merged_row(ui, i, k, s, st, edits));
                         }
-                        for d in &free {
-                            if ui.button(&d.description).clicked() {
-                                edits.push(put(&|n| {
-                                    if let InputKind::Hardware { sources } = &mut n.kind {
-                                        sources.push(Source {
-                                            node: d.node.clone(),
-                                            description: d.description.clone(),
-                                            trim_db: 0.0,
-                                            mute: false,
-                                        });
-                                    }
-                                }));
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                });
-                ui.add_space(theme::SPACE_SM);
-            }
-            widgets::divider(ui);
-            widgets::row(
-                ui,
-                "ChatMix",
-                Some("The headset's dial turns this input up or down"),
-                |ui| {
-                    let current = match i.chatmix {
-                        None => 0,
-                        Some(ChatMixSide::Game) => 1,
-                        Some(ChatMixSide::Chat) => 2,
-                    };
-                    let seg_id = egui::Id::new(("mixer_chatmix", &i.id));
-                    if let Some(k) =
-                        widgets::segmented(ui, seg_id, &["None", "Game", "Chat"], Some(current))
-                    {
-                        let side = [None, Some(ChatMixSide::Game), Some(ChatMixSide::Chat)][k];
-                        edits.push(put(&|n| n.chatmix = side));
+                    } else {
+                        device_row(ui, i, sources.first(), st, edits);
                     }
-                },
-            );
-            widgets::divider(ui);
-            widgets::row(ui, "Remove input", None, |ui| {
-                if widgets::button(ui, "Remove").clicked() {
-                    edits.push(Edit::Send(MixerOp::RemoveInput {
-                        input: i.id.clone(),
-                    }));
+                    if !sources.is_empty() {
+                        merge_link(ui, i, sources, st, edits);
+                    }
                 }
-            });
+            }
+            if shows_dial(i) {
+                widgets::divider(ui);
+                widgets::row(
+                    ui,
+                    "Headset dial",
+                    Some("The headset's ChatMix dial turns this input up or down"),
+                    |ui| {
+                        let current = match i.chatmix {
+                            None => 0,
+                            Some(ChatMixSide::Game) => 1,
+                            Some(ChatMixSide::Chat) => 2,
+                        };
+                        let seg_id = egui::Id::new(("mixer_chatmix", &i.id));
+                        let labels = ["Not linked", "Game side", "Chat side"];
+                        if let Some(k) = widgets::segmented(ui, seg_id, &labels, Some(current)) {
+                            let side = [None, Some(ChatMixSide::Game), Some(ChatMixSide::Chat)][k];
+                            edits.push(put(&|n| n.chatmix = side));
+                        }
+                    },
+                );
+            }
         },
     );
+    if let Some(label) = renamed {
+        edits.push(put(&|n| n.label = label.clone()));
+    }
     chain_section(
         ui,
         &key,
@@ -1367,8 +1533,133 @@ fn input_drawer(ui: &mut Ui, i: &Input, st: &MixerState, edits: &mut Vec<Edit>) 
     );
 }
 
-/// One source of a merged input: name, channels, trim, mute, remove.
-fn source_row(
+/// Width at which a device's jack and input gain fit beside its dropdown.
+const DEVICE_ONE_LINE_W: f32 = 780.0;
+
+fn channels(d: &AudioDevice) -> &'static str {
+    if d.channels == 1 {
+        "mono"
+    } else {
+        "stereo"
+    }
+}
+
+/// A number readout of fixed width, right-aligned (so sliders don't shift).
+fn value_cell(ui: &mut Ui, text: String, width: f32) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+    ui.painter().text(
+        r.right_center(),
+        egui::Align2::RIGHT_CENTER,
+        text,
+        egui::TextStyle::Body.resolve(ui.style()),
+        pal().text,
+    );
+    resp
+}
+
+fn caption(ui: &mut Ui, text: &str) {
+    ui.label(egui::RichText::new(text).size(11.5).color(pal().text_muted));
+}
+
+/// A hardware input's one device: which one, and its card's jack and input
+/// gain when it has them. The strip's fader is its only volume.
+fn device_row(
+    ui: &mut Ui,
+    i: &Input,
+    source: Option<&Source>,
+    st: &MixerState,
+    edits: &mut Vec<Edit>,
+) {
+    let dev = source.and_then(|s| device(st, &s.node));
+    let card = source
+        .zip(dev)
+        .filter(|(_, d)| !d.inputs.is_empty() || d.capture);
+    let one_line = ui.available_width() >= DEVICE_ONE_LINE_W;
+    let rtl = egui::Layout::right_to_left(egui::Align::Center);
+    ui.horizontal(|ui| {
+        ui.set_min_height(theme::ROW_H);
+        ui.label(egui::RichText::new("Device").color(pal().text));
+        ui.with_layout(rtl, |ui| {
+            if let Some((s, d)) = card.filter(|_| one_line) {
+                capture_controls(ui, i, 0, s, d, edits);
+                ui.add_space(theme::SPACE_SM);
+            }
+            let current = match (source, dev) {
+                (None, _) => "Pick a device".to_string(),
+                (Some(_), Some(d)) => d.description.clone(),
+                (Some(s), None) => format!("{} (offline)", source_name(s)),
+            };
+            widgets::dropdown(("mixer_source", &i.id), current, theme::DROPDOWN_W).show_ui(
+                ui,
+                |ui| {
+                    let devices = capture_devices(st);
+                    if devices.is_empty() {
+                        widgets::hint(ui, "No capture devices found");
+                    }
+                    for d in devices {
+                        let picked = source.is_some_and(|s| s.node == d.node);
+                        let text = format!("{} · {}", d.description, channels(d));
+                        if ui.selectable_label(picked, text).clicked() && !picked {
+                            edits.push(Edit::Send(set_device(i, d)));
+                        }
+                    }
+                },
+            );
+        });
+    });
+    let Some((s, d)) = card else {
+        return;
+    };
+    if !one_line {
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), rtl, |ui| {
+            capture_controls(ui, i, 0, s, d, edits);
+        });
+    }
+    if d.capture {
+        widgets::hint(
+            ui,
+            "How loud the device records. Set it once, then use the fader for volume.",
+        );
+    }
+}
+
+/// "+ Merge another device": a second (third, ...) device mixed into the
+/// same strip.
+fn merge_link(ui: &mut Ui, i: &Input, sources: &[Source], st: &MixerState, edits: &mut Vec<Edit>) {
+    let free: Vec<&AudioDevice> = capture_devices(st)
+        .into_iter()
+        .filter(|d| !sources.iter().any(|s| s.node == d.node))
+        .collect();
+    ui.add_enabled_ui(sources.len() < MAX_SOURCES, |ui| {
+        // A line of text, not a control-height button.
+        ui.spacing_mut().interact_size.y = 20.0;
+        let link = egui::Button::new(
+            egui::RichText::new("+ Merge another device")
+                .small()
+                .color(pal().accent),
+        )
+        .frame(false);
+        egui::menu::menu_custom_button(ui, link, |ui| {
+            if free.is_empty() {
+                widgets::hint(ui, "No other capture devices found");
+            }
+            for d in &free {
+                let text = format!("{} · {}", d.description, channels(d));
+                if ui.button(text).clicked() {
+                    edits.push(Edit::Send(merge_device(i, d)));
+                    ui.close_menu();
+                }
+            }
+        })
+        .response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Mix two or more devices into this one strip");
+    });
+}
+
+/// One device of a merged input: name, channels, its share of the mix (the
+/// trim), mute, remove, then its card's jack and input gain.
+fn merged_row(
     ui: &mut Ui,
     i: &Input,
     k: usize,
@@ -1377,75 +1668,12 @@ fn source_row(
     edits: &mut Vec<Edit>,
 ) {
     let dev = device(st, &s.node);
-    let trim_w = 150.0;
-    let value_w = 64.0;
-    ui.horizontal(|ui| {
-        ui.set_min_height(36.0);
-        let (dot, _) = ui.allocate_exact_size(vec2(8.0, 20.0), Sense::hover());
-        ui.painter().circle_filled(
-            dot.center(),
-            3.0,
-            if dev.is_some() {
-                pal().ok
-            } else {
-                pal().danger
-            },
-        );
-        let fixed = trim_w + value_w + 30.0 + 26.0 + 5.0 * ui.spacing().item_spacing.x;
-        let name_w = (ui.available_width() - fixed).max(80.0);
-        let channels = match dev {
-            None => "offline",
-            Some(d) if d.channels == 1 => "mono",
-            Some(_) => "stereo",
-        };
-        let (r, _) = ui.allocate_exact_size(vec2(name_w, 20.0), Sense::hover());
-        let g = elided(ui, source_name(s), 13.5, pal().text, name_w - 60.0);
-        let gw = g.size().x;
-        ui.painter().galley(
-            pos2(r.left(), r.center().y - g.size().y / 2.0),
-            g,
-            pal().text,
-        );
-        ui.painter().text(
-            pos2(r.left() + gw + 6.0, r.center().y),
-            egui::Align2::LEFT_CENTER,
-            format!("· {channels}"),
-            egui::FontId::proportional(11.5),
-            pal().text_faint,
-        );
-        let mut trim = s.trim_db;
-        let resp = widgets::slider(
-            ui,
-            egui::Slider::new(&mut trim, TRIM_MIN_DB..=TRIM_MAX_DB)
-                .show_value(false)
-                .clamping(egui::SliderClamping::Always),
-            trim_w,
-        )
-        .on_hover_text("Trim: this source's level before the sources are summed");
-        widgets::knob(
-            ui,
-            &resp,
-            widgets::fraction(trim, TRIM_MIN_DB, TRIM_MAX_DB, false),
-        );
-        let trim = (trim * 10.0).round() / 10.0;
-        let op = MixerOp::SetSourceTrim {
-            input: i.id.clone(),
-            source: k,
-            trim_db: trim,
-        };
-        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-            edits.push(Edit::Send(op));
-        } else if resp.changed() {
-            edits.push(Edit::Local(op));
+    let rtl = egui::Layout::right_to_left(egui::Align::Center);
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), rtl, |ui| {
+        if widgets::icon_button(ui, 26.0, "Remove this device", true, widgets::icon_close).clicked()
+        {
+            edits.push(Edit::Send(unmerge_device(i, k)));
         }
-        ui.allocate_ui_with_layout(
-            vec2(value_w, 20.0),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                ui.set_min_width(value_w);
-                ui.label(widgets::value_text(fmt_db(trim)));
-            },
-        );
         let (m, _) = ui.allocate_exact_size(vec2(30.0, BTN_H), Sense::hover());
         if chip_button(
             ui,
@@ -1456,9 +1684,9 @@ fn source_row(
             Lit::Tint(pal().danger),
         )
         .on_hover_text(if s.mute {
-            "Unmute source"
+            "Unmute this device"
         } else {
-            "Mute source"
+            "Mute this device"
         })
         .clicked()
         {
@@ -1468,17 +1696,181 @@ fn source_row(
                 mute: !s.mute,
             }));
         }
-        if widgets::icon_button(ui, 26.0, "Remove source", true, widgets::icon_close).clicked() {
-            let mut next = i.clone();
-            if let InputKind::Hardware { sources } = &mut next.kind {
-                sources.remove(k);
-            }
-            edits.push(Edit::Send(MixerOp::PutInput { input: next }));
+        value_cell(ui, fmt_db(s.trim_db), 64.0);
+        let mut trim = s.trim_db;
+        let resp = widgets::slider(
+            ui,
+            egui::Slider::new(&mut trim, TRIM_MIN_DB..=TRIM_MAX_DB)
+                .show_value(false)
+                .clamping(egui::SliderClamping::Always),
+            150.0,
+        )
+        .on_hover_text("This device's level in the mix. Double-click to reset.");
+        let reset = resp.hovered()
+            && ui.input(|inp| {
+                inp.pointer
+                    .button_double_clicked(egui::PointerButton::Primary)
+            });
+        let trim = if reset {
+            0.0
+        } else {
+            (trim * 10.0).round() / 10.0
+        };
+        widgets::knob(
+            ui,
+            &resp,
+            widgets::fraction(trim, TRIM_MIN_DB, TRIM_MAX_DB, false),
+        );
+        let op = MixerOp::SetSourceTrim {
+            input: i.id.clone(),
+            source: k,
+            trim_db: trim,
+        };
+        if reset || resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+            edits.push(Edit::Send(op));
+        } else if resp.changed() {
+            edits.push(Edit::Local(op));
         }
+        caption(ui, "Mix balance");
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            let (dot, _) = ui.allocate_exact_size(vec2(8.0, 20.0), Sense::hover());
+            let ok = if dev.is_some() {
+                pal().ok
+            } else {
+                pal().danger
+            };
+            ui.painter().circle_filled(dot.center(), 3.0, ok);
+            let name_w = ui.available_width().max(80.0);
+            let (r, _) = ui.allocate_exact_size(vec2(name_w, 20.0), Sense::hover());
+            let g = elided(ui, source_name(s), 13.5, pal().text, name_w - 60.0);
+            let gw = g.size().x;
+            ui.painter().galley(
+                pos2(r.left(), r.center().y - g.size().y / 2.0),
+                g,
+                pal().text,
+            );
+            ui.painter().text(
+                pos2(r.left() + gw + 6.0, r.center().y),
+                egui::Align2::LEFT_CENTER,
+                format!("· {}", dev.map_or("offline", channels)),
+                egui::FontId::proportional(11.5),
+                pal().text_faint,
+            );
+        });
     });
+    if let Some(d) = dev.filter(|d| !d.inputs.is_empty() || d.capture) {
+        ui.horizontal(|ui| {
+            ui.set_min_height(32.0);
+            ui.add_space(8.0 + ui.spacing().item_spacing.x);
+            capture_controls(ui, i, k, s, d, edits);
+        });
+    }
 }
 
-fn output_drawer(ui: &mut Ui, o: &Output, st: &MixerState, edits: &mut Vec<Edit>) {
+/// A device's sound card: the jack it records from and its input gain (the
+/// card's capture level), when the card has them. Laid out in the row's
+/// direction.
+fn capture_controls(
+    ui: &mut Ui,
+    i: &Input,
+    k: usize,
+    s: &Source,
+    d: &AudioDevice,
+    edits: &mut Vec<Edit>,
+) {
+    #[derive(Clone, Copy)]
+    enum Part {
+        JackLabel,
+        Jack,
+        Gap,
+        GainLabel,
+        Gain,
+        GainValue,
+    }
+    let op = |alsa_input: Option<String>, capture_percent: Option<u8>| MixerOp::SetSourceCapture {
+        input: i.id.clone(),
+        source: k,
+        alsa_input,
+        capture_percent,
+    };
+    let mut parts = Vec::new();
+    if !d.inputs.is_empty() {
+        parts.extend([Part::JackLabel, Part::Jack]);
+    }
+    if d.capture {
+        if !parts.is_empty() {
+            parts.push(Part::Gap);
+        }
+        parts.extend([Part::GainLabel, Part::Gain, Part::GainValue]);
+    }
+    if ui.layout().main_dir() == egui::Direction::RightToLeft {
+        parts.reverse();
+    }
+    for part in parts {
+        match part {
+            Part::JackLabel => caption(ui, "Jack"),
+            Part::Jack => {
+                let current = s.alsa_input.as_deref().unwrap_or("Leave as is");
+                widgets::dropdown(("mixer_jack", k), current, 140.0)
+                    .show_ui(ui, |ui| {
+                        let choices = std::iter::once(None).chain(d.inputs.iter().map(Some));
+                        for item in choices {
+                            let text = item.map_or("Leave as is", String::as_str);
+                            let picked = s.alsa_input.as_ref() == item;
+                            if ui.selectable_label(picked, text).clicked() && !picked {
+                                edits.push(Edit::Send(op(item.cloned(), s.capture_percent)));
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Which jack of the sound card this device records from");
+            }
+            Part::Gap => {
+                ui.add_space(theme::SPACE_SM);
+            }
+            Part::GainLabel => caption(ui, "Input gain"),
+            Part::Gain => {
+                // Unset: the card's own level, so the slider never shows a
+                // number the card does not have.
+                let mut level = f32::from(s.capture_percent.or(d.capture_now).unwrap_or(0));
+                let resp = widgets::slider(
+                    ui,
+                    egui::Slider::new(&mut level, 0.0..=100.0)
+                        .show_value(false)
+                        .clamping(egui::SliderClamping::Always),
+                    150.0,
+                )
+                .on_hover_text("The sound card's recording level");
+                widgets::knob(ui, &resp, level / 100.0);
+                let percent = Some(level.round() as u8);
+                if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                    edits.push(Edit::Send(op(s.alsa_input.clone(), percent)));
+                } else if resp.changed() {
+                    edits.push(Edit::Local(op(s.alsa_input.clone(), percent)));
+                }
+            }
+            Part::GainValue => {
+                let value = s
+                    .capture_percent
+                    .or(d.capture_now)
+                    .map_or("—".to_string(), |p| format!("{p}%"));
+                value_cell(ui, value, 40.0).on_hover_text(if s.capture_percent.is_some() {
+                    "Set on the card while the mixer runs"
+                } else {
+                    "The card's own level; drag to have hako set it"
+                });
+            }
+        }
+    }
+}
+
+fn output_drawer(
+    ui: &mut Ui,
+    drawer: &mut Drawer,
+    o: &Output,
+    st: &MixerState,
+    edits: &mut Vec<Edit>,
+) {
     let key = Strip::Output(o.id.clone());
     let put = |f: &dyn Fn(&mut Output)| {
         let mut next = o.clone();
@@ -1486,89 +1878,55 @@ fn output_drawer(ui: &mut Ui, o: &Output, st: &MixerState, edits: &mut Vec<Edit>
         Edit::Send(MixerOp::PutOutput { output: next })
     };
     let virt = matches!(o.kind, OutputKind::Virtual { .. });
-    widgets::section(
+    let kind = if virt {
+        "Virtual microphone"
+    } else {
+        "Hardware output"
+    };
+    let mut renamed = None;
+    widgets::section_with(
         ui,
-        &format!("{} · {}", o.id, o.label),
-        |ui| {
-            kind_pill(
-                ui,
-                if virt {
-                    "Virtual microphone"
-                } else {
-                    "Hardware output"
-                },
-                virt,
-            )
-        },
+        |ui| renamed = drawer_header(ui, drawer, &key, &o.label, kind, virt),
         |ui| {
             problem_line(ui, st, &o.id);
-            let hint = match &o.kind {
-                OutputKind::Virtual { node_name } => Some(format!(
-                    "Other apps record from “{}” ({node_name})",
-                    o.label
-                )),
-                OutputKind::Hardware { .. } => None,
-            };
-            widgets::row(ui, "Name", hint.as_deref(), |ui| {
-                if let Some(label) = label_field(ui, &key, &o.label, theme::DROPDOWN_W) {
-                    edits.push(put(&|n| n.label = label.clone()));
-                }
-            });
-            if let OutputKind::Hardware { sink } = &o.kind {
-                widgets::divider(ui);
-                let current = device(st, sink)
-                    .map_or_else(|| format!("{sink} (offline)"), |d| d.description.clone());
-                widgets::row(ui, "Device", None, |ui| {
-                    widgets::dropdown(("mixer_sink", &o.id), current, theme::DROPDOWN_W).show_ui(
-                        ui,
-                        |ui| {
-                            for d in sinks(st) {
-                                if ui
-                                    .selectable_label(&d.node == sink, &d.description)
-                                    .clicked()
-                                    && &d.node != sink
-                                {
-                                    edits.push(put(&|n| {
-                                        n.kind = OutputKind::Hardware {
-                                            sink: d.node.clone(),
-                                        }
-                                    }));
-                                }
-                            }
-                        },
+            match &o.kind {
+                OutputKind::Virtual { node_name } => shown_row(
+                    ui,
+                    &o.label,
+                    node_name,
+                    "Pick this as the microphone in Discord, OBS or a game",
+                ),
+                OutputKind::Hardware { sink, description } => {
+                    let current = device(st, sink).map_or_else(
+                        || format!("{} (offline)", sink_name(sink, description)),
+                        |d| d.description.clone(),
                     );
-                });
+                    widgets::row(ui, "Device", None, |ui| {
+                        widgets::dropdown(("mixer_sink", &o.id), current, theme::DROPDOWN_W)
+                            .show_ui(ui, |ui| {
+                                for d in sinks(st) {
+                                    if ui
+                                        .selectable_label(&d.node == sink, &d.description)
+                                        .clicked()
+                                        && &d.node != sink
+                                    {
+                                        edits.push(put(&|n| {
+                                            n.kind = OutputKind::Hardware {
+                                                sink: d.node.clone(),
+                                                description: d.description.clone(),
+                                            }
+                                        }));
+                                    }
+                                }
+                            });
+                    });
+                }
             }
-            widgets::divider(ui);
-            widgets::row(
-                ui,
-                "Mono",
-                Some("Fold left and right into both channels"),
-                |ui| {
-                    let mut mono = o.mono;
-                    if widgets::switch(ui, &mut mono).changed() {
-                        edits.push(Edit::Send(MixerOp::SetOutputMono {
-                            output: o.id.clone(),
-                            mono,
-                        }));
-                    }
-                },
-            );
-            widgets::divider(ui);
-            widgets::row(
-                ui,
-                "Remove output",
-                Some("Inputs stop sending to it"),
-                |ui| {
-                    if widgets::button(ui, "Remove").clicked() {
-                        edits.push(Edit::Send(MixerOp::RemoveOutput {
-                            output: o.id.clone(),
-                        }));
-                    }
-                },
-            );
         },
     );
+    if let Some(label) = renamed {
+        edits.push(put(&|n| n.label = label.clone()));
+    }
     chain_section(
         ui,
         &key,
@@ -1579,6 +1937,17 @@ fn output_drawer(ui: &mut Ui, o: &Output, st: &MixerState, edits: &mut Vec<Edit>
         },
         edits,
     );
+}
+
+/// Capture devices an input can record from (not hako's own nodes: a
+/// virtual microphone fed back in would loop).
+fn capture_devices(st: &MixerState) -> Vec<&AudioDevice> {
+    let created = created_nodes(&st.file.live);
+    st.status
+        .devices
+        .iter()
+        .filter(|d| d.direction == DeviceDirection::Source && !created.contains(d.node.as_str()))
+        .collect()
 }
 
 /// Playback devices an output can use (not hako's own nodes).
@@ -1640,17 +2009,8 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
                 ui.add_space(theme::SPACE_SM);
                 widgets::text_field(ui, name, "Name", 440.0);
                 ui.add_space(theme::SPACE_SM);
-                let created = created_nodes(scene);
                 if !*virt {
-                    let devices: Vec<&AudioDevice> = st
-                        .status
-                        .devices
-                        .iter()
-                        .filter(|d| {
-                            d.direction == DeviceDirection::Source
-                                && !created.contains(d.node.as_str())
-                        })
-                        .collect();
+                    let devices = capture_devices(st);
                     if devices.is_empty() {
                         widgets::hint(ui, "No capture devices found.");
                     }
@@ -1659,11 +2019,7 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
                         .show(ui, |ui| {
                             for dev in devices {
                                 let mut on = picked.contains(&dev.node);
-                                let text = format!(
-                                    "{} · {}",
-                                    dev.description,
-                                    if dev.channels == 1 { "mono" } else { "stereo" }
-                                );
+                                let text = format!("{} · {}", dev.description, channels(dev));
                                 if ui.checkbox(&mut on, text).changed() {
                                     if on {
                                         picked.push(dev.node.clone());
@@ -1693,12 +2049,7 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
                                 .devices
                                 .iter()
                                 .filter(|d| picked.contains(&d.node))
-                                .map(|d| Source {
-                                    node: d.node.clone(),
-                                    description: d.description.clone(),
-                                    trim_db: 0.0,
-                                    mute: false,
-                                })
+                                .map(new_source)
                                 .collect(),
                         }
                     };
@@ -1765,7 +2116,11 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
                 if let Some(id) = id.filter(|_| valid_label(name) && (*virt || sink.is_some())) {
                     let label = name.trim().to_string();
                     let kind = match sink {
-                        Some(s) if !*virt => OutputKind::Hardware { sink: s.clone() },
+                        Some(s) if !*virt => OutputKind::Hardware {
+                            sink: s.clone(),
+                            description: device(st, s)
+                                .map_or_else(String::new, |d| d.description.clone()),
+                        },
                         _ => OutputKind::Virtual {
                             node_name: new_node_name(&label, scene),
                         },
@@ -1892,6 +2247,7 @@ mod tests {
             label: "Headset".into(),
             kind: OutputKind::Hardware {
                 sink: "alsa_output.x".into(),
+                description: String::new(),
             },
             chain: EffectChain::default(),
             gain_db: 0.0,
@@ -1950,6 +2306,142 @@ mod tests {
             routes: Vec::new(),
             chatmix: None,
         }
+    }
+
+    fn hw_input(id: &str, nodes: &[&str]) -> Input {
+        Input {
+            kind: InputKind::Hardware {
+                sources: nodes.iter().map(|n| new_source(&mic(n))).collect(),
+            },
+            ..virt_input(id, "unused")
+        }
+    }
+
+    fn mic(node: &str) -> AudioDevice {
+        AudioDevice {
+            node: node.into(),
+            description: format!("{node} mic"),
+            direction: DeviceDirection::Source,
+            channels: 1,
+            inputs: Vec::new(),
+            capture: false,
+            capture_now: None,
+        }
+    }
+
+    fn sources(i: &Input) -> &[Source] {
+        match &i.kind {
+            InputKind::Hardware { sources } => sources,
+            InputKind::Virtual { .. } => &[],
+        }
+    }
+
+    fn put(op: MixerOp) -> Input {
+        match op {
+            MixerOp::PutInput { input } => input,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// One device: a "Device" row and nothing to balance. Two or more: the
+    /// "Devices" list. The dial row is for virtual inputs and linked ones.
+    #[test]
+    fn the_drawer_shows_one_device_or_a_list_and_the_dial_where_it_applies() {
+        let game = virt_input("game", "Hako_Game");
+        let empty = hw_input("empty", &[]);
+        let one = hw_input("one", &["a"]);
+        let two = hw_input("two", &["a", "b"]);
+        assert_eq!(device_rows(&game), DeviceRows::Virtual);
+        assert_eq!(device_rows(&empty), DeviceRows::Single);
+        assert_eq!(device_rows(&one), DeviceRows::Single);
+        assert_eq!(device_rows(&two), DeviceRows::Merged);
+        assert!(shows_dial(&game));
+        assert!(!shows_dial(&one) && !shows_dial(&two));
+        let linked = Input {
+            chatmix: Some(ChatMixSide::Chat),
+            ..one
+        };
+        assert!(shows_dial(&linked), "a linked input can be unlinked");
+    }
+
+    #[test]
+    fn picking_another_device_replaces_it_and_keeps_the_strip() {
+        let mut line = hw_input("line", &["a"]);
+        line.label = "Line-in".into();
+        line.gain_db = -6.0;
+        line.routes = vec!["A1".into()];
+        if let InputKind::Hardware { sources } = &mut line.kind {
+            sources[0].alsa_input = Some("Line".into());
+            sources[0].capture_percent = Some(66);
+        }
+        let next = put(set_device(&line, &mic("b")));
+        // The other card's jack and gain are not this one's.
+        assert_eq!(sources(&next), [new_source(&mic("b"))]);
+        let same = Input {
+            kind: line.kind.clone(),
+            ..next
+        };
+        assert_eq!(same, line, "name, fader, routes and chain stay");
+        // An input without a device gets its first one the same way.
+        let picked = put(set_device(&hw_input("empty", &[]), &mic("a")));
+        assert_eq!(sources(&picked).len(), 1);
+    }
+
+    /// Merging adds a device with its own balance; taking one of two out
+    /// again leaves a single device, whose balance the model folds into the
+    /// fader.
+    #[test]
+    fn merging_and_unmerging_devices() {
+        let mut file = hako_core::mixer::MixerFile::default();
+        let mut apply = |op: MixerOp| {
+            file.apply(&op).unwrap();
+            file.live.inputs[0].clone()
+        };
+        let voice = apply(MixerOp::PutInput {
+            input: hw_input("voice", &["a"]),
+        });
+        let voice = apply(merge_device(&voice, &mic("b")));
+        assert_eq!(device_rows(&voice), DeviceRows::Merged);
+        assert_eq!(sources(&voice)[1].node, "b");
+        let voice = apply(MixerOp::SetSourceTrim {
+            input: "voice".into(),
+            source: 1,
+            trim_db: -3.0,
+        });
+        assert_eq!((voice.gain_db, sources(&voice)[1].trim_db), (0.0, -3.0));
+        let voice = apply(unmerge_device(&voice, 0));
+        assert_eq!(device_rows(&voice), DeviceRows::Single);
+        assert_eq!(sources(&voice)[0].node, "b");
+        assert_eq!((voice.gain_db, sources(&voice)[0].trim_db), (-3.0, 0.0));
+        // Out of range: nothing to remove.
+        assert_eq!(put(unmerge_device(&voice, 4)), voice);
+    }
+
+    #[test]
+    fn a_rename_commits_on_enter_or_blur_and_cancels_on_escape() {
+        use RenameEnd::*;
+        assert_eq!(rename_end("Voice", "Desk", false, false), Open);
+        assert_eq!(
+            rename_end("Voice", " Desk ", true, false),
+            Commit("Desk".into())
+        );
+        assert_eq!(rename_end("Voice", "Desk", true, true), Cancel);
+        // Unchanged or empty: nothing to send.
+        assert_eq!(rename_end("Voice", "Voice ", true, false), Cancel);
+        assert_eq!(rename_end("Voice", "  ", true, false), Cancel);
+        // Too long is cut to what a label holds.
+        let Commit(long) = rename_end("Voice", &"x".repeat(80), true, false) else {
+            panic!("a long name is cut, not refused");
+        };
+        assert_eq!(long.chars().count(), MAX_LABEL);
+    }
+
+    #[test]
+    fn virtual_strips_are_shown_to_apps_as_hako_once() {
+        assert_eq!(shown_as("Game"), "hako Game");
+        assert_eq!(shown_as("hako Mic"), "hako Mic");
+        assert_eq!(shown_as("Hako Stream"), "Hako Stream");
+        assert_eq!(shown_as("Ünï"), "hako Ünï");
     }
 
     #[test]

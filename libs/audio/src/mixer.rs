@@ -16,14 +16,19 @@
 //! live; a strip whose topology changed is rebuilt alone; the rest keep
 //! running. Called again (healing) it restarts crashed strips with backoff and
 //! links devices that appeared; a missing device is a [`StripProblem`].
+//!
+//! A hardware source may also set its ALSA card's input selection and
+//! capture level (a line-in jack); the card's previous input comes back when
+//! the source goes or the graph is torn down.
 
 use crate::engine::{engine, fader_pod, params_pod, Direction, Engine, Graph, LinkHandle};
 use crate::{
-    db_to_gain, dsp_stages, effect_params, filter_chain_config, lsp_for, node_latency, pkill,
-    pw_escape, same_effect_topology, spawn_pipewire, stop_child, wpctl_volume, write_conf, DspNode,
-    DspStage, FilterGraph, NODE_WAIT,
+    alsa_card, capture_level, card_capture_controls, current_input_source, db_to_gain, dsp_stages,
+    effect_params, filter_chain_config, lsp_for, node_latency, pkill, pw_escape,
+    same_effect_topology, set_capture_percent, set_input_source, spawn_pipewire, stop_child,
+    wpctl_volume, write_conf, DspNode, DspStage, FilterGraph, NODE_WAIT,
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use hako_core::mixer::{
     AudioDevice, ChatMixSide, DeviceDirection, EffectChain, Input, InputKind, Output, OutputKind,
     Scene, Source, StripProblem,
@@ -33,6 +38,7 @@ use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -281,6 +287,19 @@ fn strip_graph(def: &StripDef) -> FilterGraph {
     graph
 }
 
+/// What apps and PipeWire tools call a strip's nodes: `hako <label>`, unless
+/// the label already starts with "hako".
+fn describe(label: &str) -> String {
+    if label
+        .get(..4)
+        .is_some_and(|p| p.eq_ignore_ascii_case("hako"))
+    {
+        label.to_string()
+    } else {
+        format!("hako {label}")
+    }
+}
+
 /// The `pipewire -c` config of a strip. No side autoconnects (the daemon
 /// makes every link) and none restores a stored volume (the fader owns it).
 fn strip_config(def: &StripDef, naming: &Naming, lsp: Option<&Path>) -> Result<String> {
@@ -290,7 +309,8 @@ fn strip_config(def: &StripDef, naming: &Naming, lsp: Option<&Path>) -> Result<S
         node_latency(def.latency)
     );
     let unlinked = "node.autoconnect = false node.dont-reconnect = true node.dont-fallback = true";
-    let label = pw_escape(&def.label);
+    let description = describe(&def.label);
+    let label = pw_escape(&description);
     let capture = if def.sink {
         format!(
             "node.name = \"{}\" node.description = \"{label}\" media.class = Audio/Sink {common}",
@@ -299,7 +319,7 @@ fn strip_config(def: &StripDef, naming: &Naming, lsp: Option<&Path>) -> Result<S
     } else {
         let channels = def.capture_channels();
         format!(
-            "node.name = \"{}\" node.description = \"hako {label}\" {unlinked} audio.channels = {} audio.position = [ {} ] {common}",
+            "node.name = \"{}\" node.description = \"{label}\" {unlinked} audio.channels = {} audio.position = [ {} ] {common}",
             pw_escape(&def.capture),
             channels.len(),
             channels.join(" ")
@@ -312,12 +332,12 @@ fn strip_config(def: &StripDef, naming: &Naming, lsp: Option<&Path>) -> Result<S
         )
     } else {
         format!(
-            "node.name = \"{}\" node.description = \"hako {label}\" {unlinked} {common}",
+            "node.name = \"{}\" node.description = \"{label}\" {unlinked} {common}",
             pw_escape(&def.playback)
         )
     };
     filter_chain_config(
-        &format!("hako {}", def.label),
+        &description,
         &strip_graph(def),
         &naming.args,
         &capture,
@@ -469,7 +489,7 @@ fn wanted_links(
     }
     for output in &scene.outputs {
         let key = (Side::Output, output.id.clone());
-        let (Some(def), OutputKind::Hardware { sink }) = (up.get(&key), &output.kind) else {
+        let (Some(def), OutputKind::Hardware { sink, .. }) = (up.get(&key), &output.kind) else {
             continue;
         };
         let channels: Vec<&str> = graph
@@ -495,6 +515,8 @@ fn wanted_links(
 pub struct DeviceInfo {
     pub device: AudioDevice,
     pub card: Option<String>,
+    /// Its ALSA card number, if it is an ALSA device.
+    pub alsa_card: Option<String>,
 }
 
 /// Node names hako makes (its own prefixes) are never offered as devices.
@@ -533,34 +555,75 @@ pub fn device_list(graph: &Graph, created: &[&str]) -> Vec<DeviceInfo> {
                     description,
                     direction,
                     channels,
+                    inputs: Vec::new(),
+                    capture: false,
+                    capture_now: None,
                 },
                 card: node.props.get("device.id").cloned(),
+                alsa_card: alsa_card(&node.props),
             })
         })
         .collect()
 }
 
-/// The live graph's devices (see [`device_list`]) and its default sink.
+/// The live graph's devices (see [`device_list`]; capture devices with the
+/// input selection and capture level of their ALSA card) and its default sink.
 pub fn devices(created: &[&str]) -> Result<(Vec<DeviceInfo>, Option<String>)> {
-    Ok(engine()?.with_graph(|graph| (device_list(graph, created), graph.default_sink.clone())))
+    let (mut list, default_sink) =
+        engine()?.with_graph(|graph| (device_list(graph, created), graph.default_sink.clone()));
+    for info in &mut list {
+        if let (DeviceDirection::Source, Some(card)) = (info.device.direction, &info.alsa_card) {
+            (info.device.inputs, info.device.capture) = capture_controls(&info.device.node, card);
+            if info.device.capture {
+                info.device.capture_now = capture_level(card);
+            }
+        }
+    }
+    Ok((list, default_sink))
+}
+
+/// A card's "Input Source" items and whether it has a capture level.
+type CardControls = (Vec<String>, bool);
+
+/// Asked once per (node, card).
+/// ponytail: never evicted (a few entries per device ever plugged in).
+static CARD_CONTROLS: Mutex<BTreeMap<(String, String), CardControls>> = Mutex::new(BTreeMap::new());
+
+fn capture_controls(node: &str, card: &str) -> CardControls {
+    let mut cache = CARD_CONTROLS.lock().unwrap_or_else(|p| p.into_inner());
+    let key = (node.to_string(), card.to_string());
+    if let Some(found) = cache.get(&key) {
+        return found.clone();
+    }
+    let found = card_capture_controls(card).unwrap_or_else(|e| {
+        warn!("mixer: ALSA card {card} ({node}): {e:#}");
+        (Vec::new(), false)
+    });
+    cache.insert(key, found.clone());
+    found
 }
 
 /// What the first-run layout is made from.
 pub struct Detected<'a> {
     pub devices: &'a [DeviceInfo],
-    /// The headset sink ChatMix plays into today.
+    /// The headset sink ChatMix plays into today (else the sink the old
+    /// line-in played on, `aux.sink_name_regex`, is the headset).
     pub headset_sink: Option<&'a str>,
     pub default_sink: Option<&'a str>,
-    /// The line-in settings (capture regex, chain).
+    /// The old line-in settings (capture regex, chain).
     pub aux: &'a AuxConfig,
-    /// The line-in is on today.
+    /// The old line-in was on.
     pub aux_enabled: bool,
+    /// Its capture level (the headset's saved `aux_capture_percent`).
+    pub capture_percent: Option<u8>,
 }
 
-/// The first layout, matching what runs without the mixer: Game and Chat as
+/// The first layout, matching what ran without the mixer: Game and Chat as
 /// `Hako_Game` / `Hako_Chat` on the ChatMix dial (apps routed there keep
 /// working), the line-in with its chain (muted unless it was on), the
 /// headset mic, all into the headset (A1); the mic also feeds `hako Mic` (B1).
+/// A line-in that was on also selects its card's `Line` jack and capture
+/// level; one that was off leaves the card alone (that jack may be a mic).
 pub fn starter_scene(d: &Detected) -> Scene {
     let find = |direction, node: &str| {
         d.devices
@@ -572,7 +635,13 @@ pub fn starter_scene(d: &Detected) -> Scene {
             .iter()
             .filter(|i| i.device.direction == DeviceDirection::Sink)
     };
-    let headset = d.headset_sink.and_then(|s| find(DeviceDirection::Sink, s));
+    let headset = d
+        .headset_sink
+        .and_then(|s| find(DeviceDirection::Sink, s))
+        .or_else(|| {
+            let re = Regex::new(&d.aux.sink_name_regex).ok()?;
+            sinks().find(|i| re.is_match(&i.device.node))
+        });
     let a1 = headset
         .or_else(|| d.default_sink.and_then(|s| find(DeviceDirection::Sink, s)))
         .or_else(|| sinks().next());
@@ -601,6 +670,7 @@ pub fn starter_scene(d: &Detected) -> Scene {
             label.trim(),
             OutputKind::Hardware {
                 sink: a1.device.node.clone(),
+                description: a1.device.description.clone(),
             },
         ));
     }
@@ -633,23 +703,35 @@ pub fn starter_scene(d: &Detected) -> Scene {
         virtual_input("game", "Game", crate::CHATMIX_GAME, ChatMixSide::Game),
         virtual_input("chat", "Chat", crate::CHATMIX_CHAT, ChatMixSide::Chat),
     ];
-    let hardware = |info: &DeviceInfo| InputKind::Hardware {
-        sources: vec![Source {
-            node: info.device.node.clone(),
-            description: info.device.description.clone(),
-            trim_db: 0.0,
-            mute: false,
-        }],
+    let source = |info: &DeviceInfo| Source {
+        node: info.device.node.clone(),
+        description: info.device.description.clone(),
+        trim_db: 0.0,
+        mute: false,
+        alsa_input: None,
+        capture_percent: None,
     };
     if let Some(line_in) = line_in {
+        let (dev, on) = (&line_in.device, d.aux_enabled);
+        let jack = Source {
+            alsa_input: (on && dev.inputs.iter().any(|i| i == "Line")).then(|| "Line".into()),
+            capture_percent: d.capture_percent.filter(|_| on && dev.capture),
+            ..source(line_in)
+        };
+        let kind = InputKind::Hardware {
+            sources: vec![jack],
+        };
         inputs.push(Input {
             chain: d.aux.effects.clone(),
-            mute: !d.aux_enabled,
-            ..input("line-in", "Line-in", hardware(line_in), a1(&["A1"]))
+            mute: !on,
+            ..input("line-in", "Line-in", kind, a1(&["A1"]))
         });
     }
     if let Some(mic) = mic {
-        inputs.push(input("mic", "Mic", hardware(mic), a1(&["B1"])));
+        let kind = InputKind::Hardware {
+            sources: vec![source(mic)],
+        };
+        inputs.push(input("mic", "Mic", kind, a1(&["B1"])));
     }
     Scene { inputs, outputs }
 }
@@ -725,12 +807,65 @@ struct OwnedLink {
     made: Instant,
 }
 
+/// `(Source::alsa_input, Source::capture_percent)`.
+type CardWant = (Option<String>, Option<u8>);
+
+/// What a source wants of its capture card: `(node, input id, settings)`,
+/// the first source of each node with any (two inputs can't both set one).
+fn wanted_cards(scene: &Scene) -> Vec<(String, String, CardWant)> {
+    let mut wanted: Vec<(String, String, CardWant)> = Vec::new();
+    for input in &scene.inputs {
+        let InputKind::Hardware { sources } = &input.kind else {
+            continue;
+        };
+        for s in sources {
+            let want = (s.alsa_input.clone(), s.capture_percent);
+            if want != (None, None) && !wanted.iter().any(|(node, ..)| *node == s.node) {
+                wanted.push((s.node.clone(), input.id.clone(), want));
+            }
+        }
+    }
+    wanted
+}
+
+/// A capture card a source's settings were applied to.
+#[derive(Debug)]
+struct CardClaim {
+    /// The input the source belongs to (its problems show there).
+    input: String,
+    card: String,
+    /// The node's PipeWire id then: a new one (a replug, the card reset)
+    /// gets the settings again.
+    node_id: u32,
+    applied: CardWant,
+    /// "Input Source" before hako changed it; restored when let go.
+    previous: Option<String>,
+    error: Option<String>,
+}
+
+/// Put the card's input selection back, unless the node is gone (its card
+/// number may be another device's by now).
+fn release_card(node: &str, claim: &CardClaim, present: bool) {
+    let (Some(_), Some(previous), true) = (&claim.applied.0, &claim.previous, present) else {
+        return;
+    };
+    match set_input_source(&claim.card, previous) {
+        Ok(()) => info!(
+            "mixer: {node}: card {} input source back to {previous}",
+            claim.card
+        ),
+        Err(e) => warn!("mixer: {node}: restoring card {} input: {e:#}", claim.card),
+    }
+}
+
 /// The mixer as it runs. Dropping it stops every strip.
 pub struct MixerGraph {
     naming: Naming,
     latency: u32,
     strips: BTreeMap<StripKey, Strip>,
     links: HashMap<(End, End), OwnedLink>,
+    /// Capture cards set for sources, by node name.
+    cards: BTreeMap<String, CardClaim>,
     problems: Vec<StripProblem>,
     running: bool,
 }
@@ -743,6 +878,7 @@ impl MixerGraph {
             latency,
             strips: BTreeMap::new(),
             links: HashMap::new(),
+            cards: BTreeMap::new(),
             problems: Vec::new(),
             running: false,
         }
@@ -886,6 +1022,19 @@ impl MixerGraph {
         }
 
         self.sync_links(engine, scene, &mut problems);
+        let wanted = wanted_cards(scene);
+        let present: HashMap<String, (u32, String)> = engine.with_graph(|graph| {
+            wanted
+                .iter()
+                .map(|(node, ..)| node)
+                .chain(self.cards.keys())
+                .filter_map(|node| {
+                    let id = graph.node_id(node)?;
+                    Some((node.clone(), (id, alsa_card(&graph.nodes[&id].props)?)))
+                })
+                .collect()
+        });
+        problems.extend(self.sync_cards(&wanted, &present));
         problems.extend(self.strips.iter().filter_map(|((_, id), strip)| {
             strip.error.as_ref().map(|error| problem(id, error.clone()))
         }));
@@ -1076,9 +1225,123 @@ impl MixerGraph {
         }
     }
 
+    /// Apply the capture card settings sources want (`present`: node ->
+    /// (PipeWire id, ALSA card) of the nodes there), give back the cards no
+    /// source wants any more. Each change runs `amixer` once; a failure is
+    /// the input's problem until the settings or the node change.
+    fn sync_cards(
+        &mut self,
+        wanted: &[(String, String, CardWant)],
+        present: &HashMap<String, (u32, String)>,
+    ) -> Vec<StripProblem> {
+        let gone: Vec<String> = self
+            .cards
+            .keys()
+            .filter(|node| !wanted.iter().any(|(n, ..)| n == *node))
+            .cloned()
+            .collect();
+        for node in gone {
+            if let Some(claim) = self.cards.remove(&node) {
+                let there = present
+                    .get(&node)
+                    .is_some_and(|(id, _)| *id == claim.node_id);
+                release_card(&node, &claim, there);
+            }
+        }
+        let mut problems = Vec::new();
+        for (node, input, want) in wanted {
+            // Absent, or not an ALSA device: applied once it is there.
+            let Some((id, card)) = present.get(node) else {
+                continue;
+            };
+            let current = self.cards.get(node);
+            if let Some(c) = current.filter(|c| c.node_id == *id && c.applied == *want) {
+                problems.extend(c.error.as_ref().map(|e| problem(&c.input, e.clone())));
+                continue;
+            }
+            // A new node id is a reset card: nothing of ours is on it.
+            let (applied, mut previous) = self
+                .cards
+                .remove(node)
+                .filter(|c| c.node_id == *id && c.card == *card)
+                .map_or(((None, None), None), |c| (c.applied, c.previous));
+            let mut errors = Vec::new();
+            if applied.0 != want.0 {
+                let result = match &want.0 {
+                    Some(item) => {
+                        if applied.0.is_none() {
+                            previous = current_input_source(card).ok();
+                        }
+                        if capture_controls(node, card).0.contains(item) {
+                            set_input_source(card, item)
+                        } else {
+                            Err(anyhow!("the card has no input source {item:?}"))
+                        }
+                    }
+                    None => previous
+                        .take()
+                        .map_or(Ok(()), |back| set_input_source(card, &back)),
+                };
+                if let Err(e) = result {
+                    errors.push(format!("input source: {e:#}"));
+                }
+            }
+            if applied.1 != want.1 {
+                if let Some(Err(e)) = want.1.map(|p| set_capture_percent(card, p)) {
+                    errors.push(format!("capture level: {e:#}"));
+                }
+            }
+            let error = (!errors.is_empty()).then(|| errors.join("; "));
+            match &error {
+                Some(e) => {
+                    warn!("mixer: {node}: card {card}: {e}");
+                    problems.push(problem(input, e.clone()));
+                }
+                None => info!(
+                    "mixer: {node}: card {card} input {:?}, capture {:?}",
+                    want.0, want.1
+                ),
+            }
+            self.cards.insert(
+                node.clone(),
+                CardClaim {
+                    input: input.clone(),
+                    card: card.clone(),
+                    node_id: *id,
+                    applied: want.clone(),
+                    previous,
+                    error,
+                },
+            );
+        }
+        problems
+    }
+
+    /// Give every claimed card its input selection back.
+    fn release_cards(&mut self) {
+        if self.cards.is_empty() {
+            return;
+        }
+        let ids: HashMap<String, u32> = engine()
+            .map(|engine| {
+                engine.with_graph(|graph| {
+                    self.cards
+                        .keys()
+                        .filter_map(|node| Some((node.clone(), graph.node_id(node)?)))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        for (node, claim) in std::mem::take(&mut self.cards) {
+            release_card(&node, &claim, ids.get(&node) == Some(&claim.node_id));
+        }
+    }
+
     /// Stop every strip and wait (briefly) until their nodes are gone, so
-    /// whatever comes next may reuse the names.
+    /// whatever comes next may reuse the names. Claimed cards get their
+    /// input selection back.
     pub fn teardown(&mut self) {
+        self.release_cards();
         self.links.clear();
         let names: Vec<String> = self.node_names().iter().map(|n| n.to_string()).collect();
         for strip in self.strips.values_mut() {
@@ -1097,6 +1360,7 @@ impl MixerGraph {
 
 impl Drop for MixerGraph {
     fn drop(&mut self) {
+        self.release_cards();
         self.links.clear();
         for strip in self.strips.values_mut() {
             strip.stop();
@@ -1124,6 +1388,8 @@ mod tests {
             description: String::new(),
             trim_db: 0.0,
             mute: false,
+            alsa_input: None,
+            capture_percent: None,
         }
     }
 
@@ -1156,6 +1422,7 @@ mod tests {
                     "Headset",
                     OutputKind::Hardware {
                         sink: "headset".into(),
+                        description: String::new(),
                     },
                 ),
                 output(
@@ -1200,7 +1467,7 @@ mod tests {
         let config =
             strip_config(&def(&scene(), Side::Input, "game"), &test_naming(), None).unwrap();
         assert!(config.contains(
-            "capture.props = { node.name = \"hako-test-game\" node.description = \"Game\" media.class = Audio/Sink node.latency = \"256/48000\" state.restore-props = false }"
+            "capture.props = { node.name = \"hako-test-game\" node.description = \"hako Game\" media.class = Audio/Sink node.latency = \"256/48000\" state.restore-props = false }"
         ), "{config}");
         assert!(config.contains(
             "playback.props = { node.name = \"hako-test-x-in_game\" node.description = \"hako Game\" node.autoconnect = false"
@@ -1256,6 +1523,100 @@ mod tests {
         ), "{b1}");
         // Every side of every strip requests the latency setting.
         assert_eq!(b1.matches("node.latency = \"256/48000\"").count(), 2);
+        // A label that says hako already is not prefixed again.
+        assert!(
+            b1.contains("node.description = \"hako Mic\" node.autoconnect"),
+            "{b1}"
+        );
+        assert!(!b1.contains("hako hako"), "{b1}");
+    }
+
+    #[test]
+    fn node_descriptions_say_hako_once() {
+        assert_eq!(describe("Game"), "hako Game");
+        assert_eq!(describe("hako Mic"), "hako Mic");
+        assert_eq!(describe("HAKO Stream"), "HAKO Stream");
+        assert_eq!(describe("Hakone mic"), "Hakone mic", "starts with hako");
+        assert_eq!(describe("hak"), "hako hak");
+        assert_eq!(describe("hä"), "hako hä", "no char boundary at 4");
+    }
+
+    /// Card settings run `amixer` once per change (the fake one, card 7:
+    /// Rear Mic / Front Mic / Line, now on Rear Mic), come back after a
+    /// replug, and the old input returns when the source lets go.
+    #[test]
+    fn capture_cards_are_set_once_and_given_back() {
+        use crate::tests::amixer_calls;
+        let node = "hako-test-cards-line".to_string();
+        let mut graph = MixerGraph::new(test_naming(), 256);
+        let want = |item: Option<&str>, percent| {
+            vec![(
+                node.clone(),
+                "line-in".to_string(),
+                (item.map(str::to_string), percent),
+            )]
+        };
+        let at = |id| HashMap::from([(node.clone(), (id, "7".to_string()))]);
+        amixer_calls();
+
+        assert!(graph
+            .sync_cards(&want(Some("Line"), Some(66)), &at(5))
+            .is_empty());
+        let calls = amixer_calls();
+        assert_eq!(
+            calls.first().map(String::as_str),
+            Some("7 sget Input Source")
+        );
+        assert!(calls.ends_with(&[
+            "7 sset Input Source Line".to_string(),
+            "7 sset Capture 66%".to_string()
+        ]));
+        // Nothing changed: nothing runs.
+        graph.sync_cards(&want(Some("Line"), Some(66)), &at(5));
+        assert!(amixer_calls().is_empty());
+        // A level change touches the level only.
+        graph.sync_cards(&want(Some("Line"), Some(50)), &at(5));
+        assert_eq!(amixer_calls(), ["7 sset Capture 50%"]);
+        // An item the card doesn't have is the input's problem, not a write.
+        let problems = graph.sync_cards(&want(Some("Aux"), Some(50)), &at(5));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].strip, "line-in");
+        assert!(!amixer_calls().iter().any(|c| c.contains("sset")));
+        // Still reported while nothing changes, without running amixer.
+        assert_eq!(
+            graph.sync_cards(&want(Some("Aux"), Some(50)), &at(5)).len(),
+            1
+        );
+        assert!(amixer_calls().is_empty());
+        graph.sync_cards(&want(Some("Line"), Some(50)), &at(5));
+        assert_eq!(amixer_calls(), ["7 sset Input Source Line"]);
+        // A replug (new node id) resets the card: applied again.
+        graph.sync_cards(&want(Some("Line"), Some(50)), &at(6));
+        let calls = amixer_calls();
+        assert!(
+            calls.contains(&"7 sset Input Source Line".to_string()),
+            "{calls:?}"
+        );
+        assert!(
+            calls.contains(&"7 sset Capture 50%".to_string()),
+            "{calls:?}"
+        );
+        // The source lets go of the input: the card's own comes back.
+        graph.sync_cards(&want(None, Some(50)), &at(6));
+        assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
+        graph.sync_cards(&want(Some("Line"), Some(50)), &at(6));
+        amixer_calls();
+        // Removed while there: restored; removed while gone: untouched.
+        graph.sync_cards(&[], &at(6));
+        assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
+        graph.sync_cards(&want(Some("Line"), None), &at(6));
+        amixer_calls();
+        graph.sync_cards(&[], &HashMap::new());
+        assert!(amixer_calls().is_empty());
+        assert!(graph.cards.is_empty());
+        // Not there yet: applied once it appears.
+        graph.sync_cards(&want(Some("Line"), None), &HashMap::new());
+        assert!(amixer_calls().is_empty() && graph.cards.is_empty());
     }
 
     #[test]
@@ -1313,7 +1674,14 @@ mod tests {
         after.outputs[0].gain_db = 3.0;
         after.outputs[0].kind = OutputKind::Hardware {
             sink: "speakers".into(),
+            description: "Speakers".into(),
         };
+        // So are a source's capture card settings.
+        let InputKind::Hardware { sources } = &mut after.inputs[1].kind else {
+            unreachable!()
+        };
+        sources[1].alsa_input = Some("Line".into());
+        sources[1].capture_percent = Some(50);
         let InputKind::Hardware { sources } = &mut after.inputs[1].kind else {
             unreachable!()
         };
@@ -1461,6 +1829,7 @@ mod tests {
                     ("node.description", "Headset Mono"),
                     ("audio.channels", "1"),
                     ("device.id", "70"),
+                    ("alsa.card", "4"),
                 ],
             ),
             (
@@ -1487,6 +1856,8 @@ mod tests {
         );
         assert_eq!(list[1].device.channels, 2);
         assert_eq!(list[1].device.direction, DeviceDirection::Sink);
+        assert_eq!(list[0].alsa_card.as_deref(), Some("4"));
+        assert_eq!(list[1].alsa_card, None);
     }
 
     fn info(node: &str, direction: DeviceDirection, card: &str) -> DeviceInfo {
@@ -1496,22 +1867,30 @@ mod tests {
                 description: format!("{node} description"),
                 direction,
                 channels: 2,
+                inputs: Vec::new(),
+                capture: false,
+                capture_now: None,
             },
             card: Some(card.into()),
+            alsa_card: None,
         }
     }
 
     #[test]
     fn starter_layout_preserves_chatmix_and_the_line_in() {
         use DeviceDirection::{Sink, Source as Src};
+        let mut line = info("alsa_input.pci-0000_10_00.6.analog-stereo", Src, "202");
+        line.device.inputs = vec!["Rear Mic".into(), "Front Mic".into(), "Line".into()];
+        line.device.capture = true;
         let devices = [
-            info("alsa_input.pci-0000_10_00.6.analog-stereo", Src, "202"),
+            line,
             info("alsa_output.hdmi", Sink, "60"),
             info("alsa_output.usb-Arctis.analog-stereo", Sink, "70"),
             info("alsa_input.usb-Arctis.mono-fallback", Src, "70"),
         ];
         let aux = AuxConfig {
             effects: gate(),
+            sink_name_regex: r"usb-Arctis.*analog".into(),
             ..AuxConfig::default()
         };
         let detected = |aux_enabled| Detected {
@@ -1520,6 +1899,7 @@ mod tests {
             default_sink: Some("alsa_output.hdmi"),
             aux: &aux,
             aux_enabled,
+            capture_percent: Some(40),
         };
         let scene = starter_scene(&detected(false));
         scene.validate().unwrap();
@@ -1537,8 +1917,10 @@ mod tests {
         let line_in = &scene.inputs[2];
         assert!(line_in.mute, "AUX was off");
         assert_eq!(line_in.chain, gate());
+        // Off: the card's jack may be a mic; it is left alone.
         assert!(matches!(&line_in.kind, InputKind::Hardware { sources }
-            if sources[0].node == "alsa_input.pci-0000_10_00.6.analog-stereo"));
+            if sources[0].node == "alsa_input.pci-0000_10_00.6.analog-stereo"
+                && sources[0].alsa_input.is_none() && sources[0].capture_percent.is_none()));
         let mic = &scene.inputs[3];
         assert!(matches!(&mic.kind, InputKind::Hardware { sources }
             if sources[0].node == "alsa_input.usb-Arctis.mono-fallback"));
@@ -1546,7 +1928,8 @@ mod tests {
         assert_eq!(
             scene.outputs[0].kind,
             OutputKind::Hardware {
-                sink: "alsa_output.usb-Arctis.analog-stereo".into()
+                sink: "alsa_output.usb-Arctis.analog-stereo".into(),
+                description: "alsa_output.usb-Arctis.analog-stereo description".into(),
             }
         );
         assert_eq!(scene.outputs[0].label, "Headset");
@@ -1557,7 +1940,37 @@ mod tests {
             }
         );
         assert_eq!(scene.outputs[1].label, "hako Mic");
-        assert!(!starter_scene(&detected(true)).inputs[2].mute, "AUX was on");
+        // On: unmuted, its card on the line jack at the saved level.
+        let on = starter_scene(&detected(true));
+        on.validate().unwrap();
+        assert!(!on.inputs[2].mute, "AUX was on");
+        assert_eq!(on.inputs[2].routes, ["A1"]);
+        assert!(matches!(&on.inputs[2].kind, InputKind::Hardware { sources }
+            if sources[0].alsa_input.as_deref() == Some("Line")
+                && sources[0].capture_percent == Some(40)));
+        // A card without a Line item or a capture level: nothing to set.
+        let mut plain = devices.clone();
+        plain[0].device.inputs = vec!["Mic".into()];
+        plain[0].device.capture = false;
+        let scene = starter_scene(&Detected {
+            devices: &plain,
+            ..detected(true)
+        });
+        assert!(
+            matches!(&scene.inputs[2].kind, InputKind::Hardware { sources }
+            if sources[0].alsa_input.is_none() && sources[0].capture_percent.is_none())
+        );
+
+        // ChatMix not up yet (daemon start): the old line-in's sink.
+        let scene = starter_scene(&Detected {
+            headset_sink: None,
+            ..detected(true)
+        });
+        assert_eq!(scene.outputs[0].label, "Headset");
+        assert!(
+            matches!(&scene.outputs[0].kind, OutputKind::Hardware { sink, .. }
+            if sink == "alsa_output.usb-Arctis.analog-stereo")
+        );
 
         // No headset, no line-in: Game / Chat on the default sink, no mic.
         let bare = [info("alsa_output.hdmi", Sink, "60")];
@@ -1831,7 +2244,14 @@ mod tests {
                 ),
             ],
             outputs: vec![
-                output("A1", "Test A1", OutputKind::Hardware { sink: name("sink") }),
+                output(
+                    "A1",
+                    "Test A1",
+                    OutputKind::Hardware {
+                        sink: name("sink"),
+                        description: String::new(),
+                    },
+                ),
                 output(
                     "B1",
                     "Test B1",

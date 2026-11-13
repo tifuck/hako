@@ -1,4 +1,4 @@
-//! Headset line-in: monitor toggle + ordered processing chain editor.
+//! Ordered processing chain editor (a mixer strip's gate / EQ / compressor).
 
 use crate::theme::{self, pal};
 use crate::widgets;

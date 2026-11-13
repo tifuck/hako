@@ -70,7 +70,9 @@ fn known_controls<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SettingMeta>, D
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AudioSummary {
     pub chatmix_active: bool,
+    /// Legacy (line-in is a mixer input now): always false.
     pub aux_active: bool,
+    /// Legacy, like `aux_active`.
     #[serde(default)]
     pub aux_processing_active: bool,
     #[serde(default)]

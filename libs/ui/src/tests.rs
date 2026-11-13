@@ -111,6 +111,7 @@ fn sample_state() -> HubState {
             (ColorB, SettingValue::Int(80)),
         ]),
     );
+    // Line-in controls as a pre-mixer daemon declared them: never shown.
     let headset = dev(
         DeviceKind::Headset,
         vec![
@@ -156,8 +157,6 @@ fn sample_state() -> HubState {
         profiles: vec!["Default".into()],
         audio: AudioSummary {
             chatmix_active: true,
-            aux_active: true,
-            aux_processing_active: true,
             ..Default::default()
         },
         devices: vec![keyboard, mouse, headset, other],
@@ -320,7 +319,35 @@ fn tabs_follow_the_device_kind_and_end_with_device() {
         [Performance, Bindings, Lighting, Device]
     );
     // Microphone folds into Audio, power into Device.
-    assert_eq!(tabs(DeviceKind::Headset), [Audio, LineIn, Device]);
+    assert_eq!(tabs(DeviceKind::Headset), [Audio, Device]);
+}
+
+/// Line-in is a mixer input: the headset page has no Line-in tab, with the
+/// driver's controls or an older daemon's line-in ones.
+#[test]
+fn the_headset_page_has_no_line_in_tab() {
+    use SettingKey::*;
+    let st = sample_state();
+    let old = st
+        .devices
+        .iter()
+        .find(|d| d.kind == DeviceKind::Headset)
+        .unwrap();
+    assert!(old.controls.iter().any(|c| c.key == AuxEnabled));
+    let mut now = old.clone();
+    now.controls
+        .retain(|c| c.key.group() != SettingGroup::LineIn);
+    for d in [old, &now] {
+        let labels: Vec<&str> = tabs_for(d).iter().map(|t| t.label(d.kind)).collect();
+        assert_eq!(labels, ["Audio", "Device"]);
+    }
+    // Only line-in controls (nothing else to show): no page for them either.
+    let only = dev(
+        DeviceKind::Headset,
+        vec![SettingMeta::toggle(AuxEnabled, "Monitor line-in")],
+        map(&[(AuxEnabled, SettingValue::Bool(true))]),
+    );
+    assert_eq!(tabs_for(&only), [Tab::Device]);
 }
 
 /// Drafts hold while commands are in flight, then give way to the daemon's
@@ -878,8 +905,6 @@ fn snapshot_audit_gallery() {
         selected,
         daemon_error: None,
         settings: Some(settings.clone()),
-        // Line-in meters: input in the ok zone, output reaching danger.
-        meter_levels: vec![[0.08, 0.06], [0.6, 0.9]],
         ..Default::default()
     };
     for d in &state.devices {
@@ -921,13 +946,38 @@ fn snapshot_audit_gallery() {
         SHOT,
         app(&with_profiles, None),
         |_| {},
-        // The profile dropdown sits left of the settings gear in the top bar.
+        // The profile dropdown sits left of the settings gear in the top bar;
+        // the pointer rests on a row, which shows its delete button.
         |h| {
             pointer(h, [1000.0, 28.0], Some(true));
             pointer(h, [1000.0, 28.0], Some(false));
             h.run_steps(40);
+            pointer(h, [1000.0, 186.0], None);
         },
     );
+    shoot_app(
+        "profile_delete_confirm",
+        SHOT,
+        HakoAppUi {
+            profile_delete: Some("Late night".into()),
+            ..app(&with_profiles, None)
+        },
+        |_| {},
+        |_| {},
+    );
+    // The headset's ChatMix card while the mixer owns ChatMix.
+    if let Some(headset) = state.devices.iter().find(|d| d.kind == DeviceKind::Headset) {
+        let mut on = app(&state, Some(headset.id.clone()));
+        on.mixer.receive(sample_mixer());
+        let tab_id = egui::Id::new(("tab", headset.id.key()));
+        shoot_app(
+            "headset_audio_mixer_on",
+            SHOT,
+            on,
+            |ctx| ctx.data_mut(|m| m.insert_temp(tab_id, Tab::Audio)),
+            |_| {},
+        );
+    }
     let mut toasting = app(&state, None);
     toasting.notify(widgets::Tone::Ok, "DPI saved to device memory");
     toasting.notify(
@@ -1051,51 +1101,6 @@ fn meter_ballistics_attack_release_and_hold() {
     assert_eq!((b.level, b.peak), (-40.0, -40.0));
 }
 
-#[test]
-fn line_in_page_asks_for_meters_only_while_monitoring() {
-    let mut state = sample_state();
-    let headset = state
-        .devices
-        .iter()
-        .find(|d| d.settings.contains_key(SettingKey::AuxEnabled.as_str()))
-        .unwrap()
-        .clone();
-    let tab_id = egui::Id::new(("tab", headset.id.key()));
-    let targets = |state: &HubState| {
-        let mut app = HakoAppUi {
-            state: Some(state.clone()),
-            selected: Some(headset.id.clone()),
-            daemon_error: None,
-            settings: Some(AppSettings::default()),
-            ..Default::default()
-        };
-        let ctx = egui::Context::default();
-        ctx.data_mut(|m| m.insert_temp(tab_id, Tab::LineIn));
-        let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut Vec::new()));
-        app.meter_targets
-    };
-    let set_aux = |state: &mut HubState, on: bool| {
-        for d in &mut state.devices {
-            if d.id == headset.id {
-                d.settings.insert(
-                    SettingKey::AuxEnabled.as_str().into(),
-                    SettingValue::Bool(on),
-                );
-            }
-        }
-    };
-    set_aux(&mut state, false);
-    assert!(targets(&state).is_empty());
-    set_aux(&mut state, true);
-    state.audio.aux_processing_active = false;
-    assert_eq!(targets(&state), [MeterTargetSpec::AuxInput]);
-    state.audio.aux_processing_active = true;
-    assert_eq!(
-        targets(&state),
-        [MeterTargetSpec::AuxInput, MeterTargetSpec::AuxOutput]
-    );
-}
-
 // ── Mixer ────────────────────────────────────────────────────────
 
 /// A full console: 2 hardware + 3 virtual inputs, 4 outputs, one problem.
@@ -1106,6 +1111,8 @@ fn sample_mixer() -> hako_core::mixer::MixerState {
         description: description.into(),
         trim_db,
         mute: false,
+        alsa_input: None,
+        capture_percent: None,
     };
     let fx = |kinds: &[(&str, AuxEffectKind, bool)]| EffectChain {
         effects: kinds
@@ -1162,7 +1169,11 @@ fn sample_mixer() -> hako_core::mixer::MixerState {
             "line-in",
             "Line-in",
             InputKind::Hardware {
-                sources: vec![source("alsa_input.ryzen-line", "Ryzen HD Audio Line", 0.0)],
+                sources: vec![Source {
+                    alsa_input: Some("Line".into()),
+                    capture_percent: Some(66),
+                    ..source("alsa_input.ryzen-line", "Ryzen HD Audio Line", 0.0)
+                }],
             },
             fx(&[
                 ("eq-1", AuxEffectKind::default_equalizer(), true),
@@ -1205,6 +1216,7 @@ fn sample_mixer() -> hako_core::mixer::MixerState {
             "Headset",
             OutputKind::Hardware {
                 sink: "alsa_output.arctis".into(),
+                description: "Arctis Nova Pro".into(),
             },
             fx(&[("eq-1", AuxEffectKind::default_equalizer(), true)]),
             0.0,
@@ -1214,6 +1226,7 @@ fn sample_mixer() -> hako_core::mixer::MixerState {
             "Speakers",
             OutputKind::Hardware {
                 sink: "alsa_output.mg-xu".into(),
+                description: "MG-XU Digital".into(),
             },
             EffectChain::default(),
             -10.0,
@@ -1243,14 +1256,13 @@ fn sample_mixer() -> hako_core::mixer::MixerState {
         description: description.into(),
         direction,
         channels,
+        inputs: Vec::new(),
+        capture: false,
+        capture_now: None,
     };
     let file = MixerFile {
         enabled: true,
         live: Scene { inputs, outputs },
-        scenes: vec![NamedScene {
-            name: "Streaming".into(),
-            scene: Scene::default(),
-        }],
         ..MixerFile::default()
     };
     file.validate().unwrap();
@@ -1275,12 +1287,17 @@ fn sample_mixer() -> hako_core::mixer::MixerState {
                     DeviceDirection::Source,
                     2,
                 ),
-                device(
-                    "alsa_input.ryzen-line",
-                    "Ryzen HD Audio Line",
-                    DeviceDirection::Source,
-                    2,
-                ),
+                AudioDevice {
+                    inputs: vec!["Rear Mic".into(), "Front Mic".into(), "Line".into()],
+                    capture: true,
+                    capture_now: Some(48),
+                    ..device(
+                        "alsa_input.ryzen-line",
+                        "Ryzen HD Audio Line",
+                        DeviceDirection::Source,
+                        2,
+                    )
+                },
                 device(
                     "alsa_input.webcam",
                     "C920 Webcam",
@@ -1439,9 +1456,67 @@ fn snapshot_mixer() {
         .mixer
         .unavailable("This hakod has no mixer yet. Update hako to use it.".into());
     shoot_app("mixer_unavailable", SHOT, unavailable, |_| {}, |_| {});
+    // Voice is soloed in the sample: the rest read as muted by it.
     shoot_app("mixer", SHOT, on(), |_| {}, |_| {});
+    let mut no_solo = sample_mixer();
+    no_solo.file.live.inputs[0].solo = false;
+    shoot_app(
+        "mixer_no_solo",
+        SHOT,
+        mixer_app(Some(no_solo)),
+        |_| {},
+        |_| {},
+    );
+    let mut line_in = on();
+    line_in.mixer.select(mixer::Strip::Input("line-in".into()));
+    shoot_app(
+        "mixer_line_in_drawer",
+        [1180.0, 1300.0],
+        line_in,
+        |_| {},
+        |_| {},
+    );
+    // Two merged devices, one with a sound card's jack and input gain.
+    let mut merged = sample_mixer();
+    merged.status.devices[1].inputs = vec!["Mic".into(), "Line".into()];
+    merged.status.devices[1].capture = true;
+    merged.status.devices[1].capture_now = Some(48);
+    shoot_app(
+        "mixer_merged_drawer",
+        [1180.0, 1300.0],
+        mixer_app(Some(merged)),
+        |_| {},
+        |_| {},
+    );
     shoot_app("mixer_min_window", [900.0, 600.0], on(), |_| {}, |_| {});
+    // The drawers at the minimum width (the device row wraps).
+    for (name, strip) in [
+        ("mixer_min_line_in_drawer", "line-in"),
+        ("mixer_min_merged_drawer", "voice"),
+    ] {
+        let mut app = on();
+        app.mixer.select(mixer::Strip::Input(strip.into()));
+        shoot_app(name, [900.0, 1100.0], app, |_| {}, |_| {});
+    }
     shoot_app("mixer_full", [1180.0, 1700.0], on(), |_| {}, |_| {});
+    // Renaming in the drawer title, and the question before a strip goes.
+    for (name, button) in [
+        ("mixer_rename", "Rename"),
+        ("mixer_remove_confirm", "Remove…"),
+    ] {
+        let mut app = on();
+        app.mixer.select(mixer::Strip::Input("line-in".into()));
+        shoot_app(
+            name,
+            [1180.0, 1300.0],
+            app,
+            |_| {},
+            |h| {
+                use egui_kittest::kittest::Queryable;
+                h.get_by_label(button).click();
+            },
+        );
+    }
     let mut output = on();
     output.mixer.select(mixer::Strip::Output("A2".into()));
     shoot_app(
@@ -1466,6 +1541,47 @@ fn snapshot_mixer() {
         app.mixer.open_add_dialog(output, virt);
         shoot_app(name, SHOT, app, |_| {}, |_| {});
     }
+}
+
+/// An input silenced by another's solo says so, wherever the soloed strip
+/// is; the header pill clears every solo in one patch.
+#[test]
+fn a_solo_shows_on_the_inputs_it_silences() {
+    let mut m = sample_mixer();
+    let inputs = &m.file.live.inputs;
+    // Voice is soloed: everything else is muted by it, Voice is not.
+    assert_eq!(mixer::solo_mute_reason(&inputs[0], inputs), None);
+    assert_eq!(
+        mixer::solo_mute_reason(&inputs[1], inputs).as_deref(),
+        Some("Muted by solo on Voice")
+    );
+    m.file.live.inputs[4].solo = true;
+    let inputs = &m.file.live.inputs;
+    assert_eq!(
+        mixer::solo_mute_reason(&inputs[2], inputs).as_deref(),
+        Some("Muted by solo on Voice, Music")
+    );
+    // No solo anywhere: nothing implied.
+    let mut none = inputs.clone();
+    for i in &mut none {
+        i.solo = false;
+    }
+    assert!(none
+        .iter()
+        .all(|i| mixer::solo_mute_reason(i, &none).is_none()));
+
+    let clear = mixer::clear_solos(inputs);
+    assert_eq!(clear.len(), 2);
+    let mut app = mixer_app(Some(m.clone()));
+    let ctx = egui::Context::default();
+    let mut out = Vec::new();
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    assert!(out.is_empty(), "rendering a solo sent {out:?}");
+    let mut file = m.file.clone();
+    for op in &clear {
+        file.apply(op).unwrap();
+    }
+    assert!(file.live.inputs.iter().all(|i| !i.solo));
 }
 
 /// Picking "Mixer" in the rail opens the page and asks for the mixer once.
@@ -1529,6 +1645,259 @@ fn mixer_adopts_daemon_state_once_settled() {
     assert!(out.is_empty(), "{out:?}");
 }
 
+// ── Clicking through (headless) ──────────────────────────────────
+
+type Driven = egui_kittest::Harness<'static, (HakoAppUi, Vec<UiCommand>)>;
+
+/// The whole UI in a tall window, with the commands it sent.
+fn drive(app: HakoAppUi) -> Driven {
+    let mut h = egui_kittest::Harness::builder()
+        .with_size([1200.0, 1400.0])
+        .build_state(
+            |ctx, (app, out): &mut (HakoAppUi, Vec<UiCommand>)| app.ui(ctx, out),
+            (app, Vec::new()),
+        );
+    h.run_steps(4);
+    h
+}
+
+fn click(h: &mut Driven, label: &str) {
+    use egui_kittest::kittest::Queryable;
+    h.get_by_label(label).click();
+    h.run_steps(4);
+}
+
+fn shown(h: &Driven, label: &str) -> bool {
+    use egui_kittest::kittest::Queryable;
+    h.query_all_by_label(label).next().is_some()
+}
+
+fn sent(h: &mut Driven) -> Vec<UiCommand> {
+    std::mem::take(&mut h.state_mut().1)
+}
+
+fn sent_ops(h: &mut Driven) -> Vec<MixerOp> {
+    sent(h)
+        .into_iter()
+        .flat_map(|c| match c {
+            UiCommand::PatchMixer(ops) => ops,
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+fn drawer(strip: mixer::Strip) -> Driven {
+    let mut app = mixer_app(Some(sample_mixer()));
+    app.mixer.select(strip);
+    drive(app)
+}
+
+/// "Remove…" only asks; the strip goes once the question is answered yes.
+#[test]
+fn removing_a_strip_asks_first() {
+    let mut h = drawer(mixer::Strip::Input("line-in".into()));
+    click(&mut h, "Remove…");
+    assert!(shown(&h, "Remove Line-in?"));
+    assert!(sent_ops(&mut h).is_empty());
+    click(&mut h, "Cancel");
+    assert!(!shown(&h, "Remove Line-in?"));
+    assert!(sent_ops(&mut h).is_empty());
+    click(&mut h, "Remove…");
+    click(&mut h, "Remove");
+    assert_eq!(
+        sent_ops(&mut h),
+        [MixerOp::RemoveInput {
+            input: "line-in".into()
+        }]
+    );
+    assert!(!shown(&h, "Remove Line-in?"));
+    let inputs = &h.state().0.mixer.state().unwrap().file.live.inputs;
+    assert!(inputs.iter().all(|i| i.id != "line-in"));
+
+    // Outputs ask the same way.
+    let mut h = drawer(mixer::Strip::Output("B2".into()));
+    click(&mut h, "Remove…");
+    assert!(sent_ops(&mut h).is_empty());
+    click(&mut h, "Remove");
+    assert_eq!(
+        sent_ops(&mut h),
+        [MixerOp::RemoveOutput {
+            output: "B2".into()
+        }]
+    );
+}
+
+/// The title turns into a field: Enter sends the new name, Escape drops it.
+#[test]
+fn a_strip_is_renamed_from_its_drawer_title() {
+    let type_name = |h: &mut Driven, end: egui::Key| {
+        click(h, "Rename");
+        h.press_key_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run_steps(2);
+        h.input_mut().events.push(egui::Event::Text("Desk".into()));
+        h.run_steps(2);
+        h.press_key(end);
+        h.run_steps(4);
+    };
+    let mut h = drawer(mixer::Strip::Input("line-in".into()));
+    type_name(&mut h, egui::Key::Escape);
+    assert!(sent_ops(&mut h).is_empty());
+    assert!(shown(&h, "Line-in"));
+    type_name(&mut h, egui::Key::Enter);
+    match sent_ops(&mut h).as_slice() {
+        [MixerOp::PutInput { input }] => {
+            let was = &sample_mixer().file.live.inputs[1];
+            assert_eq!((input.label.as_str(), &input.id), ("Desk", &was.id));
+            assert_eq!((&input.kind, &input.routes), (&was.kind, &was.routes));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(shown(&h, "Desk") && !shown(&h, "Line-in"));
+}
+
+/// The drawer has each control once: no name row, no second remove, and a
+/// lone device has no balance, mute or remove of its own.
+#[test]
+fn the_drawer_shows_each_control_once() {
+    use egui_kittest::kittest::Queryable;
+    let h = drawer(mixer::Strip::Input("line-in".into()));
+    for there in ["Device", "Jack", "Input gain", "+ Merge another device"] {
+        assert_eq!(h.query_all_by_label(there).count(), 1, "{there}");
+    }
+    for gone in [
+        "Name",
+        "Remove input",
+        "Remove",
+        "Mix balance",
+        "Remove this device",
+        "Headset dial",
+        "Scenes",
+    ] {
+        assert!(!shown(&h, gone), "{gone}");
+    }
+    // Two devices: a balance and a remove each.
+    let h = drawer(mixer::Strip::Input("voice".into()));
+    assert!(shown(&h, "Devices") && !shown(&h, "Device"));
+    assert_eq!(h.query_all_by_label("Mix balance").count(), 2);
+    assert_eq!(h.query_all_by_label("Remove this device").count(), 2);
+    // A virtual input: what apps see, and the dial.
+    let h = drawer(mixer::Strip::Input("game".into()));
+    assert!(shown(&h, "Shown to apps as") && shown(&h, "hako Game"));
+    assert!(shown(&h, "Headset dial") && !shown(&h, "Device"));
+    // Outputs: the strip's Mono button is the only mono.
+    let h = drawer(mixer::Strip::Output("A2".into()));
+    assert!(shown(&h, "Device") && !shown(&h, "Mono") && !shown(&h, "Remove output"));
+    let h = drawer(mixer::Strip::Output("B1".into()));
+    assert!(shown(&h, "Shown to apps as") && shown(&h, "hako Mic"));
+}
+
+/// A merged device's balance goes back to 0 dB on a double-click.
+#[test]
+fn double_clicking_a_mix_balance_resets_it() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = drawer(mixer::Strip::Input("voice".into()));
+    // The second device's slider (-3 dB in the sample), a quarter along.
+    let slider = h
+        .get_all_by_role(egui::accesskit::Role::Slider)
+        .nth(1)
+        .and_then(|n| n.bounding_box())
+        .expect("two mix balance sliders");
+    let at = egui::pos2(
+        (slider.x0 + (slider.x1 - slider.x0) * 0.25) as f32,
+        ((slider.y0 + slider.y1) / 2.0) as f32,
+    );
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    h.run_steps(2);
+    // Both clicks inside one frame: well within the double-click time.
+    for pressed in [true, false, true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        });
+    }
+    h.run_steps(4);
+    let ops = sent_ops(&mut h);
+    assert_eq!(
+        ops.last(),
+        Some(&MixerOp::SetSourceTrim {
+            input: "voice".into(),
+            source: 1,
+            trim_db: 0.0,
+        }),
+        "{ops:?}"
+    );
+}
+
+/// The profile menu: update the current profile under its own name, and
+/// delete one only after the question.
+#[test]
+fn the_profile_menu_updates_and_deletes_with_confirmation() {
+    let mut st = sample_state();
+    st.profiles = vec!["Default".into(), "FPS".into(), "Late night".into()];
+    st.last_profile = Some("FPS".into());
+    let mut h = drive(HakoAppUi {
+        state: Some(st),
+        daemon_error: None,
+        ..Default::default()
+    });
+    let open = |h: &mut Driven| {
+        h.ctx
+            .memory_mut(|m| m.open_popup(egui::Id::new("profile_popup")));
+        h.run_steps(3);
+    };
+    open(&mut h);
+    assert!(shown(
+        &h,
+        "Profiles save device settings and the mixer layout."
+    ));
+    click(&mut h, "Update “FPS”");
+    assert!(matches!(sent(&mut h).as_slice(), [UiCommand::SaveProfile(n)] if n == "FPS"));
+    open(&mut h);
+    click(&mut h, "Delete Late night");
+    assert!(shown(&h, "Delete profile “Late night”?"));
+    assert!(sent(&mut h).is_empty());
+    click(&mut h, "Cancel");
+    assert!(sent(&mut h).is_empty());
+    open(&mut h);
+    click(&mut h, "Delete Late night");
+    click(&mut h, "Delete");
+    assert!(matches!(sent(&mut h).as_slice(), [UiCommand::DeleteProfile(n)] if n == "Late night"));
+    assert!(!shown(&h, "Delete profile “Late night”?"));
+    // No profile selected: nothing to update.
+    h.state_mut().0.state.as_mut().unwrap().last_profile = None;
+    open(&mut h);
+    assert!(!shown(&h, "Update “FPS”"));
+}
+
+/// With the mixer on, the headset's ChatMix card points at the mixer
+/// instead of naming sinks that are no longer the way in.
+#[test]
+fn the_chatmix_card_follows_the_mixer() {
+    let headset = |mixer: Option<hako_core::mixer::MixerState>| {
+        let mut app = mixer_app(mixer);
+        app.show_mixer = false;
+        app.selected = Some(sample_state().devices[2].id.clone());
+        drive(app)
+    };
+    let mut off = sample_mixer();
+    off.file.enabled = false;
+    for mixer in [None, Some(off)] {
+        let h = headset(mixer);
+        assert!(shown(&h, controls::chatmix_hint(false)));
+        assert!(!shown(&h, "Open Mixer"));
+    }
+    assert!(controls::chatmix_hint(false).contains("Hako_Game"));
+    assert!(!controls::chatmix_hint(true).contains("Hako_"));
+    let mut h = headset(Some(sample_mixer()));
+    assert!(shown(&h, controls::chatmix_hint(true)));
+    click(&mut h, "Open Mixer");
+    let (app, out) = h.state();
+    assert!(app.show_mixer);
+    assert!(matches!(out.as_slice(), [UiCommand::GetMixer]), "{out:?}");
+}
+
 // ── README screenshots ───────────────────────────────────────────
 
 /// Bottom of the page content: the last row right of the rail that differs
@@ -1555,18 +1924,11 @@ fn snapshot_readme() {
     };
     let mut state: HubState = serde_json::from_str(&read("HAKO_UI_STATE")).unwrap();
     let settings: AppSettings = serde_json::from_str(&read("HAKO_UI_CONFIG")).unwrap();
-    // Staged where a live setup is sparse: line-in on so its chain shows,
-    // sample bindings on the keyboard, no leftover device warnings.
+    // Staged where a live setup is sparse: sample bindings on the keyboard,
+    // no leftover device warnings.
     for d in &mut state.devices {
         d.last_error = None;
-        if d.settings.contains_key(SettingKey::AuxEnabled.as_str()) {
-            d.settings.insert(
-                SettingKey::AuxEnabled.as_str().into(),
-                SettingValue::Bool(true),
-            );
-        }
     }
-    state.audio.aux_active = true;
     state.audio.last_error = None;
     let find = |k: DeviceKind| {
         state
@@ -1639,11 +2001,6 @@ fn snapshot_readme() {
     save(
         "chatmix",
         page(&headset, Tab::Audio, 0, "onyx", 900.0),
-        None,
-    );
-    save(
-        "line-in",
-        page(&headset, Tab::LineIn, 0, "onyx", 1200.0),
         None,
     );
 
