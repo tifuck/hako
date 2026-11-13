@@ -108,8 +108,13 @@ pub enum InputKind {
     /// Capture devices, each with its own trim, summed before the chain.
     Hardware { sources: Vec<Source> },
     /// A sink apps can play into, named `node_name` (e.g. `Hako_Game`), shown
-    /// to apps as the input's label.
-    Virtual { node_name: String },
+    /// to apps as the input's label. The playback streams of `apps` (by
+    /// [`MixerStatus::apps`] name) are moved into it while it runs.
+    Virtual {
+        node_name: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        apps: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -486,6 +491,7 @@ impl Scene {
             }
         }
         let mut input_ids = HashSet::new();
+        let mut apps = HashSet::new();
         for i in &self.inputs {
             validate_id(&i.id)?;
             if !input_ids.insert(i.id.as_str()) {
@@ -527,10 +533,28 @@ impl Scene {
                         }
                     }
                 }
-                InputKind::Virtual { node_name } => {
+                InputKind::Virtual {
+                    node_name,
+                    apps: captured,
+                } => {
                     validate_node_name(node_name)?;
                     if !created.insert(node_name.as_str()) {
                         return Err(format!("node name {node_name:?} used twice"));
+                    }
+                    if captured.len() > MAX_SOURCES {
+                        return Err(format!("input {}: at most {MAX_SOURCES} apps", i.id));
+                    }
+                    for app in captured {
+                        if app.trim().is_empty()
+                            || app.chars().count() > 128
+                            || app.chars().any(char::is_control)
+                        {
+                            return Err(format!("invalid app name {app:?}"));
+                        }
+                        // Two inputs would take the stream from each other.
+                        if !apps.insert(app.as_str()) {
+                            return Err(format!("{app} is captured by two inputs"));
+                        }
                     }
                 }
             }
@@ -752,6 +776,10 @@ pub struct MixerStatus {
     /// Capture devices and sinks an input / output can use.
     #[serde(default)]
     pub devices: Vec<AudioDevice>,
+    /// Apps playing audio now (`application.name`, else the binary), for
+    /// a virtual input's `apps`.
+    #[serde(default)]
+    pub apps: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -945,6 +973,36 @@ mod tests {
     }
 
     #[test]
+    fn an_app_is_captured_by_one_input_at_most() {
+        let virt = |id: &str, node: &str, apps: &[&str]| Input {
+            kind: InputKind::Virtual {
+                node_name: node.into(),
+                apps: apps.iter().map(|a| (*a).into()).collect(),
+            },
+            ..hw(id, &[], &[])
+        };
+        let mut m = sample();
+        m.apply(&MixerOp::PutInput {
+            input: virt("music", "Hako_Music", &["Spotify", "Brave"]),
+        })
+        .unwrap();
+        let err = m
+            .apply(&MixerOp::PutInput {
+                input: virt("web", "Hako_Web", &["Brave"]),
+            })
+            .unwrap_err();
+        assert!(err.contains("two inputs"), "{err}");
+        for bad in ["", " ", "a\nb"] {
+            let input = virt("x", "Hako_X", &[bad]);
+            assert!(m.apply(&MixerOp::PutInput { input }).is_err(), "{bad:?}");
+        }
+        let text = toml::to_string_pretty(&m).unwrap();
+        assert_eq!(toml::from_str::<MixerFile>(&text).unwrap(), m);
+        // Without apps the file reads as before.
+        assert_eq!(text.matches("apps =").count(), 1, "{text}");
+    }
+
+    #[test]
     fn ids_names_and_ranges_are_checked() {
         let mut bad = sample();
         bad.live.outputs[1].id = "A2".into();
@@ -1122,6 +1180,7 @@ mod tests {
                     capture: true,
                     capture_now: None,
                 }],
+                apps: vec!["Spotify".into()],
             },
         };
         let json = serde_json::to_string(&state).unwrap();

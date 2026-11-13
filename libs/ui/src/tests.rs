@@ -1137,6 +1137,7 @@ fn sample_mixer() -> hako_core::mixer::MixerState {
     };
     let virt = |node: &str| InputKind::Virtual {
         node_name: node.into(),
+        apps: Vec::new(),
     };
     let output = |id: &str, label: &str, kind, chain, gain_db| Output {
         id: id.into(),
@@ -1274,6 +1275,7 @@ fn sample_mixer() -> hako_core::mixer::MixerState {
                 strip: "A2".into(),
                 message: "MG-XU Digital is unplugged".into(),
             }],
+            apps: vec!["Brave".into(), "Spotify".into()],
             devices: vec![
                 device(
                     "alsa_input.arctis-mic",

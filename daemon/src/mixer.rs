@@ -13,7 +13,9 @@
 
 use crate::drivers::EventTx;
 use anyhow::Result;
-use hako_audio::mixer::{devices, starter_scene, Detected, MixerGraph, Naming, Side, StripKey};
+use hako_audio::mixer::{
+    apps, devices, starter_scene, Detected, MixerGraph, Naming, Side, StripKey,
+};
 use hako_audio::{AudioService, CHATMIX_GAME};
 use hako_core::catalog::SettingKey;
 use hako_core::config::{
@@ -589,7 +591,7 @@ impl Actor {
         let live = &self.file.live;
         self.graph.reconcile(live, self.dial);
         let game = live.inputs.iter().any(|i| {
-            matches!(&i.kind, InputKind::Virtual { node_name } if node_name == CHATMIX_GAME)
+            matches!(&i.kind, InputKind::Virtual { node_name, .. } if node_name == CHATMIX_GAME)
                 && self
                     .graph
                     .meter_node(&(Side::Input, i.id.clone()))
@@ -608,7 +610,7 @@ impl Actor {
         let live = &self.file.live;
         let mut created: Vec<&str> = self.graph.node_names();
         created.extend(live.inputs.iter().filter_map(|i| match &i.kind {
-            InputKind::Virtual { node_name } => Some(node_name.as_str()),
+            InputKind::Virtual { node_name, .. } => Some(node_name.as_str()),
             InputKind::Hardware { .. } => None,
         }));
         created.extend(live.outputs.iter().filter_map(|o| match &o.kind {
@@ -621,6 +623,7 @@ impl Actor {
             devices: devices(&created)
                 .map(|(list, _)| list.into_iter().map(|d| d.device).collect())
                 .unwrap_or_default(),
+            apps: apps().unwrap_or_default(),
         };
         *lock(&self.shared.meters) = live
             .inputs

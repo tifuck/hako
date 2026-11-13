@@ -264,6 +264,7 @@ fn test_mixer(prefix: &str, latency: u32) -> Result<(MixerGraph, String, String,
             label: "latency test".into(),
             kind: InputKind::Virtual {
                 node_name: sink.clone(),
+                apps: Vec::new(),
             },
             chain: default_chain(),
             gain_db: 0.0,

@@ -1813,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "hako"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -1828,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "hako-audio"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "hako-core",
@@ -1840,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "hako-core"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "hako-ui"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "egui",
  "egui_extras",
@@ -1864,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "hakod"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "clap",

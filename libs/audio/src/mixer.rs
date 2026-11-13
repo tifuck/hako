@@ -20,8 +20,13 @@
 //! A hardware source may also set its ALSA card's input selection and
 //! capture level (a line-in jack); the card's previous input comes back when
 //! the source goes or the graph is torn down.
+//!
+//! A virtual input's apps: their playback streams are pointed at its sink
+//! (`target.object` metadata, as pavucontrol moves a stream) while the strip
+//! runs, and handed back to WirePlumber when the app, the strip or the graph
+//! goes.
 
-use crate::engine::{engine, fader_pod, params_pod, Direction, Engine, Graph, LinkHandle};
+use crate::engine::{engine, fader_pod, params_pod, Direction, Engine, Graph, LinkHandle, Node};
 use crate::{
     alsa_card, capture_level, card_capture_controls, current_input_source, db_to_gain, dsp_stages,
     effect_params, filter_chain_config, lsp_for, node_latency, pkill, pw_escape,
@@ -35,7 +40,7 @@ use hako_core::mixer::{
 };
 use hako_core::AuxConfig;
 use regex::Regex;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Mutex;
@@ -165,7 +170,7 @@ fn strip_defs(
     for input in &scene.inputs {
         let playback = format!("{}in_{}", naming.nodes, input.id);
         let (capture, sink, trims) = match &input.kind {
-            InputKind::Virtual { node_name } => (node_name.clone(), true, Vec::new()),
+            InputKind::Virtual { node_name, .. } => (node_name.clone(), true, Vec::new()),
             InputKind::Hardware { sources } if sources.is_empty() => {
                 problems.push(problem(&input.id, "no source selected"));
                 continue;
@@ -568,6 +573,38 @@ pub fn device_list(graph: &Graph, created: &[&str]) -> Vec<DeviceInfo> {
         .collect()
 }
 
+/// The app a playback stream belongs to, as [`MixerStatus::apps`] lists it
+/// (not hako's own streams, nor ones that asked not to be moved).
+///
+/// [`MixerStatus::apps`]: hako_core::mixer::MixerStatus::apps
+fn app_name(node: &Node) -> Option<&str> {
+    if node.media_class != "Stream/Output/Audio"
+        || is_hako_node(&node.name)
+        || node
+            .props
+            .get("node.dont-move")
+            .is_some_and(|v| v == "true")
+    {
+        return None;
+    }
+    ["application.name", "application.process.binary"]
+        .iter()
+        .find_map(|key| node.props.get(*key))
+        .map(String::as_str)
+        .filter(|name| !name.trim().is_empty())
+}
+
+/// Apps with a playback stream in `graph`, sorted, once each.
+pub fn app_list(graph: &Graph) -> Vec<String> {
+    let apps: BTreeSet<&str> = graph.nodes.values().filter_map(app_name).collect();
+    apps.into_iter().map(str::to_string).collect()
+}
+
+/// [`app_list`] of the live graph.
+pub fn apps() -> Result<Vec<String>> {
+    Ok(engine()?.with_graph(app_list))
+}
+
 /// The live graph's devices (see [`device_list`]; capture devices with the
 /// input selection and capture level of their ALSA card) and its default sink.
 pub fn devices(created: &[&str]) -> Result<(Vec<DeviceInfo>, Option<String>)> {
@@ -697,6 +734,7 @@ pub fn starter_scene(d: &Detected) -> Scene {
             label,
             InputKind::Virtual {
                 node_name: node.into(),
+                apps: Vec::new(),
             },
             a1(&["A1"]),
         )
@@ -809,6 +847,43 @@ struct OwnedLink {
     made: Instant,
 }
 
+/// An app's stream pointed at a virtual input's sink.
+#[derive(Debug, Clone, PartialEq)]
+struct Moved {
+    /// `object.serial`: ids are reused, serials are not.
+    serial: Option<String>,
+    sink: String,
+}
+
+fn serial(node: &Node) -> Option<String> {
+    node.props.get("object.serial").cloned()
+}
+
+/// The streams `scene`'s running virtual inputs (`up`: their ids) take:
+/// stream id -> (its target, the input).
+fn wanted_apps(scene: &Scene, up: &[&str], graph: &Graph) -> BTreeMap<u32, (Moved, String)> {
+    let mut sinks = HashMap::new();
+    for input in scene.inputs.iter().filter(|i| up.contains(&i.id.as_str())) {
+        if let InputKind::Virtual { node_name, apps } = &input.kind {
+            for app in apps {
+                sinks.insert(app.as_str(), (node_name, &input.id));
+            }
+        }
+    }
+    graph
+        .nodes
+        .iter()
+        .filter_map(|(&id, node)| {
+            let (sink, input) = sinks.get(app_name(node)?)?;
+            let moved = Moved {
+                serial: serial(node),
+                sink: sink.to_string(),
+            };
+            Some((id, (moved, input.to_string())))
+        })
+        .collect()
+}
+
 /// `(Source::alsa_input, Source::capture_percent)`.
 type CardWant = (Option<String>, Option<u8>);
 
@@ -868,6 +943,8 @@ pub struct MixerGraph {
     links: HashMap<(End, End), OwnedLink>,
     /// Capture cards set for sources, by node name.
     cards: BTreeMap<String, CardClaim>,
+    /// App streams moved into virtual inputs, by stream id.
+    moved: BTreeMap<u32, Moved>,
     problems: Vec<StripProblem>,
     running: bool,
 }
@@ -881,6 +958,7 @@ impl MixerGraph {
             strips: BTreeMap::new(),
             links: HashMap::new(),
             cards: BTreeMap::new(),
+            moved: BTreeMap::new(),
             problems: Vec::new(),
             running: false,
         }
@@ -1024,6 +1102,7 @@ impl MixerGraph {
         }
 
         self.sync_links(engine, scene, &mut problems);
+        self.sync_apps(engine, scene, &mut problems);
         let wanted = wanted_cards(scene);
         let present: HashMap<String, (u32, String)> = engine.with_graph(|graph| {
             wanted
@@ -1227,6 +1306,65 @@ impl MixerGraph {
         }
     }
 
+    /// Point the streams of the running virtual inputs' apps at their sinks
+    /// (new streams, a strip that came back); hand back the ones no input
+    /// takes any more.
+    fn sync_apps(&mut self, engine: &Engine, scene: &Scene, problems: &mut Vec<StripProblem>) {
+        let up: Vec<&str> = self
+            .strips
+            .iter()
+            .filter(|((side, _), s)| *side == Side::Input && s.up())
+            .map(|((_, id), _)| id.as_str())
+            .collect();
+        let (wanted, release) = engine.with_graph(|graph| {
+            let wanted = wanted_apps(scene, &up, graph);
+            let release: Vec<u32> = self
+                .moved
+                .iter()
+                .filter(|(id, m)| wanted.get(id).is_none_or(|(w, _)| w != *m))
+                .filter(|(id, m)| graph.nodes.get(id).is_some_and(|n| serial(n) == m.serial))
+                .map(|(&id, _)| id)
+                .collect();
+            (wanted, release)
+        });
+        for id in release {
+            if let Err(e) = engine.set_target(id, None) {
+                warn!("mixer: handing back stream {id}: {e:#}");
+            }
+        }
+        self.moved
+            .retain(|id, m| wanted.get(id).is_some_and(|(w, _)| w == m));
+        for (id, (moved, input)) in wanted {
+            if self.moved.contains_key(&id) {
+                continue;
+            }
+            match engine.set_target(id, Some(&moved.sink)) {
+                Ok(()) => {
+                    self.moved.insert(id, moved);
+                }
+                Err(e) => problems.push(problem(&input, format!("moving an app here: {e:#}"))),
+            }
+        }
+    }
+
+    /// Give every moved stream back to WirePlumber.
+    fn release_apps(&mut self) {
+        let moved = std::mem::take(&mut self.moved);
+        if moved.is_empty() {
+            return;
+        }
+        let Ok(engine) = engine() else {
+            return;
+        };
+        for (id, m) in moved {
+            let there =
+                engine.with_graph(|g| g.nodes.get(&id).is_some_and(|n| serial(n) == m.serial));
+            if there {
+                let _ = engine.set_target(id, None);
+            }
+        }
+    }
+
     /// Apply the capture card settings sources want (`present`: node ->
     /// (PipeWire id, ALSA card) of the nodes there), give back the cards no
     /// source wants any more. Each change runs `amixer` once; a failure is
@@ -1344,6 +1482,7 @@ impl MixerGraph {
     /// input selection back.
     pub fn teardown(&mut self) {
         self.release_cards();
+        self.release_apps();
         self.links.clear();
         let names: Vec<String> = self.node_names().iter().map(|n| n.to_string()).collect();
         for strip in self.strips.values_mut() {
@@ -1363,6 +1502,7 @@ impl MixerGraph {
 impl Drop for MixerGraph {
     fn drop(&mut self) {
         self.release_cards();
+        self.release_apps();
         self.links.clear();
         for strip in self.strips.values_mut() {
             strip.stop();
@@ -1405,6 +1545,7 @@ mod tests {
                         "Game",
                         InputKind::Virtual {
                             node_name: "hako-test-game".into(),
+                            apps: Vec::new(),
                         },
                         vec!["A1".into()],
                     )
@@ -1723,6 +1864,7 @@ mod tests {
         let mut after = before.clone();
         after.inputs[0].kind = InputKind::Virtual {
             node_name: "hako-test-other".into(),
+            apps: Vec::new(),
         };
         assert_eq!(step(&after, "game"), Some(Step::Build));
         let mut after = before.clone();
@@ -1821,6 +1963,64 @@ mod tests {
         graph
     }
 
+    /// Apps are playback streams by app name (else binary), once each; not
+    /// hako's own, nor ones that must not move. Only running inputs take them.
+    #[test]
+    fn apps_are_named_streams_and_go_to_running_inputs() {
+        let graph = graph_with(&[
+            (
+                "spotify",
+                "Stream/Output/Audio",
+                &[("application.name", "Spotify")],
+            ),
+            (
+                "spotify",
+                "Stream/Output/Audio",
+                &[("application.name", "Spotify")],
+            ),
+            (
+                "Brave",
+                "Stream/Output/Audio",
+                &[("application.process.binary", "brave")],
+            ),
+            (
+                "hako_in_game",
+                "Stream/Output/Audio",
+                &[("application.name", "hako")],
+            ),
+            (
+                "pinned",
+                "Stream/Output/Audio",
+                &[("application.name", "Pinned"), ("node.dont-move", "true")],
+            ),
+            ("obs", "Stream/Input/Audio", &[("application.name", "OBS")]),
+        ]);
+        assert_eq!(app_list(&graph), ["Spotify", "brave"]);
+
+        let music = input(
+            "music",
+            "Music",
+            InputKind::Virtual {
+                node_name: "Hako_Music".into(),
+                apps: vec!["Spotify".into(), "Pinned".into()],
+            },
+            Vec::new(),
+        );
+        let scene = Scene {
+            inputs: vec![music],
+            outputs: Vec::new(),
+        };
+        let wanted = wanted_apps(&scene, &["music"], &graph);
+        assert_eq!(wanted.keys().copied().collect::<Vec<_>>(), [1, 2]);
+        assert!(wanted
+            .values()
+            .all(|(m, i)| m.sink == "Hako_Music" && i == "music"));
+        assert!(
+            wanted_apps(&scene, &[], &graph).is_empty(),
+            "strip down: left alone"
+        );
+    }
+
     #[test]
     fn device_list_skips_hakos_own_nodes() {
         let graph = graph_with(&[
@@ -1916,7 +2116,8 @@ mod tests {
         assert_eq!(
             scene.inputs[0].kind,
             InputKind::Virtual {
-                node_name: "Hako_Game".into()
+                node_name: "Hako_Game".into(),
+                apps: Vec::new(),
             }
         );
         assert_eq!(scene.inputs[0].chatmix, Some(ChatMixSide::Game));
@@ -2084,7 +2285,8 @@ mod tests {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
-    /// `pw-cli` holding null devices named `hako-test-mix-<pid>-*` (gone with it).
+    /// `pw-cli` holding null devices named `hako-test-mix-<pid>-*` (gone with
+    /// it), or another test process; killed on drop.
     struct TestDevices(Child);
 
     impl TestDevices {
@@ -2161,6 +2363,7 @@ mod tests {
                 "Test A",
                 InputKind::Virtual {
                     node_name: sink.clone(),
+                    apps: Vec::new(),
                 },
                 Vec::new(),
             )],
@@ -2213,6 +2416,107 @@ mod tests {
         }
     }
 
+    /// Whether the `default` metadata points stream `id` somewhere.
+    fn has_target(id: u32) -> bool {
+        let out = Command::new("pw-metadata")
+            .args(["-n", "default"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains(&format!("id:{id} key:'target.object'"))
+    }
+
+    /// A virtual input takes its app's stream (from wherever it played)
+    /// while it runs, again after a rebuild, and hands it back when the app
+    /// is dropped and at teardown.
+    #[test]
+    #[ignore = "needs a running PipeWire session with WirePlumber (pw-cat, pw-metadata)"]
+    fn live_virtual_input_takes_an_app_s_stream() {
+        let prefix = format!("hako-test-app-{}-", std::process::id());
+        // Not hako-named: hako's own streams are never apps.
+        let (sink, app) = (
+            format!("{prefix}va"),
+            format!("test-player-{}", std::process::id()),
+        );
+        let virt = |apps: Vec<String>| InputKind::Virtual {
+            node_name: sink.clone(),
+            apps,
+        };
+        let mut scene = Scene {
+            inputs: vec![input("a", "Test A", virt(vec![app.clone()]), Vec::new())],
+            outputs: Vec::new(),
+        };
+        let mut graph = MixerGraph::new(
+            Naming {
+                nodes: prefix.clone(),
+                files: prefix.clone(),
+                args: "node.group = \"pipewire.dummy\"".into(),
+            },
+            256,
+        );
+        // Silence: harmless wherever WirePlumber plays it first. Killed on drop.
+        let _player = TestDevices(
+            Command::new("pw-cat")
+                .args([
+                    "-p",
+                    "--raw",
+                    "--format",
+                    "s16",
+                    "--rate",
+                    "48000",
+                    "--channels",
+                    "2",
+                ])
+                .arg("-P")
+                .arg(format!(
+                    "{{ application.name={app} node.name={app} state.restore-props=false }}"
+                ))
+                .arg("-")
+                .stdin(std::fs::File::open("/dev/zero").unwrap())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let engine = engine().unwrap();
+        let stream = || engine.with_graph(|g| g.node_id(&app));
+        engine
+            .wait_for(Duration::from_secs(4), |g| Ok(g.node_id(&app).is_some()))
+            .unwrap();
+        assert!(apps().unwrap().contains(&app));
+        let into_ours = |want: bool| {
+            let link = (format!("{app}:output_FL"), format!("{sink}:playback_FL"));
+            engine
+                .wait_for(Duration::from_secs(4), |g| {
+                    Ok(g.link_names().contains(&link) == want)
+                })
+                .unwrap()
+        };
+
+        graph.reconcile(&scene, (1.0, 1.0));
+        assert!(graph.problems().is_empty(), "{:?}", graph.problems());
+        assert!(into_ours(true), "moved into the input");
+        let id = stream().unwrap();
+        assert!(has_target(id));
+
+        // A rebuilt strip (new label) gets it back.
+        scene.inputs[0].label = "Test B".into();
+        graph.reconcile(&scene, (1.0, 1.0));
+        assert!(into_ours(true), "back after a rebuild");
+
+        // Dropped from the input: handed back to WirePlumber.
+        scene.inputs[0].kind = virt(Vec::new());
+        graph.reconcile(&scene, (1.0, 1.0));
+        assert!(into_ours(false), "handed back");
+        assert!(!has_target(id));
+
+        scene.inputs[0].kind = virt(vec![app.clone()]);
+        graph.reconcile(&scene, (1.0, 1.0));
+        assert!(into_ours(true));
+        graph.teardown();
+        assert!(!has_target(id), "teardown hands it back");
+        assert!(stream().is_some(), "the app kept playing");
+    }
+
     fn test_objects(prefix: &str) -> usize {
         let dump = Command::new("pw-dump").output().unwrap();
         String::from_utf8_lossy(&dump.stdout)
@@ -2239,6 +2543,7 @@ mod tests {
                     "Test A",
                     InputKind::Virtual {
                         node_name: name("va"),
+                        apps: Vec::new(),
                     },
                     vec!["A1".into(), "B1".into()],
                 ),

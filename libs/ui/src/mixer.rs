@@ -138,7 +138,7 @@ pub fn new_input_id(label: &str, inputs: &[Input]) -> String {
 /// Node names hako creates in `scene` (virtual inputs and outputs).
 fn created_nodes(scene: &Scene) -> HashSet<&str> {
     let inputs = scene.inputs.iter().filter_map(|i| match &i.kind {
-        InputKind::Virtual { node_name } => Some(node_name.as_str()),
+        InputKind::Virtual { node_name, .. } => Some(node_name.as_str()),
         InputKind::Hardware { .. } => None,
     });
     let outputs = scene.outputs.iter().filter_map(|o| match &o.kind {
@@ -1474,12 +1474,15 @@ fn input_drawer(
         |ui| {
             problem_line(ui, st, &i.id);
             match &i.kind {
-                InputKind::Virtual { node_name } => shown_row(
-                    ui,
-                    &i.label,
-                    node_name,
-                    "Pick this as the output in a game, a call or a music app",
-                ),
+                InputKind::Virtual { node_name, apps } => {
+                    shown_row(
+                        ui,
+                        &i.label,
+                        node_name,
+                        "Pick this as the output in a game, a call or a music app",
+                    );
+                    apps_row(ui, i, apps, st, edits);
+                }
                 InputKind::Hardware { sources } => {
                     if device_rows(i) == DeviceRows::Merged {
                         ui.add_space(theme::SPACE_SM);
@@ -1531,6 +1534,74 @@ fn input_drawer(
         },
         edits,
     );
+}
+
+/// Apps playing now that no input but `except` takes (an app plays into one).
+pub(crate) fn free_apps<'a>(st: &'a MixerState, except: &str) -> Vec<&'a str> {
+    let taken: HashSet<&str> = st
+        .file
+        .live
+        .inputs
+        .iter()
+        .filter(|i| i.id != except)
+        .flat_map(|i| match &i.kind {
+            InputKind::Virtual { apps, .. } => apps.as_slice(),
+            InputKind::Hardware { .. } => &[],
+        })
+        .map(String::as_str)
+        .collect();
+    st.status
+        .apps
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !taken.contains(a))
+        .collect()
+}
+
+/// The input with `app` added (`on`) or removed.
+pub(crate) fn set_app(i: &Input, app: &str, on: bool) -> MixerOp {
+    let mut next = i.clone();
+    if let InputKind::Virtual { apps, .. } = &mut next.kind {
+        apps.retain(|a| a != app);
+        if on {
+            apps.push(app.to_string());
+        }
+    }
+    MixerOp::PutInput { input: next }
+}
+
+/// A virtual input's apps: their sound is moved into it.
+fn apps_row(ui: &mut Ui, i: &Input, apps: &[String], st: &MixerState, edits: &mut Vec<Edit>) {
+    let hint = "Their sound plays through this input, whatever output they picked";
+    widgets::row(ui, "Apps", Some(hint), |ui| {
+        let current = if apps.is_empty() {
+            "None".to_string()
+        } else {
+            apps.join(", ")
+        };
+        widgets::dropdown(("mixer_apps", &i.id), current, theme::DROPDOWN_W).show_ui(ui, |ui| {
+            let mut list: Vec<&str> = apps.iter().map(String::as_str).collect();
+            list.extend(
+                free_apps(st, &i.id)
+                    .into_iter()
+                    .filter(|a| !apps.iter().any(|x| x == a)),
+            );
+            if list.is_empty() {
+                widgets::hint(ui, "No app is playing sound");
+            }
+            for app in list {
+                let on = apps.iter().any(|a| a == app);
+                let text = if st.status.apps.iter().any(|a| a == app) {
+                    app.to_string()
+                } else {
+                    format!("{app} (not playing)")
+                };
+                if ui.selectable_label(on, text).clicked() {
+                    edits.push(Edit::Send(set_app(i, app, !on)));
+                }
+            }
+        });
+    });
 }
 
 /// Width at which a device's jack and input gain fit beside its dropdown.
@@ -1993,6 +2064,10 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
             Some(usize::from(*virt)),
         ) {
             *virt = k == 1;
+            // Devices and apps share the list of what was ticked.
+            if let Dialog::AddInput { picked, .. } = d {
+                picked.clear();
+            }
         }
         ui.add_space(theme::SPACE_SM);
         let mut create = None;
@@ -2032,8 +2107,31 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
                                 }
                             }
                         });
-                } else if valid_label(name) {
-                    widgets::hint(ui, &format!("Node name: {}", new_node_name(name, scene)));
+                } else {
+                    let apps = free_apps(st, "");
+                    if !apps.is_empty() {
+                        caption(ui, "Take the sound of these apps (optional)");
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for app in apps {
+                                let mut on = picked.iter().any(|p| p == app);
+                                if ui.checkbox(&mut on, app).changed() {
+                                    if on {
+                                        picked.push(app.to_string());
+                                        if name.trim().is_empty() {
+                                            *name = fit_label(app);
+                                        }
+                                    } else {
+                                        picked.retain(|p| p != app);
+                                    }
+                                }
+                            }
+                        });
+                    if valid_label(name) {
+                        widgets::hint(ui, &format!("Node name: {}", new_node_name(name, scene)));
+                    }
                 }
                 let ok = valid_label(name) && (*virt || !picked.is_empty());
                 if ok {
@@ -2041,6 +2139,7 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
                     let kind = if *virt {
                         InputKind::Virtual {
                             node_name: new_node_name(&label, scene),
+                            apps: picked.clone(),
                         }
                     } else {
                         InputKind::Hardware {
@@ -2298,6 +2397,7 @@ mod tests {
             label: id.into(),
             kind: InputKind::Virtual {
                 node_name: node.into(),
+                apps: Vec::new(),
             },
             chain: EffectChain::default(),
             gain_db: 0.0,
@@ -2341,6 +2441,23 @@ mod tests {
             MixerOp::PutInput { input } => input,
             other => panic!("{other:?}"),
         }
+    }
+
+    /// An app another input takes is not offered; ticking one adds or drops it.
+    #[test]
+    fn apps_are_offered_to_one_input_and_toggle() {
+        let mut st = MixerState::default();
+        st.status.apps = vec!["Brave".into(), "Spotify".into()];
+        let music = put(set_app(&virt_input("music", "Hako_Music"), "Spotify", true));
+        st.file.live.inputs = vec![music.clone(), virt_input("web", "Hako_Web")];
+        assert_eq!(free_apps(&st, "web"), ["Brave"]);
+        assert_eq!(free_apps(&st, "music"), ["Brave", "Spotify"]);
+        let both = put(set_app(&music, "Brave", true));
+        assert!(
+            matches!(&both.kind, InputKind::Virtual { apps, .. } if apps == &["Spotify", "Brave"])
+        );
+        let one = put(set_app(&both, "Spotify", false));
+        assert!(matches!(&one.kind, InputKind::Virtual { apps, .. } if apps == &["Brave"]));
     }
 
     /// One device: a "Device" row and nothing to balance. Two or more: the

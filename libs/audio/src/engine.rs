@@ -43,6 +43,11 @@ const BACKOFF_MIN: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// Metadata key `wpctl set-default` writes; WirePlumber follows it.
 const CONFIGURED_SINK: &str = "default.configured.audio.sink";
+/// Metadata key pavucontrol's "move" writes; WirePlumber links the stream
+/// to that node.
+/// ponytail: `target.object` only; session managers that read just
+/// `target.node` (pipewire-media-session) need that too.
+const TARGET: &str = "target.object";
 /// Linux `EPIPE`: the core error a lost connection reports.
 const EPIPE: i32 = 32;
 
@@ -283,6 +288,7 @@ enum Request {
     Unlink(u64),
     Destroy(u32, Reply),
     SetDefaultSink(String, Reply),
+    SetTarget(u32, Option<String>, Reply),
     SetProps(u32, Vec<u8>, Reply),
 }
 
@@ -293,6 +299,7 @@ impl Request {
             Request::Link { reply, .. }
             | Request::Destroy(_, reply)
             | Request::SetDefaultSink(_, reply)
+            | Request::SetTarget(_, _, reply)
             | Request::SetProps(_, _, reply) => reply,
         };
         let _ = reply.send(Err(message.to_string()));
@@ -428,6 +435,14 @@ impl Engine {
     pub fn set_default_sink(&self, name: &str) -> Result<()> {
         let name = name.to_string();
         self.request(|reply| Request::SetDefaultSink(name, reply))
+            .map(drop)
+    }
+
+    /// Move a playback stream to the node named `target`, or (`None`) give
+    /// it back to WirePlumber's choice.
+    pub fn set_target(&self, stream: u32, target: Option<&str>) -> Result<()> {
+        let target = target.map(str::to_string);
+        self.request(|reply| Request::SetTarget(stream, target, reply))
             .map(drop)
     }
 
@@ -739,6 +754,16 @@ impl Conn {
                             Some("Spa:String:JSON"),
                             Some(&value),
                         );
+                        Ok(0)
+                    }
+                    None => Err("no default metadata (is WirePlumber running?)".to_string()),
+                };
+                let _ = reply.send(result);
+            }
+            Request::SetTarget(stream, target, reply) => {
+                let result = match &self.bound.borrow().metadata {
+                    Some((_, _, metadata)) => {
+                        metadata.set_property(stream, TARGET, None, target.as_deref());
                         Ok(0)
                     }
                     None => Err("no default metadata (is WirePlumber running?)".to_string()),

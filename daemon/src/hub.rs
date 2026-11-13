@@ -1053,6 +1053,7 @@ mod tests {
             label: "Game".into(),
             kind: hako_core::mixer::InputKind::Virtual {
                 node_name: "hako-test-never-built-in".into(),
+                apps: Vec::new(),
             },
             chain: Default::default(),
             gain_db: -3.0,
