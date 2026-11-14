@@ -457,6 +457,35 @@ mod tests {
         let mut bad = peer();
         bad.address = Some("[::1]:47821".parse().unwrap());
         assert!(f.trust(bad).is_err(), "IPv6 address");
+
+        // `n` peers with distinct ids.
+        let peers = |n: usize| -> Vec<Peer> {
+            (0..n)
+                .map(|i| {
+                    let key = format!("{i:02x}{}", "0".repeat(62));
+                    Peer {
+                        id: peer_id(&key),
+                        key,
+                        ..peer()
+                    }
+                })
+                .collect()
+        };
+        let most = NetFile {
+            peers: peers(MAX_PEERS),
+            ..NetFile::default()
+        };
+        assert_eq!(most.validate(), Ok(()));
+        let invalid = |what: &str, change: &dyn Fn(&mut NetFile)| {
+            let mut f = most.clone();
+            change(&mut f);
+            assert!(f.validate().is_err(), "{what}");
+        };
+        invalid("one peer twice", &|f| f.peers[1] = f.peers[0].clone());
+        invalid("too many peers", &|f| f.peers = peers(MAX_PEERS + 1));
+        invalid("newer version", &|f| f.version = NET_VERSION + 1);
+        invalid("port 0", &|f| f.port = 0);
+        invalid("discovery port", &|f| f.port = DISCOVERY_PORT);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! flanger.
 
 use crate::dynamics::{flush, Smooth};
+use crate::pitch::sane_rate;
 use crate::Effect;
 use std::f32::consts::TAU;
 
@@ -185,6 +186,7 @@ pub struct Delay {
 
 impl Delay {
     pub fn new(rate: f32) -> Self {
+        let rate = sane_rate(rate);
         let max = (DELAY_MAX_MS / 1000.0 * rate).ceil() as usize;
         Self {
             rate,
@@ -241,6 +243,7 @@ pub struct Chorus {
 
 impl Chorus {
     pub fn new(rate: f32) -> Self {
+        let rate = sane_rate(rate);
         let max = ((CHORUS_BASE_MS + 10.0) / 1000.0 * rate).ceil() as usize + 1;
         Self {
             rate,
@@ -307,6 +310,7 @@ pub struct Flanger {
 
 impl Flanger {
     pub fn new(rate: f32) -> Self {
+        let rate = sane_rate(rate);
         let max = ((FLANGER_BASE_MS + 5.0) / 1000.0 * rate).ceil() as usize + 1;
         Self {
             rate,

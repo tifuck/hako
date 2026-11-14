@@ -1093,11 +1093,44 @@ mod tests {
 
     #[test]
     fn props_pods_serialize() {
-        let pod = volume_pod(0.125, 2).unwrap();
-        assert!(Pod::from_bytes(&pod).is_some_and(|pod| pod.is_object()));
-        let pod = params_pod(&[("fx0:Ratio".into(), 4.0)]).unwrap();
-        assert!(Pod::from_bytes(&pod).is_some_and(|pod| pod.is_object()));
-        let pod = fader_pod(0.5, true, 2).unwrap();
-        assert!(Pod::from_bytes(&pod).is_some_and(|pod| pod.is_object()));
+        use spa::pod::deserialize::PodDeserializer;
+        let props = |pod: &[u8]| -> Vec<(u32, Value)> {
+            let (_, value) = PodDeserializer::deserialize_any_from(pod).unwrap();
+            let Value::Object(object) = value else {
+                panic!("not an object: {value:?}")
+            };
+            assert_eq!(object.type_, spa::sys::SPA_TYPE_OBJECT_Props);
+            assert_eq!(object.id, spa::sys::SPA_PARAM_Props);
+            object
+                .properties
+                .into_iter()
+                .map(|p| (p.key, p.value))
+                .collect()
+        };
+        let volumes = |v: f32| Value::ValueArray(ValueArray::Float(vec![v; 2]));
+        assert_eq!(
+            props(&volume_pod(0.125, 2).unwrap()),
+            [(spa::sys::SPA_PROP_channelVolumes, volumes(0.125))]
+        );
+        assert_eq!(
+            props(&fader_pod(0.5, true, 2).unwrap()),
+            [
+                (spa::sys::SPA_PROP_channelVolumes, volumes(0.5)),
+                (spa::sys::SPA_PROP_mute, Value::Bool(true)),
+            ]
+        );
+        let params = [("fx0:Ratio".to_string(), 4.0), ("mix_l:Gain 1".into(), 0.5)];
+        assert_eq!(
+            props(&params_pod(&params).unwrap()),
+            [(
+                spa::sys::SPA_PROP_params,
+                Value::Struct(vec![
+                    Value::String("fx0:Ratio".into()),
+                    Value::Float(4.0),
+                    Value::String("mix_l:Gain 1".into()),
+                    Value::Float(0.5),
+                ])
+            )]
+        );
     }
 }

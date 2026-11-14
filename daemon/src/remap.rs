@@ -8,8 +8,8 @@
 
 use anyhow::Result;
 use evdev::{
-    uinput::VirtualDevice, AttributeSet, Device, EventSummary, EventType, InputEvent, KeyCode,
-    MiscCode, RelativeAxisCode, UinputAbsSetup,
+    uinput::VirtualDevice, AttributeSet, AttributeSetRef, Device, EventSummary, EventType,
+    InputEvent, KeyCode, MiscCode, RelativeAxisCode, UinputAbsSetup,
 };
 use hako_core::config::{load_remap_bindings, remap_config_path, save_remap_bindings, ConfigPaths};
 use hako_core::device::{DeviceId, DeviceKind};
@@ -526,6 +526,8 @@ struct Slot {
     retry: Instant,
     /// Grab attempts in a row that found a key held down.
     held_retries: u32,
+    /// Grabbed without a node another slot held ([`Pick::Shared`]).
+    left_shared: bool,
 }
 
 impl Slot {
@@ -662,6 +664,7 @@ impl Worker {
                             paths: Vec::new(),
                             retry: Instant::now(),
                             held_retries: 0,
+                            left_shared: false,
                         });
                     } else if self.slots[idx].id != id || self.slots[idx].kind != kind {
                         self.ungrab(idx);
@@ -765,18 +768,30 @@ impl Worker {
     }
 
     fn try_grab(&mut self, idx: usize, now: Instant) {
-        let mut excluded = 0;
+        let (mut excluded, mut shared) = (0, 0);
+        let held: Vec<PathBuf> = (self.slots.iter().enumerate())
+            .filter(|(i, _)| *i != idx)
+            .flat_map(|(_, s)| s.paths.iter().cloned())
+            .collect();
         // Only this device's nodes (sysfs): opening any evdev node that has
         // no other reader resumes an autosuspended USB device.
         let slot = &self.slots[idx];
         let nodes: Vec<(PathBuf, Device)> = event_nodes(slot.id.vendor_id, &slot.pids)
             .into_iter()
             .filter_map(|path| Device::open(&path).ok().map(|dev| (path, dev)))
-            .filter(|(_, dev)| {
-                let own = own_node(slot, dev);
-                let ok = own && forwards_all(dev);
-                excluded += usize::from(own && !ok);
-                ok
+            .filter(|(path, dev)| {
+                match pick(slot.kind, node_keys(slot, dev), held.contains(path)) {
+                    Pick::Grab => true,
+                    Pick::Unforwardable => {
+                        excluded += 1;
+                        false
+                    }
+                    Pick::Shared => {
+                        shared += 1;
+                        false
+                    }
+                    Pick::Other => false,
+                }
             })
             .collect();
         if nodes.is_empty() {
@@ -784,16 +799,8 @@ impl Worker {
             slot.retry = now + OPEN_RETRY;
             // Present but unreadable (no udev rule for this device), or
             // never grabbed: say so, or the bindings silently do nothing.
-            let msg = unreadable_message(&unreadable_nodes(slot.id.vendor_id, &slot.pids)).or_else(
-                || {
-                    (excluded > 0).then(|| {
-                        "Remaps cannot apply: this device's input also carries joystick, \
-                         gamepad or tablet codes the virtual device cannot forward, so it \
-                         is never grabbed."
-                            .to_string()
-                    })
-                },
-            );
+            let msg = unreadable_message(&unreadable_nodes(slot.id.vendor_id, &slot.pids))
+                .or_else(|| left_out_message(false, excluded, shared));
             if let Some(msg) = msg {
                 self.report(idx, msg);
             }
@@ -859,6 +866,7 @@ impl Worker {
             slot.paths.push(path);
         }
         slot.held_retries = 0;
+        slot.left_shared = shared > 0;
         info!(
             "grabbed {} evdev node(s) of {} for remaps",
             slot.nodes.len(),
@@ -866,7 +874,7 @@ impl Worker {
         );
         self.update(idx, |d| {
             d.grabbed = true;
-            d.last_error = None;
+            d.last_error = left_out_message(true, excluded, shared);
         });
     }
 
@@ -940,6 +948,13 @@ impl Worker {
         self.mapper.release_device(idx);
         self.flush();
         self.drop_nodes(idx);
+        // Whoever left a node to this slot grabs again to take it over.
+        for j in 0..self.slots.len() {
+            if self.slots[j].left_shared {
+                self.ungrab(j);
+                self.slots[j].retry = Instant::now();
+            }
+        }
         if self.slots.iter().all(|s| s.nodes.is_empty()) {
             // Nothing is grabbed: no count may outlive the device (e.g. after
             // a panic mid-update).
@@ -966,6 +981,7 @@ impl Worker {
         }
         slot.nodes.clear();
         slot.paths.clear();
+        slot.left_shared = false;
         info!("released {} from remaps", slot.id.key());
         self.update(idx, |d| d.grabbed = false);
     }
@@ -1283,35 +1299,77 @@ fn held_key<'a>(nodes: impl IntoIterator<Item = &'a Device>) -> Option<u16> {
 
 /// One of `slot`'s nodes that may be grabbed.
 fn node_matches(slot: &Slot, dev: &Device) -> bool {
-    own_node(slot, dev) && forwards_all(dev)
+    pick(slot.kind, node_keys(slot, dev), false) == Pick::Grab
 }
 
-/// A node with a key the virtual device cannot repeat (touchpad, joystick,
-/// gamepad) is never grabbed: those events would be lost.
-fn forwards_all(dev: &Device) -> bool {
-    dev.supported_keys()
-        .is_some_and(|keys| keys.iter().all(|k| forwardable(k.code())))
-}
-
-/// A node of `slot`'s device that carries its buttons / keys.
-fn own_node(slot: &Slot, dev: &Device) -> bool {
+/// The keys of a node of `slot`'s device (IDs from the node itself); `None`
+/// for any other node, the virtual device included.
+fn node_keys<'a>(slot: &Slot, dev: &'a Device) -> Option<&'a AttributeSetRef<KeyCode>> {
     if dev.name() == Some(VIRTUAL_NAME) {
-        return false;
+        return None;
     }
-    let Some(keys) = dev.supported_keys() else {
-        return false;
-    };
     let iid = dev.input_id();
     let same = iid.vendor() == slot.id.vendor_id && slot.pids.contains(&iid.product());
-    match slot.kind {
-        DeviceKind::Mouse => {
-            same && (keys.contains(KeyCode::BTN_LEFT) || keys.contains(KeyCode::BTN_SIDE))
+    dev.supported_keys().filter(|_| same)
+}
+
+/// What `try_grab` does with a node of the device.
+#[derive(Debug, PartialEq)]
+enum Pick {
+    Grab,
+    /// Carries the device's input, but also codes the virtual device
+    /// cannot repeat: never grabbed, those events would be lost.
+    Unforwardable,
+    /// Another slot holds it: devices on one receiver share its nodes, and
+    /// a second grab fails (EBUSY) on every retry.
+    Shared,
+    /// Not one carrying the device's buttons / keys.
+    Other,
+}
+
+/// `keys`: from [`node_keys`]; `held`: another slot has the node grabbed.
+fn pick(kind: DeviceKind, keys: Option<&AttributeSetRef<KeyCode>>, held: bool) -> Pick {
+    match keys {
+        Some(keys) if carries_input(kind, keys) => {
+            if !keys.iter().all(|k| forwardable(k.code())) {
+                Pick::Unforwardable
+            } else if held {
+                Pick::Shared
+            } else {
+                Pick::Grab
+            }
         }
+        _ => Pick::Other,
+    }
+}
+
+/// A node with these keys carries a `kind` device's buttons / keys.
+fn carries_input(kind: DeviceKind, keys: &AttributeSetRef<KeyCode>) -> bool {
+    match kind {
+        DeviceKind::Mouse => keys.contains(KeyCode::BTN_LEFT) || keys.contains(KeyCode::BTN_SIDE),
         // Every interface that emits keyboard / consumer keys (the Huntsman
         // splits keys across several); skips its pointer-only interface.
-        DeviceKind::Keyboard => same && keys.iter().any(|k| k.code() < 0x100 || k.code() >= 0x160),
+        DeviceKind::Keyboard => keys.iter().any(|k| k.code() < 0x100 || k.code() >= 0x160),
         _ => false,
     }
+}
+
+/// What to say about the device's nodes `try_grab` left out (counts of
+/// [`Pick::Unforwardable`] / [`Pick::Shared`]), given whether it grabbed
+/// any: bindings on keys of a left-out node silently do nothing.
+fn left_out_message(grabbed: bool, excluded: usize, shared: usize) -> Option<String> {
+    let why = if excluded > 0 {
+        "also carries joystick, gamepad or tablet codes the virtual device cannot forward"
+    } else if shared > 0 {
+        "comes through a receiver whose input another device's remaps already hold"
+    } else {
+        return None;
+    };
+    Some(if grabbed {
+        format!("Some keys cannot be remapped: part of this device's input {why}, so that part is never grabbed.")
+    } else {
+        format!("Remaps cannot apply: this device's input {why}, so it is never grabbed.")
+    })
 }
 
 /// Relative / absolute axes of grabbed nodes, so the virtual device can
@@ -1455,6 +1513,8 @@ struct Mapper {
     held: BTreeMap<u16, u32>,
     /// Unbound physical keys forwarded down: (slot index, code) -> presses.
     forwarded: BTreeMap<(usize, u16), u32>,
+    /// A slot's `MSC_SCAN`, held until the key event after it.
+    scan: HashMap<usize, InputEvent>,
     out: Vec<InputEvent>,
 }
 
@@ -1497,12 +1557,24 @@ impl Mapper {
         now: Instant,
     ) {
         let bind = match ev.destructure() {
+            // It precedes its key in the frame; a bound key's would announce
+            // the source key alongside the target's code.
+            EventSummary::Misc(_, MiscCode::MSC_SCAN, _) => {
+                if let Some(prev) = self.scan.insert(dev, ev) {
+                    self.out.push(prev);
+                }
+                return;
+            }
             EventSummary::Key(_, code, _) => bindings.get(&code.code()),
             _ => None,
         };
+        let scan = self.scan.remove(&dev);
         match bind {
             Some(b) => self.key(dev, b, ev.value(), now),
-            None => self.forward(dev, ev),
+            None => {
+                self.out.extend(scan);
+                self.forward(dev, ev);
+            }
         }
     }
 
@@ -1612,6 +1684,7 @@ impl Mapper {
     /// Release every key slot `dev` holds down (runners, taps, forwarded
     /// keys); keys other slots hold stay down.
     fn release_device(&mut self, dev: usize) {
+        self.scan.remove(&dev);
         self.stop_device(dev);
         self.release_forwarded(dev, |_| true);
     }
@@ -1621,6 +1694,7 @@ impl Mapper {
         self.runners.clear();
         self.taps.clear();
         self.forwarded.clear();
+        self.scan.clear();
         for k in std::mem::take(&mut self.held).into_keys() {
             self.out.push(InputEvent::new(EventType::KEY.0, k, 0));
         }
@@ -2093,6 +2167,7 @@ mod tests {
             paths: Vec::new(),
             retry: t0,
             held_retries: 0,
+            left_shared: false,
         };
         for _ in 1..HELD_REPORT_AFTER {
             assert!(!slot.key_held(t0));
@@ -2513,5 +2588,174 @@ mod tests {
         assert!(claims(0x046d, pids, &id(0x40a8)));
         assert!(!claims(0x046d, pids, &id(0xc52b)));
         assert!(!claims(0x1532, pids, &id(0x40a8)));
+    }
+
+    fn keyset(codes: &[u16]) -> AttributeSet<KeyCode> {
+        codes.iter().map(|&c| KeyCode::new(c)).collect()
+    }
+
+    #[test]
+    fn grab_picks_only_nodes_it_can_fully_forward() {
+        use DeviceKind::{Keyboard, Mouse};
+        let pick_ = |kind, codes: &[u16]| pick(kind, Some(&*keyset(codes)), false);
+        // KEY_A plus BTN_TRIGGER_HAPPY1 (gamepad) / BTN_TOUCH (touchpad).
+        assert_eq!(pick_(Keyboard, &[30, 0x2c0]), Pick::Unforwardable);
+        assert_eq!(pick_(Keyboard, &[30, 0x14a]), Pick::Unforwardable);
+        // BTN_0 (extra mouse buttons) is declared by the virtual device.
+        assert_eq!(pick_(Mouse, &[0x110, 0x100]), Pick::Grab);
+        assert_eq!(pick_(Keyboard, &[30, 0x100]), Pick::Grab);
+        // A keyboard's pointer-only interface is not its key node.
+        assert_eq!(pick_(Keyboard, &[0x110, 0x111, 0x112]), Pick::Other);
+        assert_eq!(pick_(Keyboard, &[0x163]), Pick::Grab); // consumer key
+                                                           // A mouse node needs BTN_LEFT or BTN_SIDE.
+        assert_eq!(pick_(Mouse, &[0x112]), Pick::Other);
+        assert_eq!(pick_(Mouse, &[0x113]), Pick::Grab);
+        assert_eq!(pick_(Mouse, &[30]), Pick::Other);
+        assert_eq!(pick(Mouse, None, false), Pick::Other);
+        assert_eq!(pick_(DeviceKind::Headset, &[30]), Pick::Other);
+    }
+
+    #[test]
+    fn a_receiver_node_another_slot_holds_is_left_to_it() {
+        // PRO 2 and a keyboard on one c543 receiver both list its nodes.
+        let keys = keyset(&[0x110, 0x111, 30]);
+        assert_eq!(pick(DeviceKind::Mouse, Some(&*keys), false), Pick::Grab);
+        assert_eq!(pick(DeviceKind::Keyboard, Some(&*keys), true), Pick::Shared);
+        // Codes it cannot forward still decide first.
+        let pad = keyset(&[30, 0x2c0]);
+        assert_eq!(
+            pick(DeviceKind::Keyboard, Some(&*pad), true),
+            Pick::Unforwardable
+        );
+        let msg = left_out_message(false, 0, 1).unwrap();
+        assert!(msg.contains("another device's remaps"), "{msg}");
+    }
+
+    #[test]
+    fn a_partly_grabbed_device_says_which_keys_cannot_apply() {
+        // A keyboard node plus a node with keys and gamepad codes.
+        let nodes = [keyset(&[30, 31]), keyset(&[0x2c0, 30])];
+        let picks: Vec<_> = nodes
+            .iter()
+            .map(|k| pick(DeviceKind::Keyboard, Some(&**k), false))
+            .collect();
+        assert_eq!(picks, [Pick::Grab, Pick::Unforwardable]);
+        let excluded = picks.iter().filter(|p| **p == Pick::Unforwardable).count();
+        let partial = left_out_message(true, excluded, 0).unwrap();
+        assert!(
+            partial.starts_with("Some keys cannot be remapped"),
+            "{partial}"
+        );
+        let none = left_out_message(false, excluded, 0).unwrap();
+        assert!(none.starts_with("Remaps cannot apply"), "{none}");
+        // Nothing left out: the grab clears any earlier message.
+        assert_eq!(left_out_message(true, 0, 0), None);
+    }
+
+    /// Live: needs write access to /dev/uinput and read access to the event
+    /// nodes it creates. Sends only side buttons and F23 / F24, which type
+    /// nothing. Run: `cargo test -p hakod live_uinput -- --ignored --exact`.
+    #[test]
+    #[ignore]
+    fn live_uinput_remap_loopback() {
+        use evdev::{BusType, InputId};
+        let remap_nodes = || -> BTreeSet<PathBuf> {
+            evdev::enumerate()
+                .filter(|(_, d)| d.name() == Some(VIRTUAL_NAME))
+                .map(|(p, _)| p)
+                .collect()
+        };
+        let before = remap_nodes();
+        let source = |pid| {
+            VirtualDevice::builder()
+                .unwrap()
+                .name("hako test source")
+                .input_id(InputId::new(BusType::BUS_USB, 0x1234, pid, 1))
+                .with_keys(&keyset(&[EvdevKey::BTN_SIDE.0]))
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        // The second source keeps the virtual device up while the first goes.
+        let (mut first, _second) = (source(0x5701), source(0x5702));
+        let (engine, paths, _) = engine("live");
+        let mut ids = Vec::new();
+        for (pid, target) in [(0x5701, 194), (0x5702, 193)] {
+            let id = DeviceId {
+                vendor_id: 0x1234,
+                product_id: pid,
+                instance: "live".into(),
+            };
+            let pids = RemapPids {
+                pids: vec![pid],
+                own: 1,
+            };
+            engine.attach(id.clone(), DeviceKind::Mouse, pids, "Source");
+            let bind = RemapBinding::tap(EvdevKey::BTN_SIDE, EvdevKey(target));
+            engine.set_binding(id.clone(), bind).unwrap();
+            ids.push(id);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ids.iter().all(|id| engine.snapshot(id).unwrap().grabbed) {
+            assert!(Instant::now() < deadline, "{:?}", engine.snapshots());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let path = remap_nodes().difference(&before).next().cloned();
+        let mut out = Device::open(path.expect("hako virtual device")).unwrap();
+        out.set_nonblocking(true).unwrap();
+        let mut next_key = || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(evs) = out.fetch_events() {
+                    let keys: Vec<_> = evs
+                        .filter(|e| e.event_type() == EventType::KEY)
+                        .map(|e| (e.code(), e.value()))
+                        .collect();
+                    if let Some(&k) = keys.first() {
+                        return k;
+                    }
+                }
+                assert!(Instant::now() < deadline, "no key from the virtual device");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let side = |v| InputEvent::new(EventType::KEY.0, EvdevKey::BTN_SIDE.0, v);
+        first.emit(&[side(1)]).unwrap();
+        assert_eq!(next_key(), (194, 1));
+        // Unplugged mid-hold: its key goes up.
+        drop(first);
+        assert_eq!(next_key(), (194, 0));
+        engine.shutdown();
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    #[test]
+    fn a_bound_keys_scancode_is_dropped() {
+        let t0 = Instant::now();
+        let mut m = Mapper::default();
+        let bindings = HashMap::from([(A.0, RemapBinding::tap(A, B))]);
+        let scan = |v| InputEvent::new(EventType::MISC.0, MiscCode::MSC_SCAN.0, v);
+        let key = |k: EvdevKey, v| InputEvent::new(EventType::KEY.0, k.0, v);
+        let syn = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
+        let frame = |m: &mut Mapper, s, k| {
+            for ev in [scan(s), k, syn] {
+                m.event(0, &bindings, ev, t0);
+            }
+            m.take()
+                .iter()
+                .map(|e| (e.event_type().0, e.code(), e.value()))
+                .collect::<Vec<_>>()
+        };
+        // Bound A (scancode 0x70004): only the target key and SYN.
+        assert_eq!(frame(&mut m, 0x70004, key(A, 1)), [(1, 48, 1), (0, 0, 0)]);
+        // Unbound C keeps its scancode, before the key.
+        assert_eq!(
+            frame(&mut m, 0x70006, key(C, 1)),
+            [(4, 4, 0x70006), (1, 46, 1), (0, 0, 0)]
+        );
+        // A scancode the frame never pairs with a key still goes out.
+        m.event(0, &bindings, scan(0x70007), t0);
+        m.event(0, &bindings, syn, t0);
+        assert_eq!(keys(&mut m), [(4, 0x70007), (0, 0)]);
     }
 }

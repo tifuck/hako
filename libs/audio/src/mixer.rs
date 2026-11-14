@@ -36,8 +36,8 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Result};
 use hako_core::mixer::{
-    AudioDevice, ChatMixSide, DeviceDirection, EffectChain, Input, InputKind, Output, OutputKind,
-    Scene, Source, StripProblem,
+    validate_label, validate_node_name, AudioDevice, ChatMixSide, DeviceDirection, EffectChain,
+    Input, InputKind, Output, OutputKind, Scene, Source, StripProblem, MAX_LABEL,
 };
 use hako_core::AuxConfig;
 use regex::Regex;
@@ -468,14 +468,28 @@ fn pair(channels: &[&str]) -> Option<(String, String)> {
     }
 }
 
-/// A sink with one channel for both sides (its strip folds to mono).
-fn mono_sink(graph: &Graph, sink: &str) -> bool {
+/// A sink with one channel for both sides (its strip folds to mono);
+/// `None` while it is absent.
+fn mono_sink(graph: &Graph, sink: &str) -> Option<bool> {
     let channels: Vec<&str> = graph
         .channels(sink, Direction::In)
         .into_iter()
         .map(|(_, c)| c)
         .collect();
-    pair(&channels).is_some_and(|(left, right)| left == right)
+    pair(&channels).map(|(left, right)| left == right)
+}
+
+/// Note whether each sink of `scene` that is there is mono; an absent one
+/// keeps what it was (else an unplug and replug would rebuild its strip
+/// twice, flipping its fold).
+fn remember_mono(known: &mut BTreeMap<String, bool>, scene: &Scene, graph: &Graph) {
+    for output in &scene.outputs {
+        if let OutputKind::Hardware { sink, .. } = &output.kind {
+            if let Some(mono) = mono_sink(graph, sink) {
+                known.insert(sink.clone(), mono);
+            }
+        }
+    }
 }
 
 /// `(node, channel)`.
@@ -686,13 +700,15 @@ static CARD_CONTROLS: Mutex<BTreeMap<(String, String), CachedControls>> =
     Mutex::new(BTreeMap::new());
 
 fn capture_controls(node: &str, card: &str) -> CardControls {
-    let mut cache = CARD_CONTROLS.lock().unwrap_or_else(|p| p.into_inner());
+    let cache = || CARD_CONTROLS.lock().unwrap_or_else(|p| p.into_inner());
     let key = (node.to_string(), card.to_string());
-    if let Some((found, retry)) = cache.get(&key) {
+    if let Some((found, retry)) = cache().get(&key) {
         if retry.is_none_or(|at| Instant::now() < at) {
             return found.clone();
         }
     }
+    // Not under the lock: `amixer` may take seconds. Two callers may both
+    // ask; the last answer is kept.
     let (found, retry) = match card_capture_controls(card) {
         Ok(found) => (found, None),
         Err(e) => {
@@ -700,7 +716,7 @@ fn capture_controls(node: &str, card: &str) -> CardControls {
             ((Vec::new(), false), Some(Instant::now() + CARD_RETRY))
         }
     };
-    cache.insert(key, (found.clone(), retry));
+    cache().insert(key, (found.clone(), retry));
     found
 }
 
@@ -726,14 +742,23 @@ pub struct Detected<'a> {
 /// A line-in that was on also selects its card's `Line` jack and capture
 /// level; one that was off leaves the card alone (that jack may be a mic).
 pub fn starter_scene(d: &Detected) -> Scene {
+    // A device the scene could not hold is skipped, not the whole layout
+    // (Game and Chat must come up for the apps routed there).
+    let devices: Vec<&DeviceInfo> = d
+        .devices
+        .iter()
+        .filter(|i| validate_node_name(&i.device.node).is_ok())
+        .collect();
     let find = |direction, node: &str| {
-        d.devices
+        devices
             .iter()
+            .copied()
             .find(|i| i.device.direction == direction && i.device.node == node)
     };
     let sinks = || {
-        d.devices
+        devices
             .iter()
+            .copied()
             .filter(|i| i.device.direction == DeviceDirection::Sink)
     };
     let headset = d
@@ -747,12 +772,13 @@ pub fn starter_scene(d: &Detected) -> Scene {
         .or_else(|| d.default_sink.and_then(|s| find(DeviceDirection::Sink, s)))
         .or_else(|| sinks().next());
     let line_in = Regex::new(&d.aux.capture_name_regex).ok().and_then(|re| {
-        d.devices
+        devices
             .iter()
+            .copied()
             .find(|i| i.device.direction == DeviceDirection::Source && re.is_match(&i.device.node))
     });
     let mic = a1.filter(|a1| a1.card.is_some()).and_then(|a1| {
-        d.devices.iter().find(|i| {
+        devices.iter().copied().find(|i| {
             i.device.direction == DeviceDirection::Source
                 && i.card == a1.card
                 && Some(&i.device.node) != line_in.map(|l| &l.device.node)
@@ -764,11 +790,17 @@ pub fn starter_scene(d: &Detected) -> Scene {
         let label = if headset.is_some() {
             "Headset".to_string()
         } else {
-            a1.device.description.chars().take(32).collect::<String>()
+            let label: String = a1.device.description.chars().take(MAX_LABEL).collect();
+            let label = label.trim().to_string();
+            if validate_label(&label).is_ok() {
+                label
+            } else {
+                "Output".to_string()
+            }
         };
         outputs.push(output(
             "A1",
-            label.trim(),
+            &label,
             OutputKind::Hardware {
                 sink: a1.device.node.clone(),
                 description: a1.device.description.clone(),
@@ -873,6 +905,8 @@ struct Strip {
     /// Fader last written; written again after every (re)build.
     fader: Option<(f32, bool)>,
     started: Instant,
+    /// Its nodes were last seen in PipeWire (or it was started) then.
+    seen: Instant,
     failures: u32,
     retry_at: Instant,
     error: Option<String>,
@@ -883,8 +917,27 @@ impl Strip {
         self.child.is_some()
     }
 
-    /// A process that does not exit in time goes to `unreaped`.
+    /// Its process runs but its nodes have been gone for `NODE_WAIT` (it
+    /// outlived a PipeWire restart); `present`: they are there now.
+    fn lost(&mut self, present: bool, now: Instant) -> bool {
+        if present {
+            self.seen = now;
+        }
+        self.up() && now.saturating_duration_since(self.seen) >= NODE_WAIT
+    }
+
+    /// Up for `STABLE`: its earlier failures are forgiven.
+    fn stable(&self) -> bool {
+        self.up() && self.started.elapsed() >= STABLE
+    }
+
+    /// A process that does not exit in time goes to `unreaped`. A stable
+    /// strip leaves no failures behind (a rebuild that fails backs off from
+    /// the start).
     fn stop(&mut self, unreaped: &mut Vec<Child>) {
+        if self.stable() {
+            self.failures = 0;
+        }
         if let Some(mut child) = self.child.take() {
             if let Err(e) = stop_child(&mut child) {
                 warn!("mixer strip {}: {e:#}", self.def.playback);
@@ -897,7 +950,7 @@ impl Strip {
     /// Stop it and schedule a restart: at once after a crash of a stable
     /// strip, else with a backoff growing per failure in a row.
     fn fail(&mut self, error: String, unreaped: &mut Vec<Child>) {
-        let stable = self.up() && self.started.elapsed() >= STABLE;
+        let stable = self.stable();
         self.stop(unreaped);
         self.failures = if stable { 0 } else { self.failures + 1 };
         let wait = match self.failures {
@@ -1096,13 +1149,17 @@ pub struct MixerGraph {
     latency: u32,
     strips: BTreeMap<StripKey, Strip>,
     links: HashMap<(End, End), OwnedLink>,
-    /// Capture cards set for sources, by node name.
+    /// Capture cards set for sources, by node name; one no source wants
+    /// stays until its node is there to give the card back.
     cards: BTreeMap<String, CardClaim>,
     /// The claimed cards' own inputs, for the next start after a crash
     /// (`None`: not kept).
     saved_cards: Option<PathBuf>,
     /// Stopped strip processes that did not exit in time, reaped later.
     unreaped: Vec<Child>,
+    /// Sinks last seen mono or not (`remember_mono`).
+    // ponytail: never evicted (one entry per sink an output ever used).
+    mono_sinks: BTreeMap<String, bool>,
     /// App streams moved into virtual inputs, by stream id.
     moved: BTreeMap<u32, Moved>,
     problems: Vec<StripProblem>,
@@ -1125,6 +1182,7 @@ impl MixerGraph {
             cards: BTreeMap::new(),
             saved_cards,
             unreaped: Vec::new(),
+            mono_sinks: BTreeMap::new(),
             moved: BTreeMap::new(),
             problems: Vec::new(),
             running: false,
@@ -1172,7 +1230,7 @@ impl MixerGraph {
     }
 
     /// Reap the stopped processes that have exited since.
-    fn reap(&mut self) {
+    pub fn reap(&mut self) {
         self.unreaped
             .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
     }
@@ -1191,11 +1249,21 @@ impl MixerGraph {
     /// with the same scene); `dial` is the ChatMix dial (game, chat).
     pub fn reconcile(&mut self, scene: &Scene, dial: (f32, f32)) {
         self.reap();
+        for strip in self.strips.values_mut() {
+            let exited = strip
+                .child
+                .as_mut()
+                .is_some_and(|child| !matches!(child.try_wait(), Ok(None)));
+            if exited {
+                strip.fail("stopped unexpectedly".into(), &mut self.unreaped);
+            }
+        }
         let engine = engine();
         let (wanted, mut problems) = match &engine {
             Ok(engine) => engine.with_graph(|graph| {
+                remember_mono(&mut self.mono_sinks, scene, graph);
                 strip_defs(scene, &self.naming, self.latency, |sink| {
-                    mono_sink(graph, sink)
+                    self.mono_sinks.get(sink) == Some(&true)
                 })
             }),
             Err(_) => strip_defs(scene, &self.naming, self.latency, |_| false),
@@ -1203,6 +1271,11 @@ impl MixerGraph {
         let engine = match engine {
             Ok(engine) => engine,
             Err(error) => {
+                // Nodes count as gone only while PipeWire can be seen.
+                let now = Instant::now();
+                for strip in self.strips.values_mut() {
+                    strip.seen = now;
+                }
                 self.running = false;
                 self.problems = wanted
                     .iter()
@@ -1212,13 +1285,22 @@ impl MixerGraph {
                 return;
             }
         };
-        for strip in self.strips.values_mut() {
-            let exited = strip
-                .child
-                .as_mut()
-                .is_some_and(|child| !matches!(child.try_wait(), Ok(None)));
-            if exited {
-                strip.fail("stopped unexpectedly".into(), &mut self.unreaped);
+        let checked = Instant::now();
+        let lost: Vec<StripKey> = engine.with_graph(|graph| {
+            self.strips
+                .iter_mut()
+                .filter_map(|(key, strip)| {
+                    let present = [&strip.def.capture, &strip.def.playback]
+                        .iter()
+                        .all(|name| graph.node_id(name).is_some());
+                    strip.lost(present, checked).then(|| key.clone())
+                })
+                .collect()
+        });
+        for key in lost {
+            if let Some(strip) = self.strips.get_mut(&key) {
+                let error = format!("{} is gone from PipeWire", strip.def.playback);
+                strip.fail(error, &mut self.unreaped);
             }
         }
         // After the crashes: a stable strip's restart is due now.
@@ -1352,6 +1434,7 @@ impl MixerGraph {
                 conf,
                 fader: None,
                 started: since,
+                seen: Instant::now(),
                 failures,
                 retry_at: Instant::now(),
                 error: None,
@@ -1579,10 +1662,18 @@ impl MixerGraph {
             .cloned()
             .collect();
         for node in gone {
+            // Let go of while absent (a PipeWire restart, a profile switch):
+            // kept until the node is back, to give its card back then.
+            let Some((_, card)) = present.get(&node) else {
+                if self.cards[&node].previous.is_none() {
+                    self.cards.remove(&node);
+                }
+                continue;
+            };
             if let Some(claim) = self.cards.remove(&node) {
-                let there = present
-                    .get(&node)
-                    .is_some_and(|(_, card)| *card == claim.card);
+                // Another node took the card meanwhile: it gives it back.
+                let shared = self.cards.values().any(|c| c.card == claim.card);
+                let there = *card == claim.card && !shared;
                 release_card(&node, &claim, there, self.saved_cards.as_deref());
             }
         }
@@ -1742,6 +1833,9 @@ impl Drop for MixerGraph {
         for strip in self.strips.values_mut() {
             strip.stop(&mut self.unreaped);
         }
+        // ponytail: one last look; a process still stuck now stays a
+        // zombie until hakod exits (hand `unreaped` on if that matters).
+        self.reap();
     }
 }
 
@@ -2005,12 +2099,17 @@ mod tests {
         graph.sync_cards(&want(Some("Line"), Some(50)), &at(6));
         amixer_calls();
         // Removed while there: restored, under a new node id too (same
-        // card); removed while gone: untouched.
+        // card); removed while gone: untouched until it is back, and left
+        // alone when it is back on another card (see also
+        // `a_card_let_go_of_while_absent_is_given_back_when_it_returns`).
         graph.sync_cards(&[], &at(8));
         assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
         graph.sync_cards(&want(Some("Line"), None), &at(6));
         amixer_calls();
         graph.sync_cards(&[], &HashMap::new());
+        assert!(amixer_calls().is_empty());
+        let elsewhere = HashMap::from([(node.clone(), (9, "8".to_string()))]);
+        graph.sync_cards(&[], &elsewhere);
         assert!(amixer_calls().is_empty());
         assert!(graph.cards.is_empty());
         // Not there yet: applied once it appears.
@@ -2034,6 +2133,30 @@ mod tests {
         assert_eq!(amixer_calls(), ["5 sget Input Source"]);
         graph.sync_cards(&[], &unreadable);
         assert!(amixer_calls().is_empty(), "nothing to give back");
+    }
+
+    /// A source let go of while its node is away (a PipeWire restart) gives
+    /// the card its own input back once the node returns on that card.
+    #[test]
+    fn a_card_let_go_of_while_absent_is_given_back_when_it_returns() {
+        use crate::tests::amixer_calls;
+        let node = "hako-test-absent-line".to_string();
+        let mut graph = MixerGraph::new(test_naming(), 256);
+        let line = (Some("Line".to_string()), None);
+        let want = vec![(node.clone(), "line-in".to_string(), line)];
+        let at = |id| HashMap::from([(node.clone(), (id, "7".to_string()))]);
+        amixer_calls();
+        graph.sync_cards(&want, &at(5));
+        let calls = amixer_calls();
+        assert!(
+            calls.contains(&"7 sset Input Source Line".to_string()),
+            "{calls:?}"
+        );
+        graph.sync_cards(&[], &HashMap::new());
+        assert!(amixer_calls().is_empty(), "nothing to write to");
+        graph.sync_cards(&[], &at(6));
+        assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
+        assert!(graph.cards.is_empty());
     }
 
     /// Two capture nodes of one card: the first to claim it sets it, the
@@ -2165,6 +2288,7 @@ mod tests {
             conf: std::env::temp_dir().join(format!("hako-test-x-{}.conf", std::process::id())),
             fader: None,
             started: Instant::now(),
+            seen: Instant::now(),
             failures: 0,
             retry_at: Instant::now(),
             error: None,
@@ -2202,6 +2326,7 @@ mod tests {
                     .join(format!("hako-test-crash-{}.conf", std::process::id())),
                 fader: None,
                 started: Instant::now() - up_for,
+                seen: Instant::now(),
                 failures,
                 retry_at: Instant::now(),
                 error: None,
@@ -2215,6 +2340,46 @@ mod tests {
         let young = crashed(Duration::from_secs(1), 3);
         assert_eq!(young.failures, 4);
         assert!(young.retry_at >= Instant::now() + Duration::from_secs(7));
+
+        // Still running after a stable run: rebuilt (stopped) and failing
+        // to start, it backs off from the start.
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut rebuilt = Strip {
+            child: Some(child),
+            started: Instant::now() - STABLE - Duration::from_secs(1),
+            ..young
+        };
+        rebuilt.stop(&mut Vec::new());
+        assert_eq!(rebuilt.failures, 0);
+        rebuilt.fail("did not appear".into(), &mut Vec::new());
+        assert_eq!(rebuilt.failures, 1);
+        assert!(rebuilt.retry_at <= Instant::now() + Duration::from_secs(1));
+    }
+
+    /// A strip whose process outlived its nodes (a PipeWire restart) is
+    /// lost once they were missing for `NODE_WAIT`, never while it starts.
+    #[test]
+    fn a_strip_without_its_nodes_is_lost_after_node_wait() {
+        let start = Instant::now();
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut strip = Strip {
+            def: def(&scene(), Side::Input, "game"),
+            child: Some(child),
+            conf: std::env::temp_dir().join(format!("hako-test-lost-{}.conf", std::process::id())),
+            fader: None,
+            started: start,
+            seen: start,
+            failures: 0,
+            retry_at: start,
+            error: None,
+        };
+        let later = |secs| start + Duration::from_secs(secs);
+        assert!(!strip.lost(false, later(1)), "still starting");
+        assert!(!strip.lost(true, later(10)));
+        assert!(!strip.lost(false, later(12)), "just went");
+        assert!(strip.lost(false, later(10) + NODE_WAIT));
+        strip.stop(&mut Vec::new());
+        assert!(!strip.lost(false, later(60)), "not running");
     }
 
     #[test]
@@ -2379,6 +2544,21 @@ mod tests {
         let mut after = before.clone();
         after.outputs[0].label = "Speakers".into();
         assert_eq!(step(&after, "A1"), Some(Step::Build));
+        let mut after = before.clone();
+        after.outputs[1].kind = OutputKind::Virtual {
+            node_name: "hako-test-mic2".into(),
+        };
+        assert_eq!(step(&after, "B1"), Some(Step::Build));
+        // A stage bypassed, or another kind under its id: rebuilt, not
+        // updated (the graph's plugins change).
+        let mut bypassed = with_gate.clone();
+        bypassed.inputs[1].chain.effects[0].enabled = false;
+        let (_, steps) = plan(&running_gate, &defs(&bypassed));
+        assert!(steps.contains(&((Side::Input, "desk".into()), Step::Build)));
+        let mut rekinded = with_gate.clone();
+        rekinded.inputs[1].chain.effects[0].kind = AuxEffectKind::default_compressor();
+        let (_, steps) = plan(&running_gate, &defs(&rekinded));
+        assert!(steps.contains(&((Side::Input, "desk".into()), Step::Build)));
 
         // Removed strips go; the others are untouched.
         let mut after = before.clone();
@@ -2712,6 +2892,43 @@ mod tests {
         assert!(scene.inputs.iter().all(|i| i.routes.is_empty()));
     }
 
+    /// A device whose name the scene refuses is left out, a blank name gets
+    /// a stand-in: Game and Chat always come up.
+    #[test]
+    fn starter_layout_skips_devices_it_cannot_hold() {
+        use DeviceDirection::{Sink, Source as Src};
+        let blank = |node: &str, card: &str| {
+            let mut i = info(node, Sink, card);
+            i.device.description = "   ".into();
+            i
+        };
+        let devices = [
+            blank("my sink", "60"),
+            info("hako_out_A1.play", Sink, "61"),
+            blank("alsa_output.usb-dac", "80"),
+            info("alsa_input.usb-dac mic", Src, "80"),
+            info("alsa_input.pci-ünï.analog-stereo", Src, "90"),
+        ];
+        let aux = AuxConfig::default();
+        let scene = starter_scene(&Detected {
+            devices: &devices,
+            headset_sink: None,
+            default_sink: Some("my sink"),
+            aux: &aux,
+            aux_enabled: true,
+            capture_percent: None,
+        });
+        scene.validate().unwrap();
+        let ids: Vec<_> = scene.inputs.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["game", "chat"]);
+        assert_eq!(scene.inputs[0].routes, ["A1"]);
+        assert!(
+            matches!(&scene.outputs[0].kind, OutputKind::Hardware { sink, .. }
+            if sink == "alsa_output.usb-dac")
+        );
+        assert_eq!(scene.outputs[0].label, "Output");
+    }
+
     #[test]
     fn links_follow_routes_sources_and_sinks() {
         let scene = scene();
@@ -2811,12 +3028,14 @@ mod tests {
                 channel: "MONO".into(),
             },
         );
-        assert!(mono_sink(&graph, "headset"));
-        assert!(!mono_sink(
-            &graph_with(&[("headset", "Audio/Sink", &[])]),
-            "headset"
-        ));
-        let (defs, _) = strip_defs(&scene, &test_naming(), 256, |s| mono_sink(&graph, s));
+        assert_eq!(mono_sink(&graph, "headset"), Some(true));
+        assert_eq!(
+            mono_sink(&graph_with(&[("headset", "Audio/Sink", &[])]), "headset"),
+            Some(false)
+        );
+        let (defs, _) = strip_defs(&scene, &test_naming(), 256, |s| {
+            mono_sink(&graph, s) == Some(true)
+        });
         let up: BTreeMap<_, _> = defs.into_iter().collect();
         let a1 = &up[&(Side::Output, "A1".to_string())];
         assert!(a1.mono, "folds although the output's mono is off");
@@ -2828,6 +3047,20 @@ mod tests {
         assert_eq!(to_sink.len(), 1, "{to_sink:?}");
         assert_eq!(to_sink[0].0, end("hako-test-x-out_A1.play", "FL"));
         assert_eq!(to_sink[0].1, end("headset", "MONO"));
+
+        // Unplugged, the sink keeps its layout: no rebuild now and again on
+        // the replug.
+        let mut known = BTreeMap::new();
+        let defs_with = |known: &BTreeMap<String, bool>| {
+            strip_defs(&scene, &test_naming(), 256, |s| known.get(s) == Some(&true)).0
+        };
+        remember_mono(&mut known, &scene, &graph);
+        let running: BTreeMap<_, _> = defs_with(&known).into_iter().collect();
+        assert!(running[&(Side::Output, "A1".to_string())].mono);
+        remember_mono(&mut known, &scene, &Graph::default());
+        assert_eq!(mono_sink(&Graph::default(), "headset"), None);
+        let (_, steps) = plan(&running, &defs_with(&known));
+        assert!(steps.iter().all(|(_, s)| *s == Step::Keep), "{steps:?}");
     }
 
     // ── live ─────────────────────────────────────────────────────────

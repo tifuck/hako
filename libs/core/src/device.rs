@@ -3,6 +3,7 @@
 use crate::catalog::{SettingMeta, SettingsMap};
 use crate::remap::DeviceRemaps;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -10,6 +11,8 @@ pub enum DeviceKind {
     Keyboard,
     Mouse,
     Headset,
+    /// Also any kind a newer daemon reports that this build does not know.
+    #[serde(other)]
     Other,
 }
 
@@ -50,6 +53,10 @@ pub struct DeviceSnapshot {
     pub name: String,
     pub connected: bool,
     pub batteries: Vec<BatteryState>,
+    /// Values this build cannot read (a newer variant, a non-finite float
+    /// sent as `null`) are skipped like unknown controls. Snapshots only come
+    /// over IPC; files are parsed strictly elsewhere.
+    #[serde(deserialize_with = "known_settings")]
     pub settings: SettingsMap,
     /// Controls this build cannot read (a newer daemon's keys) or draw (an
     /// inverted range) are skipped, so one bad control never hides the whole
@@ -64,6 +71,13 @@ fn known_controls<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SettingMeta>, D
         .into_iter()
         .filter_map(|v| serde_json::from_value::<SettingMeta>(v).ok())
         .filter(|m| m.min.zip(m.max).is_none_or(|(lo, hi)| lo <= hi))
+        .collect())
+}
+
+fn known_settings<'de, D: Deserializer<'de>>(d: D) -> Result<SettingsMap, D::Error> {
+    Ok(BTreeMap::<String, serde_json::Value>::deserialize(d)?
+        .into_iter()
+        .filter_map(|(k, v)| Some((k, serde_json::from_value(v).ok()?)))
         .collect())
 }
 

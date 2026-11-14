@@ -552,10 +552,18 @@ impl NetPort {
 
     /// Why its nodes are missing (PipeWire unreachable, nodes refused, the
     /// PipeWire thread stopped); `None` while they are up or coming up.
+    /// Never waits: while an `open` starts the thread, only the nodes'
+    /// own problem is known.
     pub fn problem(&self) -> Option<String> {
-        let running = lock(&self.worker)
-            .as_ref()
-            .is_some_and(|w| w.generation == self.generation && !w.thread.is_finished());
+        let worker = match self.worker.try_lock() {
+            Ok(worker) => Some(worker),
+            Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        let running = worker.is_none_or(|w| {
+            w.as_ref()
+                .is_some_and(|w| w.generation == self.generation && !w.thread.is_finished())
+        });
         if !running {
             return Some("the network audio thread stopped".into());
         }
@@ -1150,6 +1158,24 @@ mod tests {
             "silence sent"
         )));
         assert_eq!(pos, 1_616);
+    }
+
+    #[test]
+    fn problem_does_not_wait_for_a_thread_being_started() {
+        let port = Arc::new(NetPort {
+            worker: Arc::default(),
+            generation: u64::MAX,
+            id: 1,
+            state: Arc::new(State::new(20, Box::new(|_, _| {}))),
+        });
+        assert!(port.problem().is_some(), "no thread");
+        let starting = lock(&port.worker);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asking = port.clone();
+        std::thread::spawn(move || tx.send(asking.problem()));
+        let problem = rx.recv_timeout(Duration::from_secs(2));
+        drop(starting);
+        assert_eq!(problem, Ok(None));
     }
 
     /// Sender 2000 ppm fast; the resampler takes `NET_RATE / ratio`.

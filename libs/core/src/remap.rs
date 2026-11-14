@@ -4,7 +4,7 @@
 //! edits this catalog over IPC.
 
 use crate::device::DeviceId;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Linux evdev `KEY_*` / `BTN_*` code (see `<linux/input-event-codes.h>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -201,12 +201,15 @@ pub enum CaptureRole {
     Record,
 }
 
+/// Only sent over IPC (files are `RemapFile`, parsed strictly): a binding or
+/// capture role this build cannot read (a newer mode) is skipped, so it does
+/// not hide the rest of the state.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceRemaps {
     pub device_id: Option<DeviceId>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "known_bindings")]
     pub bindings: Vec<RemapBinding>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "known_role")]
     pub capturing: Option<CaptureRole>,
     /// Source being assigned when `capturing == Target`.
     #[serde(default)]
@@ -219,6 +222,17 @@ pub struct DeviceRemaps {
     /// Result of the last `CaptureRole::Record` session (empty until one finishes).
     #[serde(default)]
     pub recorded: Vec<MacroStep>,
+}
+
+fn known_bindings<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<RemapBinding>, D::Error> {
+    Ok(Vec::<serde_json::Value>::deserialize(d)?
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect())
+}
+
+fn known_role<'de, D: Deserializer<'de>>(d: D) -> Result<Option<CaptureRole>, D::Error> {
+    Ok(Option::<serde_json::Value>::deserialize(d)?.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -447,6 +461,14 @@ mod tests {
         .unwrap();
         assert_eq!(old.bindings[0].repeat, MacroRepeat::Once);
         assert!(old.bindings[0].steps.is_empty());
+    }
+
+    #[test]
+    fn a_remap_file_with_an_unknown_mode_is_an_error() {
+        // Unlike `DeviceRemaps` over IPC: skipping it would lose the binding
+        // on the next save.
+        let newer = "version = 1\n[[bindings]]\nsource = 275\ntarget = 30\nmode = \"chord\"\n";
+        assert!(toml::from_str::<RemapFile>(newer).is_err());
     }
 
     #[test]

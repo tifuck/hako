@@ -144,11 +144,10 @@ async fn main() -> Result<()> {
     let discovery = tokio::spawn(async move {
         // Each pass is its own task: a panic in one (driver code) is logged
         // and the next pass still runs, instead of hotplug silently ending.
-        // A JoinSet, so aborting discovery at shutdown aborts the pass too.
+        // Detached, so aborting discovery at shutdown does not abort the
+        // pass: its blocking opens would run on unseen; shutdown waits for it.
         let pass = |hub: Arc<DaemonHub>| async move {
-            let mut set = tokio::task::JoinSet::new();
-            set.spawn(async move { hub.discover_once().await });
-            if let Some(Err(e)) = set.join_next().await {
+            if let Err(e) = tokio::spawn(async move { hub.discover_once().await }).await {
                 warn!("discovery pass crashed: {e}");
             }
         };

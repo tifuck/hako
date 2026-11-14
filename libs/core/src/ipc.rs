@@ -217,7 +217,8 @@ impl AuxEffectChain {
                     release_ms,
                     detect_hpf_hz,
                 } => {
-                    validate_finite_range("noise gate threshold", *threshold_db, -60.0, 0.0)?;
+                    let (min, max) = crate::fx::LSP_THRESHOLD_DB;
+                    validate_finite_range("noise gate threshold", *threshold_db, min, max)?;
                     validate_finite_range("noise gate reduction", *reduction_db, -72.0, 0.0)?;
                     validate_finite_range("noise gate attack", *attack_ms, 0.0, 200.0)?;
                     validate_finite_range("noise gate hold", *hold_ms, 0.0, 1000.0)?;
@@ -237,7 +238,8 @@ impl AuxEffectChain {
                     knee_db,
                     makeup_db,
                 } => {
-                    validate_finite_range("compressor threshold", *threshold_db, -60.0, 0.0)?;
+                    let (min, max) = crate::fx::LSP_THRESHOLD_DB;
+                    validate_finite_range("compressor threshold", *threshold_db, min, max)?;
                     validate_finite_range("compressor ratio", *ratio, 1.0, 20.0)?;
                     validate_finite_range("compressor attack", *attack_ms, 0.0, 200.0)?;
                     validate_finite_range("compressor release", *release_ms, 1.0, 2000.0)?;

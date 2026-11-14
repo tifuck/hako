@@ -424,24 +424,20 @@ impl LogitechMouseAdapter {
             if self.feat.dpi_is_ext {
                 // read fn 0x50
                 if let Some(r) = read(self.hidpp_long(idx, 0x05, &[0x00]), "DPI") {
-                    // params: sensor, dpi_x BE, dpi_y BE, …, lod
-                    let dpi = u16::from(r[5]) << 8 | u16::from(r[6]);
-                    if dpi >= 50 {
+                    let (dpi, lod) = parse_ext_dpi(&r);
+                    if let Some(dpi) = dpi {
                         merge_setting(
                             &mut self.settings,
                             SettingKey::Dpi,
                             SettingValue::Int(dpi as i64),
                         );
                     }
-                    // Solaar ExtendedAdjustableDpi read: sensor, x, default x,
-                    // y, default y, lod (1 low / 2 medium / 3 high) at param[9].
-                    self.lod = Some(r[13]);
+                    self.lod = Some(lod);
                 }
             } else {
                 // classic 0x2201 get dpi fn 0x20
                 if let Some(r) = read(self.hidpp_long(idx, 0x02, &[0x00]), "DPI") {
-                    let dpi = u16::from(r[5]) << 8 | u16::from(r[6]);
-                    if dpi >= 50 {
+                    if let Some(dpi) = parse_dpi(&r) {
                         merge_setting(
                             &mut self.settings,
                             SettingKey::Dpi,
@@ -490,13 +486,11 @@ impl LogitechMouseAdapter {
         self.ensure_host_mode()?;
         let dpi = dpi.clamp(100, 32000);
         if self.feat.dpi_is_ext {
-            let hi = (dpi >> 8) as u8;
-            let lo = (dpi & 0xff) as u8;
-            // write fn 0x60: sensor, x BE, y BE, lod (keep the device's LOD).
-            // Rejections surface as HID++ error frames from hidpp_long.
+            // Keep the device's LOD. Rejections surface as HID++ error
+            // frames from hidpp_long.
             let lod = hidpp::ext_dpi_lod(self.lod, || self.hidpp_long(idx, 0x05, &[0x00]))?;
             self.lod = Some(lod);
-            self.hidpp_long(idx, 0x06, &[0x00, hi, lo, hi, lo, lod])?;
+            self.hidpp_long(idx, 0x06, &ext_dpi_params(dpi, lod))?;
         } else {
             let hi = (dpi >> 8) as u8;
             let lo = (dpi & 0xff) as u8;
@@ -509,18 +503,8 @@ impl LogitechMouseAdapter {
         let idx = self.feat.report_rate.context("no report-rate feature")?;
         self.ensure_host_mode()?;
         if self.feat.rr_is_ext {
-            // Closest rate the device advertised (probe), else the exact one.
-            let target = self
-                .rr_hz
-                .iter()
-                .copied()
-                .min_by_key(|cand| cand.abs_diff(hz))
-                .unwrap_or(hz);
-            let best = EXT_RR_HZ
-                .iter()
-                .position(|&cand| cand == target)
-                .context("unsupported report rate")?;
-            self.hidpp_long(idx, 0x03, &[best as u8])?;
+            let best = ext_rr_index(&self.rr_hz, hz).context("unsupported report rate")?;
+            self.hidpp_long(idx, 0x03, &[best])?;
         } else {
             // classic: set period in ms (1=1000Hz, 2=500, 4=250, 8=125)
             let ms = match hz {
@@ -665,6 +649,40 @@ fn open_hidpp_path() -> Result<(HidDeviceInfo, HidrawDevice, Option<u8>)> {
         "no HID++ path for PRO 2 ({})",
         last_err.unwrap_or_else(|| "not found".into())
     )
+}
+
+/// DPI in a 0x2201 / 0x2202 read reply (params: sensor, DPI big-endian at
+/// [5..7]); below 50 means no reading.
+fn parse_dpi(r: &[u8; 20]) -> Option<u16> {
+    Some(u16::from_be_bytes([r[5], r[6]])).filter(|&dpi| dpi >= 50)
+}
+
+/// 0x2202 fn 5 reply: (DPI, raw lift-off byte). Solaar ExtendedAdjustableDpi
+/// read: sensor, x, default x, y, default y, lod (1 low / 2 medium / 3 high)
+/// at param\[9\].
+fn parse_ext_dpi(r: &[u8; 20]) -> (Option<u16>, u8) {
+    (parse_dpi(r), r[13])
+}
+
+/// 0x2202 fn 6 params: sensor 0, x BE, y BE, lod.
+fn ext_dpi_params(dpi: u16, lod: u8) -> [u8; 6] {
+    let [hi, lo] = dpi.to_be_bytes();
+    [0x00, hi, lo, hi, lo, lod]
+}
+
+/// 0x8061 rate index for `hz`: the closest rate the device advertised
+/// (`rr_hz`, from the probe; the first of equally close ones), else `hz`
+/// itself. `None` when that is no extended rate.
+fn ext_rr_index(rr_hz: &[u32], hz: u32) -> Option<u8> {
+    let target = rr_hz
+        .iter()
+        .copied()
+        .min_by_key(|cand| cand.abs_diff(hz))
+        .unwrap_or(hz);
+    EXT_RR_HZ
+        .iter()
+        .position(|&cand| cand == target)
+        .map(|i| i as u8)
 }
 
 /// The receiver slot paired with the PRO 2 (`Some(None)`: none is), or
@@ -1168,5 +1186,34 @@ mod effect_tests {
                 .collect();
             assert_eq!(rr_supported(flags), legacy);
         }
+    }
+
+    /// DPI and report-rate bytes as the protocol defines them (literal).
+    #[test]
+    fn pro2_dpi_and_rate_bytes() {
+        // 0x2202 fn 6, 1600 DPI, lift-off 2: 11 01 0a 6a | 00 0640 0640 02.
+        assert_eq!(
+            hidpp::long_request(1, 0x0a, 0x06, &ext_dpi_params(1600, 2))[..10],
+            [0x11, 0x01, 0x0a, 0x6a, 0x00, 0x06, 0x40, 0x06, 0x40, 0x02]
+        );
+        assert_eq!(
+            ext_dpi_params(0x1234, 3),
+            [0x00, 0x12, 0x34, 0x12, 0x34, 0x03]
+        );
+        // 0x2202 fn 5 reply: 11 01 0a 5a | sensor 00, x 0c80, default x 0640,
+        // y 0c80, default y 0640, lod 03.
+        let mut r = [0u8; 20];
+        r[..14].copy_from_slice(&[
+            0x11, 0x01, 0x0a, 0x5a, 0x00, 0x0c, 0x80, 0x06, 0x40, 0x0c, 0x80, 0x06, 0x40, 0x03,
+        ]);
+        assert_eq!(parse_ext_dpi(&r), (Some(3200), 3));
+        r[5..7].copy_from_slice(&[0x00, 0x31]);
+        assert_eq!(parse_ext_dpi(&r), (None, 3), "49 DPI is no reading");
+        // 0x8061 indices (Solaar): 0=125 1=250 2=500 3=1000 4=2000 5=4000 6=8000.
+        assert_eq!(ext_rr_index(&[1000, 8000], 4000), Some(3));
+        assert_eq!(ext_rr_index(&[1000, 8000], 6000), Some(6));
+        assert_eq!(ext_rr_index(&[2000, 4000], 3000), Some(4), "tie: first");
+        assert_eq!(ext_rr_index(&[], 500), Some(2));
+        assert_eq!(ext_rr_index(&[], 750), None);
     }
 }

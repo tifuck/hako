@@ -66,6 +66,8 @@ struct FileCache {
     dirty: Option<Instant>,
     /// The last failed write's error, pushed once until a write succeeds.
     failed: Option<String>,
+    /// Daemon stop: the file is final, edits are refused.
+    stopped: bool,
 }
 
 struct Shared {
@@ -268,27 +270,28 @@ impl MixerService {
             Ok((file, fresh))
         };
         let mut made = None;
-        if !later && changed(self.shared.file().map_err(PatchError::Io)?)?.1 {
-            let line_in = legacy_line_in(&self.shared.paths);
-            made = Some(starter(&self.shared.paths, &self.audio, line_in));
-        }
+        let mut needed = !later && changed(self.shared.file().map_err(PatchError::Io)?)?.1;
         let (reply, done) = mpsc::channel();
-        let file = {
+        let file = loop {
+            if needed && made.is_none() {
+                let line_in = legacy_line_in(&self.shared.paths);
+                made = Some(starter(&self.shared.paths, &self.audio, line_in));
+            }
             let mut cache = lock(&self.shared.cache);
+            if cache.stopped {
+                return Err(PatchError::Io(anyhow::anyhow!("hakod is shutting down")));
+            }
             let current = match (cache.dirty, &cache.file) {
                 (Some(_), Some(file)) => file.clone(),
                 _ => load_mixer(&self.shared.paths).map_err(PatchError::Io)?,
             };
             let (mut next, fresh) = changed(current)?;
             if fresh {
-                // Another edit got in between: made under the lock after all.
-                let layout = made.unwrap_or_else(|| {
-                    starter(
-                        &self.shared.paths,
-                        &self.audio,
-                        legacy_line_in(&self.shared.paths),
-                    )
-                });
+                // Another edit got in between: made (outside the lock) and retried.
+                let Some(layout) = made.take() else {
+                    needed = true;
+                    continue;
+                };
                 if let Some(live) = layout {
                     next.live = live;
                 }
@@ -311,7 +314,7 @@ impl MixerService {
                     "the change is kept, but the mixer engine is not running (restart hakod)"
                 )));
             }
-            next
+            break next;
         };
         match done.recv_timeout(APPLY_WAIT) {
             Ok(()) => Ok(MixerState {
@@ -342,6 +345,7 @@ impl MixerService {
     /// Daemon stop: save a pending fader change, tear the graph down (ChatMix
     /// is not brought back). Blocking.
     pub fn shutdown(&self) {
+        lock(&self.shared.cache).stopped = true;
         let (reply, done) = mpsc::channel();
         if self.tx.send(Cmd::Shutdown(reply)).is_ok() {
             let _ = done.recv_timeout(APPLY_WAIT);
@@ -599,6 +603,18 @@ fn supervise(mut actor: Actor, rx: mpsc::Receiver<Cmd>) {
     }
 }
 
+/// The last of the dial reports queued right behind `dial` (one sync for a
+/// burst), and the command after them, handled next.
+fn latest_dial(mut dial: (f32, f32), rx: &mpsc::Receiver<Cmd>) -> ((f32, f32), Option<Cmd>) {
+    loop {
+        match rx.try_recv() {
+            Ok(Cmd::Dial(game, chat)) => dial = (game, chat),
+            Ok(cmd) => return (dial, Some(cmd)),
+            Err(_) => return (dial, None),
+        }
+    }
+}
+
 /// Owns the graph; every PipeWire change happens on its thread.
 struct Actor {
     graph: MixerGraph,
@@ -618,8 +634,13 @@ struct Actor {
 
 impl Actor {
     fn run(&mut self, rx: &mpsc::Receiver<Cmd>) {
+        let mut next = None;
         loop {
-            match rx.recv_timeout(HEAL) {
+            let cmd = match next.take() {
+                Some(cmd) => Ok(cmd),
+                None => rx.recv_timeout(HEAL),
+            };
+            match cmd {
                 Ok(Cmd::Apply(file, reply)) => {
                     self.file = file;
                     self.suppressed = false;
@@ -630,7 +651,7 @@ impl Actor {
                     }
                 }
                 Ok(Cmd::Dial(game, chat)) => {
-                    self.dial = (game, chat);
+                    (self.dial, next) = latest_dial((game, chat), rx);
                     self.sync();
                 }
                 Ok(Cmd::Latency(samples)) => {
@@ -707,6 +728,7 @@ impl Actor {
     /// Build / heal the graph while on; tear it down and hand ChatMix back
     /// while off.
     fn sync(&mut self) {
+        self.graph.reap();
         if self.suppressed {
             return;
         }
@@ -834,6 +856,26 @@ mod tests {
         }
     }
 
+    /// A burst of dial reports is one sync with the last; whatever came
+    /// after them is next, in order.
+    #[test]
+    fn queued_dial_reports_collapse_into_the_last() {
+        let (tx, rx) = mpsc::channel();
+        for cmd in [
+            Cmd::Dial(0.2, 1.0),
+            Cmd::Dial(0.4, 1.0),
+            Cmd::Latency(64),
+            Cmd::Dial(0.9, 1.0),
+        ] {
+            tx.send(cmd).unwrap();
+        }
+        let (dial, next) = latest_dial((0.0, 1.0), &rx);
+        assert_eq!(dial, (0.4, 1.0));
+        assert!(matches!(next, Some(Cmd::Latency(64))));
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Dial(0.9, 1.0))));
+        assert!(matches!(latest_dial(dial, &rx), ((0.4, 1.0), None)));
+    }
+
     #[test]
     fn patches_are_all_or_nothing_and_fader_drags_write_later() {
         let paths = paths("patch");
@@ -887,15 +929,18 @@ mod tests {
         assert_eq!(file.live.outputs[0].gain_db, -4.0);
         assert!(file.live.outputs[0].mute);
 
-        // Subscribers heard about it.
-        let mut updates = 0;
+        // Subscribers heard about each file: the first, the output, three
+        // drags, the fourth and the mute (status-only changes are PipeWire's).
+        let mut files: Vec<MixerFile> = Vec::new();
         while let Ok(ev) = events.try_recv() {
             if let AdapterEvent::MixerUpdated(state) = ev {
-                updates += 1;
                 assert!(!state.file.enabled);
+                if files.last() != Some(&state.file) {
+                    files.push(state.file);
+                }
             }
         }
-        assert!(updates >= 2, "{updates} MixerUpdated events");
+        assert_eq!(files.len(), 7, "{files:?}");
         mixer.shutdown();
         let _ = std::fs::remove_dir_all(&paths.root);
     }
@@ -1138,6 +1183,26 @@ mod tests {
     }
 
     #[test]
+    fn edits_after_shutdown_are_refused_and_write_nothing() {
+        let paths = paths("after-shutdown");
+        let (mixer, _events) = service(&paths);
+        mixer.patch(&[b1()]).unwrap();
+        mixer.shutdown();
+        let before = std::fs::read(mixer_path(&paths)).unwrap();
+        let mute = MixerOp::SetOutputMute {
+            output: "B1".into(),
+            mute: true,
+        };
+        assert!(matches!(mixer.patch(&[mute]), Err(PatchError::Io(_))));
+        assert!(matches!(
+            mixer.set_live(Scene::default()),
+            Err(PatchError::Io(_))
+        ));
+        assert_eq!(std::fs::read(mixer_path(&paths)).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
     fn an_old_single_source_trim_is_folded_on_disk_at_start() {
         let paths = paths("normalise");
         std::fs::write(
@@ -1243,6 +1308,32 @@ mod tests {
             std::fs::read_to_string(mixer_path(&paths)).unwrap(),
             "version = \"x\""
         );
+        mixer.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+
+        // A fader drag pending when the file turns unreadable: kept, not
+        // written over it, told once.
+        let paths = self::paths("broken-drag");
+        let (mixer, mut events) = service(&paths);
+        mixer.patch(&[b1()]).unwrap();
+        mixer
+            .patch(&[MixerOp::SetOutputGain {
+                output: "B1".into(),
+                gain_db: -9.0,
+            }])
+            .unwrap();
+        std::fs::write(mixer_path(&paths), "version = \"x\"").unwrap();
+        mixer.shared.flush(true);
+        mixer.shared.flush(true);
+        assert_eq!(
+            std::fs::read_to_string(mixer_path(&paths)).unwrap(),
+            "version = \"x\""
+        );
+        assert!(lock(&mixer.shared.cache).dirty.is_some(), "still pending");
+        let errors = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|e| matches!(e, AdapterEvent::Error { .. }))
+            .count();
+        assert_eq!(errors, 1);
         mixer.shutdown();
         let _ = std::fs::remove_dir_all(&paths.root);
     }

@@ -1,6 +1,7 @@
 //! Character stages: distortion, robot (ring modulator) and bitcrusher.
 
 use crate::dynamics::{Biquad, Smooth};
+use crate::pitch::sane_rate;
 use crate::Effect;
 use std::f32::consts::TAU;
 
@@ -23,6 +24,7 @@ const DRIVE_REF: f32 = 0.25;
 
 impl Distortion {
     pub fn new(rate: f32) -> Self {
+        let rate = sane_rate(rate);
         Self {
             rate,
             tone: Biquad::new(),
@@ -74,6 +76,7 @@ pub struct Robot {
 
 impl Robot {
     pub fn new(rate: f32) -> Self {
+        let rate = sane_rate(rate);
         Self {
             rate,
             phase: 0.0,

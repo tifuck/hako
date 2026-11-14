@@ -11,6 +11,9 @@ use deep_filter_rt::tract::{DfParams, DfTract, RuntimeParams};
 use ndarray::{ArrayView2, ArrayViewMut2};
 use nnnoiseless::DenoiseState;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ptr::null_mut;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 const RATE: f32 = 48000.0;
 const HOP: usize = DenoiseState::FRAME_SIZE;
@@ -37,10 +40,24 @@ enum Model {
 pub struct Denoise {
     /// `None` at rates other than 48 kHz.
     inner: Option<Box<Inner>>,
+    /// `None` with `inner`.
+    spare: Option<Arc<Spare>>,
+}
+
+/// Engines handed between the host's main thread, which builds and frees them, and the audio
+/// thread, which swaps them in on `reset` without allocating or freeing.
+struct Spare {
+    /// DeepFilterNet as loaded, cloned for every fresh set (a clone shares the weights).
+    /// Locked by `prepare` only, never on the audio thread.
+    dfn: Mutex<Option<DfTract>>,
+    /// Built by `prepare`, taken by `reset`.
+    fresh: AtomicPtr<Engines>,
+    /// Replaced by `reset`, freed by the next `prepare` or with the plugin.
+    spent: AtomicPtr<Engines>,
 }
 
 struct Inner {
-    engines: Engines,
+    engines: Box<Engines>,
     active: Option<Model>,
     /// Hops the other model has run so far to take over from `active`.
     warm: usize,
@@ -54,8 +71,8 @@ struct Inner {
 struct Engines {
     /// `None` if the model failed to load; RNNoise stands in.
     dfn: Option<DfTract>,
-    /// `dfn` as loaded, for `reset` (a clone shares the weights).
-    dfn_fresh: Option<DfTract>,
+    /// `dfn` panicked and was dropped; fresh engines leave it out too.
+    dfn_failed: bool,
     dfn_reduction: f32,
     rnn: Box<DenoiseState<'static>>,
     rnn_frame: [f32; HOP],
@@ -69,21 +86,15 @@ impl Denoise {
     pub fn new(rate: f32) -> Self {
         // ponytail: 48 kHz only, other rates pass through; resample around the models for them.
         if rate != RATE {
-            return Self { inner: None };
+            return Self {
+                inner: None,
+                spare: None,
+            };
         }
         let dfn = catch_unwind(load_deep_filter).ok().flatten();
         Self {
             inner: Some(Box::new(Inner {
-                engines: Engines {
-                    dfn_fresh: dfn.clone(),
-                    dfn,
-                    dfn_reduction: 100.0,
-                    rnn: DenoiseState::new(),
-                    rnn_frame: [0.0; HOP],
-                    rnn_dry: 0.0,
-                    #[cfg(test)]
-                    runs: 0,
-                },
+                engines: Engines::new(dfn.clone()),
                 active: None,
                 warm: 0,
                 history: [0.0; HISTORY],
@@ -92,7 +103,43 @@ impl Denoise {
                 fade: [0.0; HOP],
                 pos: 0,
             })),
+            spare: Some(Arc::new(Spare {
+                dfn: Mutex::new(dfn),
+                fresh: AtomicPtr::new(null_mut()),
+                spent: AtomicPtr::new(null_mut()),
+            })),
         }
+    }
+}
+
+impl Spare {
+    /// On the host's main thread: frees what the last `reset` replaced and builds the engines
+    /// the next one swaps in.
+    fn prepare(&self) {
+        free(self.spent.swap(null_mut(), Ordering::AcqRel));
+        let dfn = self
+            .dfn
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let fresh = Box::into_raw(Engines::new(dfn));
+        free(self.fresh.swap(fresh, Ordering::AcqRel));
+    }
+}
+
+impl Drop for Spare {
+    fn drop(&mut self) {
+        free(*self.fresh.get_mut());
+        free(*self.spent.get_mut());
+    }
+}
+
+/// Frees engines `Spare` held.
+fn free(engines: *mut Engines) {
+    if !engines.is_null() {
+        // SAFETY: every pointer in a `Spare` slot came from `Box::into_raw`, and the swap
+        // that returned it took it out of the slot.
+        drop(unsafe { Box::from_raw(engines) });
     }
 }
 
@@ -127,18 +174,28 @@ impl Effect for Denoise {
         }
     }
 
-    // ponytail: the fresh models (a ~10 µs DeepFilterNet clone, a new RNNoise state) allocate
-    // on the audio thread, like their inference.
+    /// Swaps in the engines `reset_preparer` built. Without them (never prepared, or the last
+    /// replaced ones not freed yet because an `activate` overlapped the previous reset) the
+    /// models keep their state.
     fn reset(&mut self) {
-        let Some(inner) = &mut self.inner else {
+        let (Some(inner), Some(spare)) = (&mut self.inner, &self.spare) else {
             return;
         };
-        let engines = &mut inner.engines;
-        engines.dfn.clone_from(&engines.dfn_fresh);
-        engines.dfn_reduction = 100.0;
-        engines.rnn = DenoiseState::new();
-        engines.rnn_frame = [0.0; HOP];
-        engines.rnn_dry = 0.0;
+        if spare.spent.load(Ordering::Acquire).is_null() {
+            let fresh = spare.fresh.swap(null_mut(), Ordering::AcqRel);
+            if !fresh.is_null() {
+                // SAFETY: `prepare` leaked it, and the swap took it out of the slot.
+                let mut fresh = unsafe { Box::from_raw(fresh) };
+                if inner.engines.dfn_failed {
+                    // Not retried after every pause: the failed one's `None` goes in instead,
+                    // the clone leaves with the old engines.
+                    std::mem::swap(&mut fresh.dfn, &mut inner.engines.dfn);
+                    fresh.dfn_failed = true;
+                }
+                let old = std::mem::replace(&mut inner.engines, fresh);
+                spare.spent.store(Box::into_raw(old), Ordering::Release);
+            }
+        }
         inner.active = None;
         inner.warm = 0;
         inner.history = [0.0; HISTORY];
@@ -146,6 +203,11 @@ impl Effect for Denoise {
         inner.output = [0.0; HOP];
         inner.fade = [0.0; HOP];
         inner.pos = 0;
+    }
+
+    fn reset_preparer(&mut self) -> Option<Box<dyn Fn() + Send + Sync>> {
+        let spare = self.spare.clone()?;
+        Some(Box::new(move || spare.prepare()))
     }
 }
 
@@ -180,6 +242,19 @@ impl Inner {
 }
 
 impl Engines {
+    fn new(dfn: Option<DfTract>) -> Box<Self> {
+        Box::new(Self {
+            dfn,
+            dfn_failed: false,
+            dfn_reduction: 100.0,
+            rnn: DenoiseState::new(),
+            rnn_frame: [0.0; HOP],
+            rnn_dry: 0.0,
+            #[cfg(test)]
+            runs: 0,
+        })
+    }
+
     /// One hop of `model` on the newest hop of `history`, `DELAY` samples late.
     // ponytail: on the audio thread tract allocates its tensors and takes its (uncontended)
     // executor lock per hop, and easyfft allocates its FFT plan on a thread's first RNNoise
@@ -211,6 +286,7 @@ impl Engines {
                             // Not retried every hop: RNNoise takes over, as when it failed to load.
                             Err(_) => {
                                 self.dfn = None;
+                                self.dfn_failed = true;
                                 false
                             }
                         }
@@ -258,6 +334,7 @@ fn dry(history: &[f32; HISTORY], delay: usize) -> &[f32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
     use std::f32::consts::{PI, TAU};
     use std::time::Instant;
 
@@ -456,6 +533,64 @@ mod tests {
         for (i, (&o, &x)) in out[latency..].iter().zip(&input).enumerate() {
             assert!((o - x).abs() < 1e-3, "sample {i}: {o} vs {x}");
         }
+    }
+
+    /// Allocations and frees on this thread, counted for every test of the crate.
+    struct Counting;
+
+    thread_local! {
+        static HEAP_OPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn heap_ops() -> usize {
+        HEAP_OPS.with(|n| n.get())
+    }
+
+    fn count() {
+        let _ = HEAP_OPS.try_with(|n| n.set(n.get() + 1));
+    }
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count();
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            count();
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            count();
+            unsafe { System.realloc(ptr, layout, size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// `reset` swaps in what `reset_preparer` built without touching the heap, and a
+    /// DeepFilterNet that panicked stays off after it.
+    #[test]
+    fn reset_swaps_prepared_engines_without_allocating() {
+        let mut fx = Denoise::new(RATE);
+        let prepare = fx.reset_preparer().unwrap();
+        let voice = vowel(20 * HOP);
+        run(&mut fx, controls(100.0, Model::DeepFilter), &voice, 512);
+        prepare();
+        let before = heap_ops();
+        fx.reset();
+        assert_eq!(heap_ops(), before, "reset allocated or freed");
+        let engines = &fx.inner.as_ref().unwrap().engines;
+        assert!(engines.dfn.is_some() && engines.runs == 0, "fresh engines");
+
+        let engines = &mut fx.inner.as_mut().unwrap().engines;
+        engines.dfn = None;
+        engines.dfn_failed = true;
+        prepare();
+        fx.reset();
+        assert!(fx.inner.as_ref().unwrap().engines.dfn.is_none());
     }
 
     #[test]

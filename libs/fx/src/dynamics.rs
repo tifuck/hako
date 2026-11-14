@@ -1,6 +1,7 @@
 //! Level stages: de-esser and limiter, plus the small filters the other
 //! stages share (one-pole smoother, RBJ "Audio EQ Cookbook" biquad).
 
+use crate::pitch::sane_rate;
 use crate::Effect;
 use std::f32::consts::PI;
 
@@ -123,6 +124,7 @@ pub struct DeEsser {
 
 impl DeEsser {
     pub fn new(rate: f32) -> Self {
+        let rate = sane_rate(rate);
         Self {
             rate,
             split: Biquad::new(),

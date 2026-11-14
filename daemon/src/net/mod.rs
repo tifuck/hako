@@ -32,7 +32,7 @@ use std::net::{
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -50,10 +50,16 @@ const HANDSHAKE: Duration = Duration::from_secs(5);
 const FIRST_MESSAGE_WAIT: Duration = Duration::from_secs(1);
 /// A session with nothing heard for this long is dead.
 const SILENCE: Duration = Duration::from_secs(5);
+/// A session's reads give up after this (the tick ends silent sessions
+/// sooner; this holds without it).
+const READ_LIMIT: Duration = SILENCE.saturating_mul(3);
 /// A pairing request nobody answered is dropped after this.
 const PENDING: Duration = Duration::from_secs(60);
-/// A denied key is refused for this long.
+/// A denied key is refused for this long, and so are pairing requests
+/// from an address whose last one ended unanswered.
 const DENIED: Duration = Duration::from_secs(60);
+/// Addresses cooling down after an unanswered request (the oldest goes).
+const MAX_COOLING: usize = 64;
 const MAX_PENDING: usize = 4;
 /// Pairing requests waiting from one IP address.
 const MAX_PENDING_PER_IP: usize = 1;
@@ -95,12 +101,21 @@ struct Session {
     heard: Mutex<Instant>,
     opened: Instant,
     rtt_ms: Mutex<f32>,
+    /// This machine dialled it (else it answered).
+    dialled: bool,
 }
 
 impl Session {
-    fn new(stream: &TcpStream, hs: Handshake, name: &str, port: u16) -> Result<Self> {
+    fn new(
+        stream: &TcpStream,
+        hs: Handshake,
+        name: &str,
+        port: u16,
+        dialled: bool,
+    ) -> Result<Self> {
         let id = peer_id(&hs.key);
         Ok(Self {
+            dialled,
             name: clean_name(name, &id),
             addr: SocketAddr::new(stream.peer_addr()?.ip(), port),
             writer: Mutex::new(stream.try_clone()?),
@@ -249,6 +264,9 @@ struct Inner {
     /// Where each peer was last connected this run (reconnects).
     seen_at: HashMap<String, SocketAddr>,
     denied: HashMap<String, Instant>,
+    /// Addresses whose pairing request ended unanswered, and when: new
+    /// requests from them are `Busy` for `DENIED` (keys cost nothing).
+    cooling: HashMap<IpAddr, Instant>,
     /// Reconnects in flight.
     dialing: HashSet<String>,
     /// Paired machines being reconnected, by key.
@@ -603,8 +621,9 @@ impl Shared {
     }
 
     /// The responder: handshake, Hello, then known keys go live, unknown
-    /// ones that ask to pair wait for Accept / Deny. Reads the session
-    /// until it ends (`slot` is given back once it is set up).
+    /// ones that ask to pair wait for Accept / Deny. Only those get the
+    /// pairing nonce (`wire::code_digest`). Reads the session until it
+    /// ends (`slot` is given back once it is set up).
     fn answer(
         self: &Arc<Self>,
         stream: TcpStream,
@@ -624,48 +643,34 @@ impl Shared {
         };
         prepare(&stream)?;
         let mut timed = Deadline::new(&stream).first(FIRST_MESSAGE, FIRST_MESSAGE_WAIT);
-        let hs = handshake(&mut timed, &private, false)?;
-        let mut last = hs.last;
+        let keyed = handshake(&mut timed, &private, false)?;
+        let mut last = 0;
         let Control::Hello {
             name, port, pair, ..
-        } = read_control(&mut timed, &hs.cipher, &mut last)?
+        } = read_control(&mut timed, &keyed.cipher, &mut last)?
         else {
             bail!("no Hello");
         };
-        let s = Arc::new(Session::new(&stream, hs, &name, port)?);
+        let (hs, reveal) = keyed.reveal()?;
+        let s = Arc::new(Session::new(&stream, hs, &name, port, false)?);
+        // Held until the reveal is written: it must be the first frame, and
+        // `s` is registered (pings, Accept) before.
+        let mut writer = lock(&s.writer);
         let (admitted, old) = {
             let mut inner = lock(&self.inner);
-            let waiting = |from: Option<IpAddr>| {
-                inner
-                    .sessions
-                    .values()
-                    .filter(|e| e.stage == Stage::Incoming)
-                    .filter(|e| from.is_none_or(|ip| e.session.addr.ip() == ip))
-                    .count()
+            let mut stage = admission(&inner, &own, &s.key, s.addr.ip(), pair);
+            let replacing = inner
+                .sessions
+                .get(&s.key)
+                .map(|e| replaces(&own, &s, &e.session));
+            let old = match (&stage, replacing) {
+                (Ok(Stage::Live), Some(true)) => inner.sessions.remove(&s.key),
+                (Ok(Stage::Live), Some(false)) => {
+                    stage = Err((Control::Bye, "its other connection is kept"));
+                    None
+                }
+                _ => None,
             };
-            // Refused: the reply and why.
-            let stage = if s.key == own {
-                Err((Control::Denied, "this machine's own key"))
-            } else if inner.denied.contains_key(&s.key) {
-                Err((Control::Denied, "denied a moment ago"))
-            } else if inner.file.peers.iter().any(|p| p.key == s.key) {
-                Ok(Stage::Live)
-            } else if !pair {
-                Err((Control::Denied, "not paired"))
-            } else if waiting(None) >= MAX_PENDING
-                || waiting(Some(s.addr.ip())) >= MAX_PENDING_PER_IP
-            {
-                Err((Control::Busy, "too many pairing requests"))
-            } else {
-                Ok(Stage::Incoming)
-            };
-            // A paired machine dialling again lost its old session (it
-            // restarted without Bye): the new one replaces it. The higher
-            // id redials only after `REDIAL_GRACE`, so two sessions do not
-            // keep replacing each other.
-            let old = matches!(stage, Ok(Stage::Live))
-                .then(|| inner.sessions.remove(&s.key))
-                .flatten();
             let admitted = stage
                 .map_err(|(reply, e)| (reply, e.to_string()))
                 .and_then(|stage| {
@@ -676,16 +681,20 @@ impl Shared {
             (admitted, old)
         };
         if let Some(old) = old {
-            self.close(&old.session, Some(&Control::Bye));
+            self.close(&old.session, None);
         }
         let stage = match admitted {
             Ok(stage) => stage,
             Err((reply, e)) => {
+                drop(writer);
                 let _ = s.send(&reply);
                 bail!("{}: {e}", s.name);
             }
         };
-        let setup = s.send(&hello).and_then(|()| {
+        let revealed = writer.write_all(&reveal);
+        drop(writer);
+        let setup = revealed.map_err(anyhow::Error::from).and_then(|()| {
+            s.send(&hello)?;
             if stage == Stage::Live {
                 self.go_live(&s, false).map_err(|e| anyhow!(message(e)))?;
                 s.send(&Control::Accepted)?;
@@ -729,11 +738,11 @@ impl Shared {
             .map_err(|e| Failed(format!("{addr}: {e}")))?;
         prepare(&stream).map_err(|e| Failed(format!("{addr}: {e}")))?;
         let mut timed = Deadline::new(&stream);
-        let hs = handshake(&mut timed, &private, true).map_err(failed)?;
-        if hs.key == own {
+        let keyed = handshake(&mut timed, &private, true).map_err(failed)?;
+        if keyed.key == own {
             return Err(Failed(format!("{addr} is this machine")));
         }
-        if want.is_some_and(|key| key != hs.key) {
+        if want.is_some_and(|key| key != keyed.key) {
             return Err(WrongKey(format!(
                 "{addr} is not the machine that announced itself there"
             )));
@@ -741,40 +750,55 @@ impl Shared {
         if pair {
             let inner = lock(&self.inner);
             let peers = &inner.file.peers;
-            if peers.len() >= MAX_PEERS && !peers.iter().any(|p| p.key == hs.key) {
+            if peers.len() >= MAX_PEERS && !peers.iter().any(|p| p.key == keyed.key) {
                 return Err(Failed(format!(
                     "at most {MAX_PEERS} paired peers: forget one first"
                 )));
             }
         }
-        let mut last = hs.last;
-        let reply = hs
+        let mut last = 0;
+        let revealed = keyed
             .cipher
             .seal_control(&hello)
             .and_then(|frame| Ok(timed.write_all(&frame)?))
-            .and_then(|()| read_control(&mut timed, &hs.cipher, &mut last))
+            .and_then(|()| keyed.read_reveal(&mut timed, &mut last))
             .map_err(failed)?;
-        let (name, port) = match reply {
-            Control::Hello { name, port, .. } => (name, port),
-            Control::Denied => return Err(Declined(format!("{addr} declined"))),
-            Control::Busy => {
+        // A refusal comes instead of the reveal, an admission's Hello after it.
+        let (hs, reply) = match revealed {
+            Ok(hs) => {
+                let reply = read_control(&mut timed, &hs.cipher, &mut last).map_err(failed)?;
+                (Some(hs), reply)
+            }
+            Err(refused) => (None, refused),
+        };
+        let (hs, name, port) = match (hs, reply) {
+            (Some(hs), Control::Hello { name, port, .. }) => (hs, name, port),
+            (_, Control::Denied) => return Err(Declined(format!("{addr} declined"))),
+            (_, Control::Busy) => {
                 return Err(Failed(format!(
                     "{addr} is busy with other pairing requests: try again in a minute"
                 )))
             }
             _ => return Err(Failed(format!("{addr} closed the connection"))),
         };
-        let s = Arc::new(Session::new(&stream, hs, &name, port).map_err(failed)?);
-        let registered = register(
-            &mut lock(&self.inner),
-            &s,
-            Stage::Outgoing { shown: pair },
-            &stop,
-        );
-        if let Err(e) = registered {
-            s.try_send(&Control::Bye);
-            return Err(Failed(e));
+        let s = Arc::new(Session::new(&stream, hs, &name, port, true).map_err(failed)?);
+        let (registered, old) = {
+            let mut inner = lock(&self.inner);
+            let old = inner
+                .sessions
+                .get(&s.key)
+                .is_some_and(|e| replaces(&own, &s, &e.session))
+                .then(|| inner.sessions.remove(&s.key))
+                .flatten();
+            let stage = Stage::Outgoing { shown: pair };
+            (register(&mut inner, &s, stage, &stop), old)
+        };
+        if let Some(old) = old {
+            self.close(&old.session, None);
         }
+        // Dropped without Bye: the other side may hold this connection as
+        // its session for now, and the one kept is not this one.
+        registered.map_err(Failed)?;
         self.publish();
         let me = self.clone();
         let reader = s.clone();
@@ -934,7 +958,7 @@ impl Shared {
                         &recv_node(&s.id),
                         &s.name,
                         jitter,
-                        send_fn(s.cipher.clone(), udp, s.addr),
+                        send_fn(s.cipher.clone(), Arc::downgrade(&udp), s.addr),
                     )
                     .map_err(|e| PatchError::Invalid(format!("{}: {e}", s.name)))?,
             ),
@@ -973,7 +997,7 @@ impl Shared {
 
     /// Read `s`'s control frames until it ends, then close it.
     fn read_loop(self: &Arc<Self>, s: &Arc<Session>, mut stream: TcpStream, mut last: u64) {
-        let _ = stream.set_read_timeout(None);
+        let _ = stream.set_read_timeout(Some(READ_LIMIT));
         while let Ok(msg) = read_control(&mut stream, &s.cipher, &mut last) {
             *lock(&s.heard) = Instant::now();
             match msg {
@@ -1028,7 +1052,8 @@ impl Shared {
         self.close(s, Some(&Control::Bye));
     }
 
-    /// Tell the peer (`msg`), disconnect and drop the session.
+    /// Tell the peer (`msg`), disconnect and drop the session. An incoming
+    /// request that ends here cools its address down.
     fn close(&self, s: &Arc<Session>, msg: Option<&Control>) {
         if let Some(msg) = msg {
             s.try_send(msg);
@@ -1041,8 +1066,11 @@ impl Shared {
                 .get(&s.key)
                 .is_some_and(|e| Arc::ptr_eq(&e.session, s))
             {
-                inner.sessions.remove(&s.key);
+                let ended = inner.sessions.remove(&s.key);
                 inner.stats.remove(&s.key);
+                if ended.is_some_and(|e| e.stage == Stage::Incoming) {
+                    cool_down(&mut inner.cooling, s.addr.ip(), Instant::now());
+                }
             }
             let mut links = lock(&self.links);
             match links.get(&s.addr) {
@@ -1151,6 +1179,9 @@ impl Shared {
             inner
                 .denied
                 .retain(|_, at| now.duration_since(*at) < DENIED);
+            inner
+                .cooling
+                .retain(|_, at| now.duration_since(*at) < DENIED);
             expire(&mut inner.nearby, now);
             inner.stats = lock(&self.links)
                 .values()
@@ -1173,6 +1204,9 @@ impl Shared {
             inner
                 .redial
                 .retain(|key, _| inner.file.peers.iter().any(|p| &p.key == key));
+            inner
+                .seen_at
+                .retain(|key, _| inner.file.peers.iter().any(|p| &p.key == key));
             let dials = reconnects(inner, now);
             let beacon = match (&inner.live, &inner.identity, self.discovery) {
                 (Some(live), Some(identity), Some(port)) if n.is_multiple_of(BEACON_TICKS) => {
@@ -1191,25 +1225,22 @@ impl Shared {
             (stale, sessions, dials, beacon)
         };
         for (s, bye) in &stale {
-            match bye {
-                // The other side must hear it to unpin: never skipped.
-                Control::Denied => self.undo(s),
-                _ => self.close(s, Some(bye)),
-            }
+            // ponytail: never waits (the tick serves every session), so a
+            // Pong being written that instant costs a Confirm's `Denied` and
+            // the other side keeps its pin until its reconnect is declined;
+            // hand `undo` to a thread if that shows up.
+            self.close(s, Some(bye));
         }
         for s in sessions {
             s.try_send(&Control::Ping { t: s.clock() });
         }
         for (key, addrs) in dials {
-            let me = self.clone();
-            let dialing = key.clone();
-            let spawned = spawn("hako-net-dial", move || {
-                me.redial(&key, &addrs);
-                lock(&me.inner).dialing.remove(&key);
+            // Dropped with the closure, also if the thread is not started.
+            let dialing = Dialing(self.clone(), key);
+            spawn("hako-net-dial", move || {
+                let Dialing(me, key) = &dialing;
+                me.redial(key, &addrs);
             });
-            if spawned.is_none() {
-                lock(&self.inner).dialing.remove(&dialing);
-            }
         }
         if let Some((sock, bytes, to)) = beacon {
             if let Err(e) = sock.send_to(&bytes, to) {
@@ -1360,6 +1391,53 @@ impl Shared {
     }
 }
 
+/// The stage an incoming connection from `key` at `ip` gets after its Hello
+/// (`pair`: it asks to pair; `own`: this machine's key), or the reply that
+/// refuses it and why.
+fn admission(
+    inner: &Inner,
+    own: &str,
+    key: &str,
+    ip: IpAddr,
+    pair: bool,
+) -> Result<Stage, (Control, &'static str)> {
+    let waiting = |from: Option<IpAddr>| {
+        inner
+            .sessions
+            .values()
+            .filter(|e| e.stage == Stage::Incoming)
+            .filter(|e| from.is_none_or(|from| e.session.addr.ip() == from))
+            .count()
+    };
+    if key == own {
+        Err((Control::Denied, "this machine's own key"))
+    } else if inner.denied.contains_key(key) {
+        Err((Control::Denied, "denied a moment ago"))
+    } else if inner.file.peers.iter().any(|p| p.key == key) {
+        Ok(Stage::Live)
+    } else if !pair {
+        Err((Control::Denied, "not paired"))
+    } else if inner.cooling.contains_key(&ip) {
+        Err((Control::Busy, "its last pairing request ended unanswered"))
+    } else if waiting(None) >= MAX_PENDING || waiting(Some(ip)) >= MAX_PENDING_PER_IP {
+        Err((Control::Busy, "too many pairing requests"))
+    } else {
+        Ok(Stage::Incoming)
+    }
+}
+
+/// Whether the new session `s` replaces `old`, its key's session (`own`:
+/// this machine's key). Dialled the same way: an answered one does (the
+/// machine dialling again lost the old one: it restarted without Bye), a
+/// dialled one does not. Opposite ways (both machines dialled at once):
+/// both sides keep the connection the lower key dialled.
+fn replaces(own: &str, s: &Session, old: &Session) -> bool {
+    if s.dialled == old.dialled {
+        return !s.dialled;
+    }
+    s.dialled == (own < s.key.as_str())
+}
+
 /// Add `s` unless Network went off meanwhile (`stop` is not the live one)
 /// or its key has a session already.
 fn register(
@@ -1448,6 +1526,27 @@ fn reconnects(inner: &mut Inner, now: Instant) -> Vec<(String, Vec<SocketAddr>)>
     dials
 }
 
+/// A reconnect in flight: its key leaves `dialing` when this is dropped,
+/// however the dial ends.
+struct Dialing(Arc<Shared>, String);
+
+impl Drop for Dialing {
+    fn drop(&mut self) {
+        lock(&self.0.inner).dialing.remove(&self.1);
+    }
+}
+
+/// Note that `ip`'s pairing request ended unanswered (see `MAX_COOLING`).
+fn cool_down(cooling: &mut HashMap<IpAddr, Instant>, ip: IpAddr, now: Instant) {
+    if cooling.len() >= MAX_COOLING && !cooling.contains_key(&ip) {
+        let oldest = cooling.iter().min_by_key(|(_, at)| **at).map(|(ip, _)| *ip);
+        if let Some(ip) = oldest {
+            cooling.remove(&ip);
+        }
+    }
+    cooling.insert(ip, now);
+}
+
 /// The wait after reconnect attempt `n` (1-based): `REDIAL`, doubling, at
 /// most `MAX_REDIAL`.
 fn redial_delay(n: u32) -> Duration {
@@ -1480,7 +1579,9 @@ fn deliver(
 /// A session's audio send path: seal each block and `sendto` it without
 /// blocking. Runs on PipeWire's data thread: its buffers are made here,
 /// once, and it takes no lock.
-fn send_fn(cipher: Arc<Cipher>, udp: Arc<UdpSocket>, to: SocketAddr) -> SendFn {
+/// `udp` is weak: the PipeWire thread may drop a closed port's callback
+/// late, and a live socket would keep Network's port taken.
+fn send_fn(cipher: Arc<Cipher>, udp: Weak<UdpSocket>, to: SocketAddr) -> SendFn {
     // The socket is IPv4 (bound to 0.0.0.0): so are its peers.
     let SocketAddr::V4(to) = to else {
         return Box::new(|_, _| {});
@@ -1500,6 +1601,9 @@ fn send_fn(cipher: Arc<Cipher>, udp: Arc<UdpSocket>, to: SocketAddr) -> SendFn {
         if n == 0 {
             return;
         }
+        let Some(udp) = udp.upgrade() else {
+            return;
+        };
         // SAFETY: `packet` holds `n` bytes, `addr` is a valid sockaddr_in,
         // and `udp` keeps the socket open.
         unsafe {
@@ -1517,11 +1621,28 @@ fn send_fn(cipher: Arc<Cipher>, udp: Arc<UdpSocket>, to: SocketAddr) -> SendFn {
 
 /// The key file; absent = `None`. Unreadable is an error, never replaced.
 fn load_identity(paths: &ConfigPaths) -> Result<Option<Identity>> {
+    use std::os::unix::fs::PermissionsExt;
     let path = identity_path(paths);
     match std::fs::read_to_string(&path) {
-        Ok(text) => Identity::parse(&text)
-            .map(Some)
-            .with_context(|| format!("{}", path.display())),
+        Ok(text) => {
+            // Others could read it (copied, restored from a backup): kept,
+            // and made owner-only again.
+            let mode = std::fs::metadata(&path).map_or(0, |m| m.permissions().mode());
+            if mode & 0o077 != 0 {
+                warn!(
+                    "{}: mode {:o}, making it owner-only (600)",
+                    path.display(),
+                    mode & 0o777
+                );
+                let tightened = std::fs::Permissions::from_mode(0o600);
+                if let Err(e) = std::fs::set_permissions(&path, tightened) {
+                    warn!("{}: {e}", path.display());
+                }
+            }
+            Identity::parse(&text)
+                .map(Some)
+                .with_context(|| format!("{}", path.display()))
+        }
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
@@ -2087,7 +2208,11 @@ mod tests {
         let tx = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
         rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let mut send = send_fn(Arc::new(a.cipher), tx.clone(), rx.local_addr().unwrap());
+        let mut send = send_fn(
+            Arc::new(a.cipher),
+            Arc::downgrade(&tx),
+            rx.local_addr().unwrap(),
+        );
         let block = [1i16, -2, 3, -4];
         send(960, &block);
         let mut buf = [0u8; 2048];
@@ -2119,7 +2244,7 @@ mod tests {
         let (hs, _, _, _) = wire::tests::pair();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let s = Session::new(&stream, hs, name, DEFAULT_PORT).unwrap();
+        let s = Session::new(&stream, hs, name, DEFAULT_PORT, false).unwrap();
         (Arc::new(s), listener)
     }
 
@@ -2247,6 +2372,227 @@ mod tests {
         c.shutdown();
         let _ = std::fs::remove_dir_all(&c_paths.root);
         done([(a, a_paths), (b, b_paths)]);
+    }
+
+    #[test]
+    fn an_unanswered_request_cools_its_address_down() {
+        let (a, a_paths, _) = machine("cool-a");
+        let (b, b_paths, b_port) = machine("cool-b");
+        let (c, c_paths, _) = machine("cool-c");
+        turn_on(&a);
+        turn_on(&b);
+        turn_on(&c);
+        let pair = [NetOp::Pair {
+            address: format!("127.0.0.1:{b_port}"),
+            key: None,
+        }];
+        a.patch(&pair).unwrap();
+        // Nobody answers it in time.
+        for e in lock(&b.shared.inner).sessions.values_mut() {
+            e.since -= PENDING;
+        }
+        b.shared.tick(1);
+        wait("expired", || {
+            a.state().requests.is_empty() && b.state().requests.is_empty()
+        });
+        // Another key from that address is refused too (keys cost nothing).
+        match c.patch(&pair) {
+            Err(PatchError::Invalid(e)) => assert!(e.contains("busy"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(b.state().requests.is_empty());
+        for at in lock(&b.shared.inner).cooling.values_mut() {
+            *at -= DENIED;
+        }
+        b.shared.tick(1);
+        c.patch(&pair).unwrap();
+        assert_eq!(b.state().requests.len(), 1);
+        c.shutdown();
+        let _ = std::fs::remove_dir_all(&c_paths.root);
+        done([(a, a_paths), (b, b_paths)]);
+
+        let (mut cooling, now) = (HashMap::new(), Instant::now());
+        for i in 0..=MAX_COOLING as u32 {
+            let at = now + Duration::from_millis(i.into());
+            cool_down(&mut cooling, Ipv4Addr::from(i).into(), at);
+        }
+        assert_eq!(cooling.len(), MAX_COOLING);
+        assert!(!cooling.contains_key(&Ipv4Addr::from(0).into()), "oldest");
+    }
+
+    #[test]
+    fn only_an_admitted_peer_gets_the_pairing_nonce() {
+        let (b, b_paths, b_port) = machine("grind");
+        turn_on(&b);
+        let connect = || {
+            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, b_port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let private = Identity::generate().unwrap().private;
+            let keyed = handshake(&mut stream, &private, true).unwrap();
+            (stream, keyed)
+        };
+        // The handshake alone (no Hello) gets nothing back.
+        let (mut stream, _) = connect();
+        let read = stream.read(&mut [0u8; 64]);
+        assert!(!matches!(read, Ok(n) if n > 0), "revealed before Hello");
+        drop(stream);
+        // A new key asking to pair: listed, and only then revealed to.
+        let ask = || {
+            let (mut stream, keyed) = connect();
+            let hello = Control::Hello {
+                name: "Grinder".into(),
+                version: "1".into(),
+                port: 1,
+                pair: true,
+            };
+            let frame = keyed.cipher.seal_control(&hello).unwrap();
+            stream.write_all(&frame).unwrap();
+            let got = keyed.read_reveal(&mut stream, &mut 0).unwrap();
+            (stream, got.err())
+        };
+        let (stream, refused) = ask();
+        assert_eq!(refused, None);
+        assert_eq!(b.state().requests.len(), 1);
+        // Given up at once: its address cools down, so retrying for another
+        // code gets no reveal.
+        drop(stream);
+        wait("request gone", || b.state().requests.is_empty());
+        for _ in 0..20 {
+            assert_eq!(ask().1, Some(Control::Busy));
+        }
+        assert!(b.state().requests.is_empty());
+        b.shutdown();
+        let _ = std::fs::remove_dir_all(&b_paths.root);
+    }
+
+    #[test]
+    fn pending_requests_are_capped_per_address_and_in_all() {
+        let own = "ff".repeat(32);
+        let new = "ee".repeat(32);
+        let ip = |n: u8| IpAddr::from([10, 0, 0, n]);
+        let mut inner = Inner::default();
+        let mut peers = Vec::new();
+        for n in 1..=MAX_PENDING as u8 {
+            assert_eq!(
+                admission(&inner, &own, &new, ip(n), true),
+                Ok(Stage::Incoming)
+            );
+            let (s, peer) = session("Peer");
+            let mut s = Arc::into_inner(s).unwrap();
+            s.addr = SocketAddr::new(ip(n), DEFAULT_PORT);
+            let entry = Entry {
+                session: Arc::new(s),
+                stage: Stage::Incoming,
+                since: Instant::now(),
+                fresh: false,
+            };
+            inner.sessions.insert(entry.session.key.clone(), entry);
+            peers.push(peer);
+        }
+        let busy = Err((Control::Busy, "too many pairing requests"));
+        assert_eq!(
+            admission(&inner, &own, &new, ip(1), true),
+            busy,
+            "one address"
+        );
+        let next = ip(MAX_PENDING as u8 + 1);
+        assert_eq!(admission(&inner, &own, &new, next, true), busy, "in all");
+    }
+
+    #[test]
+    fn both_dialling_at_once_keep_one_connection() {
+        let ([(a, a_paths), (b, b_paths)], _, _, b_port) = paired("both");
+        let a_port = lock(&a.shared.inner).file.port;
+        let key = |net: &NetService| lock(&net.shared.inner).file.peers[0].key.clone();
+        let (a_key, b_key) = (key(&b), key(&a));
+        let session = |net: &NetService| {
+            lock(&net.shared.inner)
+                .sessions
+                .values()
+                .find(|e| e.stage == Stage::Live)
+                .map(|e| e.session.clone())
+        };
+        // Their own reconnects stay out of it: these dials are the only ones.
+        lock(&a.shared.inner).dialing.insert(b_key.clone());
+        lock(&b.shared.inner).dialing.insert(a_key.clone());
+        for round in 0..3 {
+            let s = session(&a).unwrap();
+            a.shared.close(&s, None);
+            wait("dropped", || session(&a).is_none() && session(&b).is_none());
+            let start = std::sync::Barrier::new(2);
+            let to = |port| SocketAddr::from(([127, 0, 0, 1], port));
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    start.wait();
+                    let _ = a.shared.dial(to(b_port), false, Some(&b_key));
+                });
+                scope.spawn(|| {
+                    start.wait();
+                    let _ = b.shared.dial(to(a_port), false, Some(&a_key));
+                });
+            });
+            wait("connected", || {
+                session(&a).is_some() && session(&b).is_some()
+            });
+            let (sa, sb) = (session(&a).unwrap(), session(&b).unwrap());
+            std::thread::sleep(Duration::from_millis(1500));
+            let (now_a, now_b) = (session(&a), session(&b));
+            assert!(
+                now_a.is_some_and(|s| Arc::ptr_eq(&s, &sa))
+                    && now_b.is_some_and(|s| Arc::ptr_eq(&s, &sb)),
+                "round {round}: replaced or dropped"
+            );
+            let ends = |s: &Session| (s.sock.local_addr().unwrap(), s.sock.peer_addr().unwrap());
+            let (ea, eb) = (ends(&sa), ends(&sb));
+            assert_eq!((ea.0, ea.1), (eb.1, eb.0), "round {round}: one connection");
+            assert_eq!(sa.dialled, a_key < b_key, "the lower key's");
+        }
+        done([(a, a_paths), (b, b_paths)]);
+    }
+
+    #[test]
+    fn a_key_others_can_read_is_made_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let paths = paths("key-mode");
+        let id = Identity::generate().unwrap();
+        let path = identity_path(&paths);
+        std::fs::write(&path, id.text()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let loaded = load_identity(&paths).unwrap().unwrap();
+        assert_eq!(loaded.public, id.public);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn an_expired_confirm_never_waits_for_a_stuck_write() {
+        let (net, paths, _) = machine("expired-confirm");
+        let (s, _peer) = session("Peer");
+        lock(&net.shared.inner).sessions.insert(
+            s.key.clone(),
+            Entry {
+                session: s.clone(),
+                stage: Stage::Confirm,
+                since: Instant::now() - PENDING - TICK,
+                fresh: false,
+            },
+        );
+        let writing = lock(&s.writer);
+        let (tx, rx) = mpsc::channel();
+        let shared = net.shared.clone();
+        std::thread::spawn(move || {
+            shared.tick(1);
+            let _ = tx.send(());
+        });
+        let ticked = rx.recv_timeout(Duration::from_secs(2));
+        drop(writing);
+        assert!(ticked.is_ok(), "the tick waited for the session's writer");
+        assert!(lock(&net.shared.inner).sessions.is_empty());
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
     }
 
     /// Paired and connected over loopback: `(alpha, bravo, alpha's id,
@@ -2461,6 +2807,13 @@ mod tests {
         assert!(Slot::take(&slots, a).is_some());
         drop(others);
         assert!(lock(&slots).is_empty());
+
+        // And `MAX_HANDSHAKES` from all addresses together.
+        let held: Vec<_> = (0..MAX_HANDSHAKES as u8)
+            .map(|i| Slot::take(&slots, IpAddr::from([10, 0, 1, i / 2])).unwrap())
+            .collect();
+        assert!(Slot::take(&slots, "10.0.2.1".parse().unwrap()).is_none());
+        drop(held);
     }
 
     #[test]

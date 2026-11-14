@@ -23,7 +23,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Confirmation shown before a device may save settings to its own memory.
 pub const ONBOARD_WARNING: &str =
@@ -435,14 +435,16 @@ fn run(
                 }
                 match ticked {
                     Err(e) => {
-                        warn!("tick {}: {e:#}", adapter.id().key());
                         failed = Instant::now();
                         let error = format!("{e:#}");
                         if is_new_error(&mut reported, Some(&error)) {
+                            warn!("tick {}: {error}", adapter.id().key());
                             let _ = events.send(AdapterEvent::Error {
                                 device: Some(snap.id.clone()),
                                 message: format!("{}: {error}", snap.name),
                             });
+                        } else {
+                            debug!("tick {}: {error}", adapter.id().key());
                         }
                     }
                     Ok(()) if snap.last_error.is_none() && failed.elapsed() >= RECOVERED_AFTER => {

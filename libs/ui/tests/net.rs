@@ -147,6 +147,41 @@ fn accepting_an_incoming_request_sends_respond() {
 }
 
 #[test]
+fn denying_an_incoming_request_sends_respond_false() {
+    let out = drive(app(Some(sample()), true), |h| {
+        h.get_by_label("Deny").click();
+    });
+    assert_eq!(
+        patches(&out),
+        [NetOp::Respond {
+            id: "1122334455667788".into(),
+            accept: false
+        }]
+    );
+}
+
+#[test]
+fn cancel_withdraws_our_request_before_and_after_it_is_accepted() {
+    let cancel = |accepted: bool| {
+        let mut st = sample();
+        st.requests[1].accepted = accepted;
+        drive(app(Some(st), true), |h| {
+            h.get_by_label("Cancel").click();
+        })
+    };
+    for accepted in [false, true] {
+        assert_eq!(
+            patches(&cancel(accepted)),
+            [NetOp::Respond {
+                id: "2233445566778899".into(),
+                accept: false
+            }],
+            "accepted: {accepted}"
+        );
+    }
+}
+
+#[test]
 fn our_accepted_request_is_confirmed_here() {
     let mut st = sample();
     st.requests[1].accepted = true;

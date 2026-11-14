@@ -12,14 +12,16 @@ use hako_core::ipc::{
 };
 use hako_core::protocol::AdapterEvent;
 use hako_core::remap::CancelCaptureParams;
-use hako_core::{read_json_frame, write_json_frame};
+use hako_core::{read_json_frame, write_json_frame, FrameTooLarge};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
+use tokio::net::unix::UCred;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use tracing::{info, warn};
 
 /// Meter frame period (~30 Hz).
@@ -29,6 +31,9 @@ const METER_RESOLVE: Duration = Duration::from_secs(1);
 /// A subscriber that has not taken an event / meter frame for this long
 /// stopped reading: it is dropped (and its meter streams with it).
 const PUSH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Connections served at once; more are refused until one closes.
+/// ponytail: one cap for all of the user's clients, not per client.
+const MAX_CLIENTS: usize = 64;
 
 /// Bind the daemon socket, owner-only. Refuses to replace a socket another
 /// daemon still answers on; a stale file from a crashed daemon is removed.
@@ -66,6 +71,8 @@ pub fn bind(socket_path: &Path, lock_path: &Path) -> Result<(UnixListener, std::
 pub async fn serve(listener: UnixListener, hub: Arc<DaemonHub>) -> Result<()> {
     // SAFETY: geteuid has no preconditions.
     let uid = unsafe { libc::geteuid() };
+    let slots = Arc::new(Semaphore::new(MAX_CLIENTS));
+    let mut full = false;
     loop {
         // Accept errors (out of fds, aborted handshake) are per connection;
         // they must not stop the daemon.
@@ -77,21 +84,32 @@ pub async fn serve(listener: UnixListener, hub: Arc<DaemonHub>) -> Result<()> {
                 continue;
             }
         };
-        // Clients can inject keystrokes (macros), so only our own user may connect.
-        match stream.peer_cred() {
-            Ok(cred) if cred.uid() == uid => {}
-            other => {
-                warn!("rejected IPC peer: {other:?}");
-                continue;
-            }
+        let cred = stream.peer_cred();
+        if !peer_allowed(&cred, uid) {
+            warn!("rejected IPC peer: {cred:?}");
+            continue;
         }
+        let Ok(slot) = slots.clone().try_acquire_owned() else {
+            if !full {
+                warn!("{MAX_CLIENTS} IPC clients connected; refusing more");
+            }
+            full = true;
+            continue;
+        };
+        full = false;
         let hub = hub.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             if let Err(e) = handle_client(stream, hub).await {
                 warn!("client: {e}");
             }
         });
     }
+}
+
+/// Clients can inject keystrokes (macros), so only our own user may connect.
+fn peer_allowed(cred: &std::io::Result<UCred>, uid: u32) -> bool {
+    matches!(cred, Ok(c) if c.uid() == uid)
 }
 
 async fn handle_client(mut stream: UnixStream, hub: Arc<DaemonHub>) -> Result<()> {
@@ -125,7 +143,7 @@ async fn serve_requests(
                         "invalid_value",
                         format!("{e:#}"),
                     );
-                    let _ = write_json_frame(stream, &resp).await;
+                    let _ = push(write_json_frame(stream, &resp), PUSH_TIMEOUT).await;
                 }
                 break;
             }
@@ -136,36 +154,16 @@ async fn serve_requests(
             Err(e) => {
                 let resp =
                     IpcResponse::err(serde_json::json!(null), "invalid_value", e.to_string());
-                write_json_frame(stream, &resp).await?;
+                push(write_json_frame(stream, &resp), PUSH_TIMEOUT).await?;
                 continue;
             }
         };
 
-        // A subscribed connection is events-only from here on; the client
-        // leaving shows up as a failed write.
+        // A subscribed connection is events-only from here on.
         if req.method == Method::SubscribeEvents {
             let resp = IpcResponse::ok(req.id.clone(), serde_json::json!({"subscribed": true}));
-            write_json_frame(stream, &resp).await?;
-            let mut rx = hub.subscribe();
-            loop {
-                let ev = match rx.recv().await {
-                    Ok(ev) => ev,
-                    // A slow client only missed some events; keep streaming.
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("event subscriber lagged, dropped {n} event(s)");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                };
-                let last = matches!(ev, AdapterEvent::ShuttingDown);
-                if push(stream, &to_ipc_event(ev)?, PUSH_TIMEOUT)
-                    .await
-                    .is_err()
-                    || last
-                {
-                    break;
-                }
-            }
+            push(write_json_frame(stream, &resp), PUSH_TIMEOUT).await?;
+            stream_events(stream, hub.subscribe()).await?;
             break;
         }
 
@@ -175,17 +173,17 @@ async fn serve_requests(
                 Ok(_) => {
                     let msg = format!("at most {MAX_METER_TARGETS} meter targets");
                     let resp = IpcResponse::err(req.id, "invalid_value", msg);
-                    write_json_frame(stream, &resp).await?;
+                    push(write_json_frame(stream, &resp), PUSH_TIMEOUT).await?;
                     continue;
                 }
                 Err(e) => {
                     let resp = IpcResponse::err(req.id, "invalid_value", e.to_string());
-                    write_json_frame(stream, &resp).await?;
+                    push(write_json_frame(stream, &resp), PUSH_TIMEOUT).await?;
                     continue;
                 }
             };
             let resp = IpcResponse::ok(req.id.clone(), serde_json::json!({"subscribed": true}));
-            write_json_frame(stream, &resp).await?;
+            push(write_json_frame(stream, &resp), PUSH_TIMEOUT).await?;
             stream_meters(stream, &hub.mixer, &hub.meters, &targets).await;
             break;
         }
@@ -209,9 +207,62 @@ async fn serve_requests(
             }
             _ => hub.handle(req).await,
         };
-        write_json_frame(stream, &resp).await?;
+        reply(stream, &resp).await?;
     }
     Ok(())
+}
+
+/// Write a reply. One too large for a frame is answered with an error
+/// instead: dropping the connection would leave the client retrying the same
+/// request forever.
+async fn reply(stream: &mut UnixStream, resp: &IpcResponse) -> Result<()> {
+    // A client that stops reading must not hold this task (and its
+    // captures) forever.
+    match push(write_json_frame(stream, resp), PUSH_TIMEOUT).await {
+        Err(e) if e.is::<FrameTooLarge>() => {
+            warn!("reply to {}: {e}", resp.id);
+            let err = IpcResponse::err(resp.id.clone(), "io", "response too large");
+            push(write_json_frame(stream, &err), PUSH_TIMEOUT).await
+        }
+        written => written,
+    }
+}
+
+/// Events until the client leaves: a failed push, or EOF on its side even
+/// with no event to send (it sends nothing after subscribing).
+async fn stream_events(
+    stream: &mut UnixStream,
+    mut rx: broadcast::Receiver<AdapterEvent>,
+) -> Result<()> {
+    let mut buf = [0u8; 64];
+    loop {
+        let ev = tokio::select! {
+            ev = rx.recv() => ev,
+            read = stream.read(&mut buf) => match read {
+                Ok(n) if n > 0 => continue,
+                _ => return Ok(()),
+            },
+        };
+        let ev = match ev {
+            Ok(ev) => ev,
+            // A slow client only missed some events; keep streaming.
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!("event subscriber lagged, dropped {n} event(s)");
+                continue;
+            }
+            Err(broadcast::error::RecvError::Closed) => return Ok(()),
+        };
+        let last = matches!(ev, AdapterEvent::ShuttingDown);
+        match push(write_json_frame(stream, &to_ipc_event(ev)?), PUSH_TIMEOUT).await {
+            // Nothing was written: the client catches up on its next poll.
+            Err(e) if e.is::<FrameTooLarge>() => warn!("event skipped: {e}"),
+            Err(_) => return Ok(()),
+            Ok(()) => {}
+        }
+        if last {
+            return Ok(());
+        }
+    }
 }
 
 /// Stop tracking the capture of the device a successful `CancelCapture`
@@ -264,19 +315,22 @@ async fn stream_meters(
             payload: serde_json::to_value(meter_frame(&resolved, read, specs.len()))
                 .unwrap_or_default(),
         };
-        if push(stream, &ev, PUSH_TIMEOUT).await.is_err() {
+        if push(write_json_frame(stream, &ev), PUSH_TIMEOUT)
+            .await
+            .is_err()
+        {
             break;
         }
     }
 }
 
-/// Write a frame the client did not ask for; fails if it is not taken in time.
-async fn push(stream: &mut UnixStream, ev: &IpcEvent, limit: Duration) -> Result<()> {
-    match tokio::time::timeout(limit, write_json_frame(stream, ev)).await {
+/// Finish a frame write; fails if it is not taken in time.
+async fn push(write: impl std::future::Future<Output = Result<()>>, limit: Duration) -> Result<()> {
+    match tokio::time::timeout(limit, write).await {
         Ok(written) => written,
         Err(_) => {
-            warn!("subscriber stopped reading; dropped");
-            bail!("subscriber stopped reading")
+            warn!("client stopped reading; dropped");
+            bail!("client stopped reading")
         }
     }
 }
@@ -359,6 +413,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_our_own_user_may_connect() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let ours = stream.peer_cred();
+        let uid = ours.as_ref().unwrap().uid();
+        assert!(peer_allowed(&ours, uid));
+        assert!(!peer_allowed(&ours, uid.wrapping_add(1)));
+        assert!(!peer_allowed(&Err(std::io::Error::other("no creds")), uid));
+    }
+
+    #[tokio::test]
+    async fn a_reply_too_large_for_a_frame_is_an_error_not_a_close() {
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let big = IpcResponse::ok(serde_json::json!(7), "x".repeat(hako_core::MAX_FRAME_BYTES));
+        let read = tokio::time::timeout(Duration::from_secs(2), read_json_frame(&mut client));
+        let (wrote, read) = tokio::join!(reply(&mut server, &big), read);
+        wrote.unwrap();
+        let resp: IpcResponse = serde_json::from_value(read.unwrap().unwrap()).unwrap();
+        assert_eq!(resp.id, serde_json::json!(7));
+        assert_eq!(resp.error.unwrap().code, "io");
+    }
+
+    /// Through `serve` on a real socket: a ping is answered; a frame header
+    /// over the limit gets an error reply, then the connection closes.
+    #[tokio::test]
+    async fn serve_answers_a_ping_and_refuses_an_oversize_frame() {
+        use tokio::io::AsyncWriteExt;
+        let within = Duration::from_secs(5);
+        let hub = Arc::new(crate::hub::tests::hub("ipc-serve"));
+        let sock = hub.paths.root.join("d.sock");
+        let server = tokio::spawn(serve(UnixListener::bind(&sock).unwrap(), hub.clone()));
+
+        let mut pinger = UnixStream::connect(&sock).await.unwrap();
+        let ping = IpcRequest {
+            id: serde_json::json!(1),
+            method: Method::Ping,
+            params: serde_json::Value::Null,
+        };
+        write_json_frame(&mut pinger, &ping).await.unwrap();
+        let v = tokio::time::timeout(within, read_json_frame(&mut pinger)).await;
+        let resp: IpcResponse = serde_json::from_value(v.unwrap().unwrap()).unwrap();
+        assert!(resp.ok, "{resp:?}");
+        assert_eq!(resp.id, serde_json::json!(1));
+        assert_eq!(resp.result.unwrap()["pong"], true);
+
+        let mut big = UnixStream::connect(&sock).await.unwrap();
+        let len = hako_core::MAX_FRAME_BYTES as u32 + 1;
+        big.write_all(&len.to_le_bytes()).await.unwrap();
+        let v = tokio::time::timeout(within, read_json_frame(&mut big)).await;
+        let resp: IpcResponse = serde_json::from_value(v.unwrap().unwrap()).unwrap();
+        assert_eq!(resp.error.unwrap().code, "invalid_value");
+        let mut rest = Vec::new();
+        let n = tokio::time::timeout(within, big.read_to_end(&mut rest)).await;
+        assert_eq!(n.unwrap().unwrap(), 0, "connection left open");
+
+        server.abort();
+        let _ = server.await;
+        drop((pinger, big));
+        // Each connection task lets go of the hub once it sees its client leave.
+        let mut hub = hub;
+        for _ in 0..500 {
+            match Arc::try_unwrap(hub) {
+                Ok(hub) => return crate::hub::tests::close(hub),
+                Err(shared) => hub = shared,
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("a connection task outlived its client");
+    }
+
+    #[tokio::test]
     async fn a_subscriber_that_stops_reading_is_dropped() {
         let (mut server, _client) = UnixStream::pair().unwrap();
         let ev = IpcEvent {
@@ -367,10 +491,24 @@ mod tests {
         };
         let limit = Duration::from_millis(100);
         let mut pushed = 0;
-        while push(&mut server, &ev, limit).await.is_ok() {
+        while push(write_json_frame(&mut server, &ev), limit)
+            .await
+            .is_ok()
+        {
             pushed += 1;
             assert!(pushed < 64, "the socket never filled up");
         }
+    }
+
+    #[tokio::test]
+    async fn an_idle_subscriber_that_leaves_is_dropped_at_once() {
+        let (mut server, client) = UnixStream::pair().unwrap();
+        let (events, rx) = broadcast::channel(8);
+        drop(client);
+        // No event ever comes: only the client's EOF can end the stream.
+        let ended = tokio::time::timeout(Duration::from_secs(1), stream_events(&mut server, rx));
+        assert!(ended.await.is_ok(), "subscriber outlived its client");
+        drop(events);
     }
 
     #[test]

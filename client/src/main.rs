@@ -49,6 +49,12 @@ const OFFLINE_NOTICE: &str = "hakod is unavailable; the change was not applied";
 /// window is hidden and no longer drawn).
 const METER_STALE: Duration = Duration::from_secs(1);
 
+/// Toasts waiting for the next frame (a hidden window draws none).
+const MAX_NOTICES: usize = 16;
+
+/// How long a closed window waits for update checks and other blocking work.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
 #[derive(Parser, Debug)]
 #[command(name = "hako", version, about = "hako control panel")]
 struct Cli {
@@ -107,7 +113,7 @@ struct ClientState {
     settings_rev: u64,
     error: Option<String>,
     /// Command outcomes waiting to be shown as toasts.
-    notices: Vec<(Tone, String)>,
+    notices: Notices,
     /// Daemon calls sent and not yet answered (with the state after them).
     pending: usize,
     /// Newer release, downloaded and waiting for a restart.
@@ -116,6 +122,10 @@ struct ClientState {
     checking: bool,
     /// Installing `update`.
     updating: bool,
+    /// The install task, so a closed window lets it finish.
+    install: Option<tokio::task::JoinHandle<()>>,
+    /// The window was closed: a finished install must not reopen it.
+    closed: bool,
     /// Latest mixer from `GetMixer` / `PatchMixer` / `MixerUpdated`, or why
     /// `GetMixer` failed; `mixer_rev` counts changes.
     mixer: Option<Result<MixerState, String>>,
@@ -180,6 +190,26 @@ impl ClientState {
     }
 }
 
+/// Toasts to show, at most `MAX_NOTICES`.
+#[derive(Default)]
+struct Notices(Vec<(Tone, String)>);
+
+impl Notices {
+    /// Queue a toast, dropping the oldest non-error ones first past
+    /// `MAX_NOTICES` (as `trim_toasts` does on screen).
+    fn push(&mut self, notice: (Tone, String)) {
+        self.0.push(notice);
+        while self.0.len() > MAX_NOTICES {
+            let i = self
+                .0
+                .iter()
+                .position(|(t, _)| *t != Tone::Error)
+                .unwrap_or(0);
+            self.0.remove(i);
+        }
+    }
+}
+
 /// Calls that only read: losing one changes nothing worth telling.
 fn read_only(method: Method) -> bool {
     matches!(method, Method::GetState | Method::GetMixer | Method::GetNet)
@@ -221,7 +251,7 @@ fn main() -> Result<()> {
 
     // Set by the previous process when it restarted us after an update;
     // cleared before any thread starts so children don't inherit it.
-    let mut notices = Vec::new();
+    let mut notices = Notices::default();
     if std::env::var_os(update::UPDATED_ENV).is_some() {
         notices.push((
             Tone::Ok,
@@ -279,7 +309,7 @@ fn main() -> Result<()> {
     let app = App {
         ui: HakoAppUi::default(),
         cmd_tx,
-        state,
+        state: state.clone(),
         was_online: false,
         lost: false,
         mixer_rev: 0,
@@ -308,16 +338,26 @@ fn main() -> Result<()> {
     };
 
     let handle = rt.handle().clone();
-    eframe::run_native(
+    let ran = eframe::run_native(
         "hako",
         native,
         Box::new(move |cc| {
             handle.spawn(stream_meters(meter_socket, meters, cc.egui_ctx.clone()));
             Ok(Box::new(app))
         }),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(())
+    );
+    let install = {
+        let mut s = state.lock().unwrap();
+        s.closed = true;
+        s.install.take()
+    };
+    // An install runs to its end rather than leaving hako half replaced;
+    // checks, downloads and xdg-open are abandoned (their lock goes with us).
+    if let Some(install) = install {
+        let _ = rt.block_on(install);
+    }
+    rt.shutdown_timeout(SHUTDOWN_GRACE);
+    ran.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 impl eframe::App for App {
@@ -366,7 +406,7 @@ impl eframe::App for App {
                 busy: st.updating,
             });
             (
-                std::mem::take(&mut st.notices),
+                std::mem::take(&mut st.notices.0),
                 st.error.is_none() && st.hub.is_some(),
             )
         };
@@ -604,8 +644,12 @@ impl App {
             rel
         };
         let state = self.state.clone();
-        self.rt.spawn_blocking(move || {
-            let msg = match update::install(&rel) {
+        let install = self.rt.spawn_blocking(move || {
+            let res = update::install(&rel);
+            // Held through the restart, so a window closed meanwhile stays closed.
+            let mut s = state.lock().unwrap();
+            let msg = match res {
+                Ok(_) if s.closed => return,
                 Ok(warn) => {
                     let err = update::restart(&bin, warn.clone());
                     let msg = format!("Updated, but couldn't restart ({err}). Reopen hako.");
@@ -616,13 +660,13 @@ impl App {
                 }
                 Err(e) => format!("Update failed: {e:#}"),
             };
-            let mut s = state.lock().unwrap();
             s.updating = false;
             if !rel.on_disk() {
                 s.update = None;
             }
             s.notices.push((Tone::Error, msg));
         });
+        self.state.lock().unwrap().install = Some(install);
     }
 
     /// Open `path` in the file manager. Waited for on a blocking thread, so
@@ -657,6 +701,7 @@ fn fetch_update(repo: &str, state: &Mutex<ClientState>, loud: bool) -> anyhow::R
     }
     let res = (|| {
         let Some(rel) = update::check(repo)? else {
+            update::discard_stale();
             return Ok(false);
         };
         let have = state
@@ -1173,8 +1218,28 @@ mod tests {
         assert!(rx.try_recv().is_err(), "nothing left to replay");
         assert_eq!((s.pending, s.mixer_pending), (0, 0));
         assert_eq!(s.error.as_deref(), Some("gone"));
-        assert_eq!(s.notices.len(), 1);
-        assert!(s.notices[0].1.contains("2 queued"), "{:?}", s.notices);
+        assert_eq!(s.notices.0.len(), 1);
+        assert!(s.notices.0[0].1.contains("2 queued"), "{:?}", s.notices.0);
+    }
+
+    #[test]
+    fn queued_notices_are_capped_keeping_errors() {
+        let mut n = Notices::default();
+        n.push((Tone::Error, "failed".into()));
+        for i in 0..MAX_NOTICES * 2 {
+            n.push((Tone::Ok, format!("ok {i}")));
+        }
+        assert_eq!(n.0.len(), MAX_NOTICES);
+        assert_eq!(n.0[0].1, "failed");
+        assert_eq!(
+            n.0[MAX_NOTICES - 1].1,
+            format!("ok {}", MAX_NOTICES * 2 - 1)
+        );
+        for i in 0..MAX_NOTICES + 1 {
+            n.push((Tone::Error, format!("e{i}")));
+        }
+        assert_eq!(n.0.len(), MAX_NOTICES);
+        assert_eq!(n.0[0].1, "e1", "only errors left: the oldest goes");
     }
 
     #[test]

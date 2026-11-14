@@ -6,7 +6,10 @@
 //! updated from the tarball). Every other build never touches the network.
 //!
 //! Uses `curl`, `sha256sum`, `ssh-keygen` and `tar` like the daemon uses `pw-*`: present on
-//! every desktop, no TLS stack in the binary.
+//! every desktop, no TLS stack in the binary. Every program whose result
+//! decides what root installs, and the one `pkexec` runs (it resolves it
+//! through the caller's PATH), is an absolute path: PATH may list folders
+//! the user's processes can write, like `~/.local/bin`.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -214,48 +217,76 @@ fn lock(dir: &Path) -> Result<std::fs::File> {
     }
 }
 
+/// Removes the download folder when dropped, unless `keep` was set.
+struct Discard<'a> {
+    dir: &'a Path,
+    keep: bool,
+}
+
+impl Drop for Discard<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_dir_all(self.dir);
+        }
+    }
+}
+
 /// Download and verify `rel`, replacing any earlier download. The signed
 /// checksums come first: only a build they list is downloaded.
 pub fn download(rel: &Release) -> Result<Ready> {
-    let dir = download_dir()?;
-    let _lock = lock(&dir)?;
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir)?;
+    download_to(&download_dir()?, SIGNING_KEY, rel)
+}
+
+/// [`download`] into `dir`, trusting releases signed by `key`.
+fn download_to(dir: &Path, key: &str, rel: &Release) -> Result<Ready> {
+    let _lock = lock(dir)?;
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir)?;
+    let mut discard = Discard { dir, keep: false };
     let sums = fetch(&[&rel.sums_url], SUMS_MAX)?;
-    let signed = fetch(&[&rel.sig_url], SUMS_MAX)
+    fetch(&[&rel.sig_url], SUMS_MAX)
         .with_context(|| format!("v{} is not signed yet", rel.version))
         .and_then(|sig| {
-            verify_signature(&dir, SIGNING_KEY, &sums, &sig)
-                .map_err(|e| Rejected(format!("{e:#}")).into())
-        });
-    if let Err(e) = signed {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(e);
-    }
+            verify_signature(key, &sums, &sig).map_err(|e| Rejected(format!("{e:#}")).into())
+        })?;
     let sums = String::from_utf8(sums)?;
     let Some(want) = expected_sum(&sums, &rel.name) else {
-        let _ = std::fs::remove_dir_all(&dir);
         bail!(Rejected(format!(
             "the signed checksums do not list {}, not downloaded",
             rel.name
         )));
     };
     let file = dir.join(&rel.name);
-    let got = run(curl(ASSET_MAX).arg("-o").arg(&file).arg(&rel.url));
-    if let Err(e) = got {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(e.context("download failed"));
-    }
-    let got = String::from_utf8(run(Command::new("sha256sum").arg(&file))?)?;
+    std::fs::File::create(&file)
+        .map_err(anyhow::Error::from)
+        .and_then(|mut out| copy_capped(curl(ASSET_MAX).arg(&rel.url), ASSET_MAX, &mut out))
+        .context("download failed")?;
+    let got = String::from_utf8(run(Command::new("/usr/bin/sha256sum").arg(&file))?)?;
     if got.split_whitespace().next() != Some(want.as_str()) {
-        let _ = std::fs::remove_dir_all(&dir);
         bail!(Rejected("checksum mismatch, download discarded".into()));
     }
+    discard.keep = true;
     Ok(Ready {
         version: rel.version.clone(),
         file,
         sum: want,
     })
+}
+
+/// Remove a download no release wants any more (hako was updated another
+/// way, e.g. by apt). Left alone while another window downloads or installs.
+pub fn discard_stale() {
+    if let Ok(dir) = download_dir() {
+        remove_download(&dir);
+    }
+}
+
+fn remove_download(dir: &Path) {
+    if dir.exists() {
+        if let Ok(_lock) = lock(dir) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 /// Install a download, restarting the daemon. Returns a warning for the user
@@ -289,7 +320,7 @@ fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
     if name.ends_with(".deb") {
         // apt installs rules and units and restarts the daemons (postinst).
         run_input(
-            Command::new("pkexec").args(["sh", "-c"]).arg(
+            Command::new("/usr/bin/pkexec").args(["/usr/bin/sh", "-c"]).arg(
                 "t=$(mktemp -d) && cat > \"$t/hako.deb\" && apt-get install -y \"$t/hako.deb\"; s=$?; rm -rf \"$t\"; exit $s",
             ),
             &data,
@@ -298,13 +329,15 @@ fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     run_input(
-        Command::new("tar").args(["-xzf", "-", "-C"]).arg(dir),
+        Command::new("/usr/bin/tar")
+            .args(["-xzf", "-", "-C"])
+            .arg(dir),
         &data,
     )?;
     let root = name.trim_end_matches(".tar.gz");
     // Rules first, so the restarted daemon opens devices with the new access.
     let rules = run_input(
-        Command::new("tar")
+        Command::new("/usr/bin/tar")
             .args(["-xzOf", "-"])
             .arg(format!("{root}/udev/70-hako.rules")),
         &data,
@@ -316,7 +349,7 @@ fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
             "New device rules were not installed ({e:#}). Run: hakod --udev-rules | sudo tee {UDEV_RULES} && sudo udevadm control --reload-rules && sudo udevadm trigger"
         )
     });
-    let out = Command::new("bash")
+    let out = Command::new("/usr/bin/bash")
         .arg(dir.join(root).join("scripts/install-user.sh"))
         .env("HAKO_SKIP_UDEV", "1")
         .stdin(Stdio::null())
@@ -349,7 +382,7 @@ fn update_udev(fresh: &[u8]) -> Result<()> {
         return Ok(());
     }
     run_input(
-        Command::new("pkexec").args(["sh", "-c"]).arg(format!(
+        Command::new("/usr/bin/pkexec").args(["/usr/bin/sh", "-c"]).arg(format!(
             "install -m 644 /dev/stdin {UDEV_RULES} && udevadm control --reload-rules && udevadm trigger"
         )),
         fresh,
@@ -375,7 +408,8 @@ fn curl(max: u64) -> Command {
     c.args([
         "-fsSL",
         "--proto",
-        "=https",
+        // Tests serve releases from `file://` URLs.
+        if cfg!(test) { "=https,file" } else { "=https" },
         "--retry",
         "2",
         "--max-time",
@@ -391,10 +425,17 @@ fn fetch(args: &[&str], max: u64) -> Result<Vec<u8>> {
     read_capped(curl(max).args(args), max)
 }
 
-/// Run to completion; stdout on success, stderr as the error. More than
-/// `max` bytes of stdout is an error, never read: curl before 8.4 checks
-/// `--max-filesize` only against the size the server announces.
+/// Run to completion; stdout on success, stderr as the error.
 fn read_capped(cmd: &mut Command, max: u64) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    copy_capped(cmd, max, &mut body)?;
+    Ok(body)
+}
+
+/// Run to completion, its stdout into `sink`; stderr as the error. More
+/// than `max` bytes of stdout is an error, read no further: curl before 8.4
+/// checks `--max-filesize` only against the size the server announces.
+fn copy_capped(cmd: &mut Command, max: u64, sink: &mut impl std::io::Write) -> Result<()> {
     use std::io::Read;
     let mut child = cmd
         .stdin(Stdio::null())
@@ -402,24 +443,21 @@ fn read_capped(cmd: &mut Command, max: u64) -> Result<Vec<u8>> {
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("cannot run {:?}", cmd.get_program()))?;
-    let mut body = Vec::new();
-    let read = child
-        .stdout
-        .take()
-        .context("no stdout")?
-        .take(max + 1)
-        .read_to_end(&mut body);
-    if read.is_err() || body.len() as u64 > max {
+    let copied = std::io::copy(
+        &mut child.stdout.take().context("no stdout")?.take(max + 1),
+        sink,
+    );
+    if !copied.as_ref().is_ok_and(|&n| n <= max) {
         let _ = child.kill();
         let _ = child.wait();
-        read?;
+        copied?;
         bail!("more than {max} bytes");
     }
     let out = child.wait_with_output()?;
     if !out.status.success() {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    Ok(body)
+    Ok(())
 }
 
 /// Run to completion; stdout on success, stderr as the error.
@@ -454,29 +492,25 @@ fn run_input(cmd: &mut Command, input: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Fails unless `sig` is `key`'s signature of `data` (`ssh-keygen -Y sign
-/// -n hako-release`). `dir` holds the files ssh-keygen reads.
-fn verify_signature(dir: &Path, key: &str, data: &[u8], sig: &[u8]) -> Result<()> {
-    let signers = dir.join("allowed_signers");
-    let sig_file = dir.join("SHA256SUMS.sig");
-    std::fs::write(
-        &signers,
-        format!("{SIG_NAMESPACE} namespaces=\"{SIG_NAMESPACE}\" {key}\n"),
-    )?;
-    std::fs::write(&sig_file, sig)?;
+/// -n hako-release`). ssh-keygen reads the signers and the signature from
+/// pipes, never from a file another process of the user could swap between
+/// writing and checking it. bash only passes its arguments on (no PATH, no
+/// environment for `BASH_ENV` or exported functions).
+fn verify_signature(key: &str, data: &[u8], sig: &[u8]) -> Result<()> {
+    let sig = std::str::from_utf8(sig).context("the release signature is not text")?;
     run_input(
-        Command::new("ssh-keygen")
+        Command::new("/usr/bin/bash")
+            .env_clear()
             .args([
-                "-Y",
-                "verify",
-                "-I",
+                "-c",
+                r#"exec /usr/bin/ssh-keygen -Y verify -I "$1" -n "$1" -f <(printf '%s\n' "$2") -s <(printf '%s' "$3")"#,
+                "bash",
                 SIG_NAMESPACE,
-                "-n",
-                SIG_NAMESPACE,
-                "-f",
             ])
-            .arg(&signers)
-            .arg("-s")
-            .arg(&sig_file),
+            .arg(format!(
+                "{SIG_NAMESPACE} namespaces=\"{SIG_NAMESPACE}\" {key}"
+            ))
+            .arg(sig),
         data,
     )
     .context("release signature check failed (needs ssh-keygen from openssh-client)")?;
@@ -485,7 +519,7 @@ fn verify_signature(dir: &Path, key: &str, data: &[u8], sig: &[u8]) -> Result<()
 
 /// Fails unless `data` still hashes to `want`, the sum `download` verified.
 fn check_sum(data: &[u8], want: &str) -> Result<()> {
-    let got = String::from_utf8(run_input(&mut Command::new("sha256sum"), data)?)?;
+    let got = String::from_utf8(run_input(&mut Command::new("/usr/bin/sha256sum"), data)?)?;
     if got.split_whitespace().next() != Some(want) {
         bail!("checksum mismatch, the download changed since it was verified");
     }
@@ -590,37 +624,113 @@ mod tests {
         assert_eq!(expected_sum(sums, "missing.tar.gz"), None);
     }
 
+    /// A fresh ed25519 key `dir/name` (public half in `name.pub`).
+    fn keygen(dir: &Path, name: &str) -> PathBuf {
+        let key = dir.join(name);
+        run(Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", name, "-f"])
+            .arg(&key))
+        .unwrap();
+        key
+    }
+
+    fn sign(key: &Path, namespace: &str, data: &[u8]) -> Vec<u8> {
+        run_input(
+            Command::new("ssh-keygen")
+                .args(["-q", "-Y", "sign", "-n", namespace, "-f"])
+                .arg(key),
+            data,
+        )
+        .unwrap()
+    }
+
+    fn public(key: &Path) -> String {
+        let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        public.trim().into()
+    }
+
     #[test]
     fn only_the_release_key_signs_updates() {
         let dir = std::env::temp_dir().join(format!("hako-sig-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let keygen = |name: &str| {
-            let key = dir.join(name);
-            run(Command::new("ssh-keygen")
-                .args(["-q", "-t", "ed25519", "-N", "", "-C", name, "-f"])
-                .arg(&key))
-            .unwrap();
-            key
-        };
-        let (good, bad) = (keygen("good"), keygen("bad"));
-        let sign = |key: &Path, data: &[u8]| {
-            run_input(
-                Command::new("ssh-keygen")
-                    .args(["-q", "-Y", "sign", "-n", SIG_NAMESPACE, "-f"])
-                    .arg(key),
-                data,
-            )
-            .unwrap()
-        };
-        let public = std::fs::read_to_string(good.with_extension("pub")).unwrap();
+        let (good, bad) = (keygen(&dir, "good"), keygen(&dir, "bad"));
+        let public = public(&good);
         let sums = b"abc  hako.deb\n";
-        let sig = sign(&good, sums);
-        assert!(verify_signature(&dir, public.trim(), sums, &sig).is_ok());
-        assert!(verify_signature(&dir, public.trim(), b"abd  hako.deb\n", &sig).is_err());
-        assert!(verify_signature(&dir, public.trim(), sums, &sign(&bad, sums)).is_err());
-        assert!(verify_signature(&dir, public.trim(), sums, b"not a signature").is_err());
+        let sig = sign(&good, SIG_NAMESPACE, sums);
+        assert!(verify_signature(&public, sums, &sig).is_ok());
+        assert!(verify_signature(&public, b"abd  hako.deb\n", &sig).is_err());
+        assert!(verify_signature(&public, sums, &sign(&bad, SIG_NAMESPACE, sums)).is_err());
+        assert!(verify_signature(&public, sums, &sign(&good, "other", sums)).is_err());
+        assert!(verify_signature(&public, sums, b"not a signature").is_err());
+        assert!(verify_signature(&public, sums, b"\xff").is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn downloads_need_signed_sums_that_list_and_match_them() {
+        let root = std::env::temp_dir().join(format!("hako-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let (good, bad) = (keygen(&root, "good"), keygen(&root, "bad"));
+        let name = "hako-9.9.9-x86_64-linux.tar.gz";
+        let sum = String::from_utf8(run_input(&mut Command::new("sha256sum"), b"build").unwrap())
+            .unwrap()[..64]
+            .to_string();
+        let listed = format!("{sum}  {name}\n");
+        // Serves `sums`, `sig` and (if any) `asset` from `root/case`, then
+        // downloads them into `root/case/update`. Each case has its own lock:
+        // a child another test forks can hold one for a moment.
+        let serve = |case: &str, sums: &str, sig: Vec<u8>, asset: Option<&[u8]>| {
+            let srv = root.join(case);
+            std::fs::create_dir_all(&srv).unwrap();
+            let url = |file: &str, body: &[u8]| {
+                std::fs::write(srv.join(file), body).unwrap();
+                format!("file://{}", srv.join(file).display())
+            };
+            let rel = Release {
+                version: "9.9.9".into(),
+                name: name.into(),
+                url: match asset {
+                    Some(a) => url(name, a),
+                    None => format!("file://{}", srv.join(name).display()),
+                },
+                sums_url: url("SHA256SUMS", sums.as_bytes()),
+                sig_url: url("SHA256SUMS.sig", &sig),
+            };
+            let dir = srv.join("update");
+            (download_to(&dir, &public(&good), &rel), dir)
+        };
+        let signed = |sums: &str| sign(&good, SIG_NAMESPACE, sums.as_bytes());
+
+        let (ready, dir) = serve("ok", &listed, signed(&listed), Some(b"build"));
+        let ready = ready.unwrap();
+        assert_eq!((ready.file, ready.sum), (dir.join(name), sum.clone()));
+        // Nothing ssh-keygen reads is ever written to the user's folder.
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(files, [name]);
+
+        let rejected_with = |(res, dir): (Result<Ready>, PathBuf), msg: &str| {
+            let e = res.unwrap_err();
+            assert!(rejected(&e) && format!("{e:#}").contains(msg), "{e:#}");
+            assert!(!dir.exists());
+        };
+        let flipped = serve("flipped", &listed, signed(&listed), Some(b"bujld"));
+        rejected_with(flipped, "checksum mismatch");
+        // No asset is served: fetching it would fail as "download failed".
+        let other = format!("{sum}  hako-9.9.9-other-linux.tar.gz\n");
+        rejected_with(
+            serve("unlisted", &other, signed(&other), None),
+            "do not list",
+        );
+        let by_bad = sign(&bad, SIG_NAMESPACE, listed.as_bytes());
+        rejected_with(serve("bad-key", &listed, by_bad, None), "signature");
+        let wrong_ns = sign(&good, "other", listed.as_bytes());
+        rejected_with(serve("namespace", &listed, wrong_ns, None), "signature");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -628,6 +738,19 @@ mod tests {
         let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         assert!(check_sum(b"abc", abc).is_ok());
         assert!(check_sum(b"abd", abc).is_err());
+    }
+
+    #[test]
+    fn a_download_changed_after_its_check_is_discarded_not_installed() {
+        let dir = std::env::temp_dir().join(format!("hako-inst-{}/update", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hako-9.9.9-x86_64-linux.tar.gz");
+        std::fs::write(&file, b"abd").unwrap();
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let e = install_file(&file, abc, &dir).unwrap_err();
+        assert!(format!("{e:#}").contains("checksum mismatch"), "{e:#}");
+        assert!(!dir.exists());
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -639,8 +762,13 @@ mod tests {
         };
         assert_eq!(read_capped(&mut head("100"), 100).unwrap().len(), 100);
         assert!(read_capped(&mut head("101"), 100).is_err());
-        // An endless body is cut off, not read into memory.
+        // An endless body is cut off, not read into memory or onto disk.
         assert!(read_capped(&mut Command::new("yes"), 1 << 16).is_err());
+        let path = std::env::temp_dir().join(format!("hako-cap-{}", std::process::id()));
+        let mut file = std::fs::File::create(&path).unwrap();
+        assert!(copy_capped(&mut Command::new("yes"), 1 << 16, &mut file).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), (1 << 16) + 1);
+        std::fs::remove_file(&path).unwrap();
         assert!(curl(5)
             .get_args()
             .collect::<Vec<_>>()
@@ -654,7 +782,38 @@ mod tests {
         let held = lock(&dir).unwrap();
         assert!(lock(&dir).is_err());
         drop(held);
-        assert!(lock(&dir).is_ok());
+        // A child another test forked while `held` was open keeps the lock
+        // until it execs.
+        let free = (0..100).any(|_| {
+            let free = lock(&dir).is_ok();
+            if !free {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            free
+        });
+        assert!(free);
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_stale_download_is_removed_unless_a_window_uses_it() {
+        let dir = std::env::temp_dir().join(format!("hako-stale-{}/update", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hako.deb"), b"old").unwrap();
+        let held = lock(&dir).unwrap();
+        remove_download(&dir);
+        assert!(dir.join("hako.deb").exists());
+        drop(held);
+        // A child another test forked while `held` was open keeps the lock
+        // until it execs.
+        for _ in 0..100 {
+            remove_download(&dir);
+            if !dir.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!dir.exists());
         std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 

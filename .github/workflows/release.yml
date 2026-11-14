@@ -71,6 +71,17 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           packaging/deb/build-deb.sh "${GITHUB_REF_NAME#v}" target/release dist
           (cd dist && sha256sum *.tar.gz *.deb > SHA256SUMS && cat SHA256SUMS)
+          # What the updater looks for (client/src/update.rs: asset_name,
+          # expected_sum, install_file) must be exactly where it looks.
+          deb="hako_${GITHUB_REF_NAME#v}_amd64.deb"
+          for f in "$name.tar.gz" "$deb"; do
+            grep -qE "^[0-9a-f]{64}  $f\$" dist/SHA256SUMS || { echo "SHA256SUMS lacks $f"; exit 1; }
+          done
+          tar -tzf "dist/$name.tar.gz" > dist/tar.list
+          for f in udev/70-hako.rules scripts/install-user.sh bin/hakod bin/hako lib/libhako_fx.so; do
+            grep -qx "$name/$f" dist/tar.list || { echo "$name.tar.gz lacks $name/$f"; exit 1; }
+          done
+          rm dist/tar.list
       - name: Install test (.deb)
         run: |
           sudo apt-get install -y ./dist/hako_*.deb

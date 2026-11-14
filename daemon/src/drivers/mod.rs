@@ -613,6 +613,42 @@ mod tests {
         );
     }
 
+    /// What the rules grant, independent of how they are generated.
+    #[test]
+    fn udev_rules_grant_the_seat_user_only() {
+        let rules = super::udev_rules();
+        let lines: Vec<&str> = rules.lines().filter(|l| !l.starts_with('#')).collect();
+        assert!(!rules.contains("GROUP="), "no group may read raw input");
+        assert!(!rules.contains("0666"));
+        assert!(lines
+            .iter()
+            .filter(|l| !l.is_empty())
+            .all(|l| l.contains(r#"TAG+="uaccess""#)));
+        assert!(lines.contains(
+            &r#"KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uinput""#
+        ));
+        let has = |kernel: &str, vid: &str, pid: &str| {
+            let ids = format!(r#"ATTRS{{idVendor}}=="{vid}", ATTRS{{idProduct}}=="{pid}""#);
+            lines
+                .iter()
+                .any(|l| l.starts_with(&format!(r#"KERNEL=="{kernel}""#)) && l.contains(&ids))
+        };
+        for m in super::models().filter(|m| m.kind != DeviceKind::Headset) {
+            for pid in m.product_ids {
+                let (v, p) = (format!("{:04x}", m.vendor_id), format!("{pid:04x}"));
+                assert!(has("event*", &v, &p), "{v}:{p} remap input ({})", m.name);
+            }
+        }
+        // Reference hardware: PRO 2 receiver, Huntsman V2 TKL (usbfs
+        // fallback), Arctis Nova Pro (no input nodes needed).
+        assert!(has("hidraw*", "046d", "c543") && has("event*", "046d", "c543"));
+        assert!(has("hidraw*", "1532", "026b") && has("event*", "1532", "026b"));
+        assert!(lines.contains(
+            &r#"SUBSYSTEM=="usb", ATTR{idVendor}=="1532", ATTR{idProduct}=="026b", MODE="0660", TAG+="uaccess""#
+        ));
+        assert!(has("hidraw*", "1038", "12e5") && !has("event*", "1038", "12e5"));
+    }
+
     #[test]
     fn no_two_models_claim_the_same_usb_id() {
         let mut seen = std::collections::HashSet::new();

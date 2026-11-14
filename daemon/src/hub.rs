@@ -29,6 +29,7 @@ use hako_core::VERSION;
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
@@ -72,6 +73,10 @@ pub struct DaemonHub {
     retry: std::sync::Mutex<HashMap<(u16, u16), Retry>>,
     /// Last rescan of each connected `multi` model (receivers).
     rescanned: std::sync::Mutex<HashMap<(u16, u16), Instant>>,
+    /// Held for a whole discovery pass, so shutdown waits for one in flight.
+    discovering: Mutex<()>,
+    /// Set by shutdown: a pass opens nothing more, requests change nothing.
+    stopping: Arc<AtomicBool>,
 }
 
 impl DaemonHub {
@@ -124,6 +129,8 @@ impl DaemonHub {
             remap,
             retry: std::sync::Mutex::new(HashMap::new()),
             rescanned: std::sync::Mutex::new(HashMap::new()),
+            discovering: Mutex::new(()),
+            stopping: Arc::default(),
         }
     }
 
@@ -132,10 +139,19 @@ impl DaemonHub {
     }
 
     pub async fn discover_once(&self) {
+        let _pass = self.discovering.lock().await;
+        if self.stopping.load(Ordering::Relaxed) {
+            return;
+        }
         let Ok(Ok(present)) = tokio::task::spawn_blocking(present_nodes).await else {
             warn!("hidraw enumeration failed; skipping discovery");
             return;
         };
+        self.discover(present).await;
+    }
+
+    /// One pass over `present` (every hidraw node), the pass lock held.
+    async fn discover(&self, present: Present) {
         // Unplugged or replugged: none of the nodes the adapter was opened on
         // is left (a replug between two passes brings new ones). Shut it down
         // (its teardown must run before a replugged device is
@@ -171,18 +187,7 @@ impl DaemonHub {
             .filter(|(_, s)| s.connected)
             .map(|(m, s)| (m, s.id))
             .collect();
-        // A driver that crashed its worker is reopened with backoff too.
-        let crashed: Vec<&'static Model> = self
-            .handles()
-            .iter()
-            .filter(|h| {
-                let s = h.snapshot();
-                !s.connected
-                    && worker::crashes(&s.id.key()).is_some_and(|(n, at)| now < at + backoff(n))
-            })
-            .map(|h| h.model)
-            .collect();
-        let mut skip: Vec<&'static Model> = crashed;
+        let mut skip = crash_skips(&self.handles(), now);
         skip.extend(rescan_skips(&connected, &mut lock(&self.rescanned), now));
         {
             let mut retry = lock(&self.retry);
@@ -200,9 +205,9 @@ impl DaemonHub {
             vendor_id: 0,
         };
 
-        let snapshot = present.clone();
+        let (snapshot, stopping) = (present.clone(), self.stopping.clone());
         let (discovered, attempted) = tokio::task::spawn_blocking(move || {
-            discover_blocking(ctx, &skip, &connected, &snapshot)
+            discover_blocking(ctx, &skip, &connected, &snapshot, &stopping)
         })
         .await
         .unwrap_or_else(|e| {
@@ -278,8 +283,19 @@ impl DaemonHub {
             );
             let _ = self.events.send(AdapterEvent::Disconnected(id));
         }
+        self.adopt(handles);
+    }
 
-        for h in &handles {
+    /// Add the handles a pass opened, and attach remaps: to the opened mice
+    /// and keyboards, and to a device that reports being one only now (a
+    /// receiver's device asleep when it opened says `Other` until it wakes).
+    fn adopt(&self, handles: Vec<DeviceHandle>) {
+        let late = self.handles().into_iter().filter(|h| {
+            let snap = h.snapshot();
+            matches!(snap.kind, DeviceKind::Mouse | DeviceKind::Keyboard)
+                && self.remap.snapshot(&snap.id).is_err()
+        });
+        for h in handles.iter().cloned().chain(late) {
             let snap = h.snapshot();
             if matches!(snap.kind, DeviceKind::Mouse | DeviceKind::Keyboard) && snap.connected {
                 self.remap.attach(
@@ -292,9 +308,22 @@ impl DaemonHub {
         }
         let mut map = lock(&self.devices);
         // Reopened models replace their stale placeholders / dead adapters
-        // (once per model: a receiver may return several devices).
+        // (once per model: a receiver may return several devices). Not shut
+        // down: the reopened adapter owns the device (and its audio) now,
+        // and the dropped worker just lets go (`worker::run`).
+        let mut stale = Vec::new();
         for h in &handles {
-            map.retain(|_, old| !old.model.same(h.model) || old.snapshot().connected);
+            map.retain(|_, old| {
+                let keep = !old.model.same(h.model) || old.snapshot().connected;
+                if !keep {
+                    stale.push(old.snapshot().id);
+                }
+                keep
+            });
+        }
+        let fresh: Vec<String> = handles.iter().map(|h| h.snapshot().id.key()).collect();
+        for id in stale.into_iter().filter(|id| !fresh.contains(&id.key())) {
+            let _ = self.events.send(AdapterEvent::Disconnected(id));
         }
         for handle in handles {
             let snap = handle.snapshot();
@@ -318,6 +347,9 @@ impl DaemonHub {
     /// `StartCapture`, plus the session [`Self::end_capture`] stops should
     /// the connection go away while it runs.
     pub fn start_capture(&self, req: IpcRequest) -> (IpcResponse, Option<(DeviceId, u64)>) {
+        if let Some(refused) = self.refuse_while_stopping(&req) {
+            return (refused, None);
+        }
         let id = req.id;
         let p = match serde_json::from_value::<StartCaptureParams>(req.params) {
             Ok(p) => p,
@@ -457,7 +489,32 @@ impl DaemonHub {
         }
     }
 
+    /// Shutdown is tearing down what a change would write to (and its last
+    /// writes, e.g. a pending fader, must not be overtaken): changes are refused.
+    fn refuse_while_stopping(&self, req: &IpcRequest) -> Option<IpcResponse> {
+        let changes = matches!(
+            req.method,
+            Method::Set
+                | Method::SetMany
+                | Method::ApplyProfile
+                | Method::SaveProfile
+                | Method::DeleteProfile
+                | Method::ResetAudio
+                | Method::SetConfig
+                | Method::SetRemap
+                | Method::ClearRemap
+                | Method::StartCapture
+                | Method::PatchMixer
+                | Method::PatchNet
+        );
+        (changes && self.stopping.load(Ordering::Relaxed))
+            .then(|| IpcResponse::err(req.id.clone(), "busy", "hakod is shutting down"))
+    }
+
     pub async fn handle(&self, req: IpcRequest) -> IpcResponse {
+        if let Some(refused) = self.refuse_while_stopping(&req) {
+            return refused;
+        }
         let id = req.id.clone();
         match req.method {
             Method::Ping => {
@@ -771,10 +828,14 @@ impl DaemonHub {
                 );
                 continue;
             }
-            // The device's own stem, else any PID of its model (receiver vs. wired path).
+            // The device's own stem, else any PID of its model (receiver vs.
+            // wired path); not for another device paired to a model's receiver.
             let m = h.model;
             let own = snap.id.config_stem();
             let Some(dev_map) = profile.devices.get(&own).or_else(|| {
+                if !m.claims(&snap.id) {
+                    return None;
+                }
                 m.product_ids.iter().find_map(|pid| {
                     profile
                         .devices
@@ -866,15 +927,18 @@ impl DaemonHub {
         let handles = self.handles();
         let (mut devices, old_mixer) = match old {
             Some(old) => {
-                // A connected device owns every stem of its model (as applied).
+                // A connected device owns every stem of its model, unless it
+                // is another device on the model's receiver (as applied).
                 let live = |stem: &String| {
                     handles.iter().any(|h| {
                         let snap = h.snapshot();
+                        let m = h.model;
                         snap.connected
                             && (*stem == snap.id.config_stem()
-                                || h.model.product_ids.iter().any(|pid| {
-                                    *stem == format!("{:04x}_{pid:04x}", h.model.vendor_id)
-                                }))
+                                || m.claims(&snap.id)
+                                    && m.product_ids.iter().any(|pid| {
+                                        *stem == format!("{:04x}_{pid:04x}", m.vendor_id)
+                                    }))
                     })
                 };
                 let mut devices = old.devices;
@@ -927,14 +991,21 @@ impl DaemonHub {
     }
 
     pub async fn shutdown(&self) {
+        // A pass in flight finishes first: what it opened is in `devices`
+        // below, and no driver open (ChatMix) lands after the audio reset.
+        self.stopping.store(true, Ordering::Relaxed);
+        let _pass = self.discovering.lock().await;
         let handles: Vec<_> = lock(&self.devices).drain().map(|(_, h)| h).collect();
         stop_all(&handles).await;
         let net = self.net.clone();
         let _ = tokio::task::spawn_blocking(move || net.shutdown()).await;
         let mixer = self.mixer.clone();
         let _ = tokio::task::spawn_blocking(move || mixer.shutdown()).await;
-        if let Err(e) = self.audio.reset_all() {
-            warn!("audio teardown: {e:#}");
+        // Tests share the session's audio with the running hakod: never torn down.
+        if !cfg!(test) {
+            if let Err(e) = self.audio.reset_all() {
+                warn!("audio teardown: {e:#}");
+            }
         }
         self.remap.shutdown();
         let _ = self.events.send(AdapterEvent::ShuttingDown);
@@ -1054,6 +1125,20 @@ fn retry_key(m: &Model) -> (u16, u16) {
     (m.vendor_id, m.product_ids[0])
 }
 
+/// Models of handles whose driver crashed their worker, still backing off:
+/// a crash is reopened with backoff too.
+fn crash_skips(handles: &[DeviceHandle], now: Instant) -> Vec<&'static Model> {
+    handles
+        .iter()
+        .filter(|h| {
+            let s = h.snapshot();
+            !s.connected
+                && worker::crashes(&s.id.key()).is_some_and(|(n, at)| now < at + backoff(n))
+        })
+        .map(|h| h.model)
+        .collect()
+}
+
 /// Connected models discovery leaves alone this pass: all but the `multi`
 /// ones (receivers) whose rescan is due, decided once per model (a receiver
 /// hosts several devices). Forgets the rescans of models no longer connected.
@@ -1162,15 +1247,20 @@ fn all_models(present: &Present) -> impl Iterator<Item = &'static Model> + '_ {
 /// model not in `skip`; failures become placeholders. Also returns every
 /// model tried, whether it yielded a device, and its open error. `connected`
 /// lists the open devices a rescanned `multi` model must not return again.
+/// Once `stopping` is set, no further model is opened.
 fn discover_blocking(
     mut ctx: DriverCtx,
     skip: &[&'static Model],
     connected: &[(&'static Model, DeviceId)],
     present: &Present,
+    stopping: &AtomicBool,
 ) -> (Opened, Attempted) {
     let mut out = Vec::new();
     let mut attempted = Vec::new();
     for model in all_models(present) {
+        if stopping.load(Ordering::Relaxed) {
+            break;
+        }
         if skip.iter().any(|m| m.same(model)) {
             continue;
         }
@@ -1220,7 +1310,7 @@ fn discover_blocking(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1231,6 +1321,36 @@ mod tests {
         assert!(validate_settings(&s).is_err());
         s.log_level = String::new();
         assert!(validate_settings(&s).is_ok());
+        s.audio_latency = "bogus".into();
+        assert!(validate_settings(&s).is_err());
+    }
+
+    #[tokio::test]
+    async fn set_config_refuses_bad_values_and_writes_nothing() {
+        let hub = hub("set-config-bad");
+        update_app_config(&hub.paths, |cfg| {
+            cfg.audio_latency = "low".into();
+            Ok(())
+        })
+        .unwrap();
+        let before = std::fs::read(&hub.paths.config_toml).unwrap();
+        let effect = serde_json::json!({"id": "bad id", "enabled": true,
+            "kind": {"type": "noise_gate", "threshold_db": -40.0}});
+        for params in [
+            serde_json::json!({"audio_latency": "bogus"}),
+            serde_json::json!({"aux_effects": {"effects": [effect]}}),
+        ] {
+            let got = hub
+                .handle(IpcRequest {
+                    id: serde_json::json!(1),
+                    method: Method::SetConfig,
+                    params: params.clone(),
+                })
+                .await;
+            assert_eq!(got.error.unwrap().code, "invalid_value", "{params}");
+            assert_eq!(std::fs::read(&hub.paths.config_toml).unwrap(), before);
+        }
+        close(hub);
     }
 
     #[test]
@@ -1266,7 +1386,7 @@ mod tests {
     }
 
     /// Built by hand: `new` would touch the session's PipeWire graph.
-    fn hub(name: &str) -> DaemonHub {
+    pub(crate) fn hub(name: &str) -> DaemonHub {
         let root = std::env::temp_dir().join(format!("hako-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let paths = ConfigPaths {
@@ -1298,11 +1418,13 @@ mod tests {
             profiles: Mutex::new(()),
             retry: Default::default(),
             rescanned: Default::default(),
+            discovering: Mutex::new(()),
+            stopping: Arc::default(),
             paths,
         }
     }
 
-    fn close(hub: DaemonHub) {
+    pub(crate) fn close(hub: DaemonHub) {
         hub.net.shutdown();
         hub.remap.shutdown();
         hub.mixer.shutdown();
@@ -1531,6 +1653,36 @@ mod tests {
             .is_err());
         drop(busy);
         hub.apply_profile("p", true).await.unwrap();
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_a_discovery_pass_that_then_opens_nothing() {
+        let hub = hub("shutdown-pass");
+        let pass = hub.discovering.lock().await;
+        let wait = Duration::from_millis(100);
+        assert!(tokio::time::timeout(wait, hub.shutdown()).await.is_err());
+        // The pass in flight opens nothing more.
+        let model = drivers::models().next().unwrap();
+        let present = vec![HidDeviceInfo {
+            path: PathBuf::from("/nonexistent/hidraw"),
+            vendor_id: model.vendor_id,
+            product_id: model.product_ids[0],
+            interface: Some(0),
+            uniq: String::new(),
+            bus: crate::hid::BUS_USB,
+            name: "Test".into(),
+            sys: PathBuf::from("/nonexistent/sys"),
+        }];
+        let ctx = DriverCtx {
+            paths: hub.paths.clone(),
+            audio: hub.audio.clone(),
+            open: Vec::new(),
+            vendor_id: 0,
+        };
+        let (opened, attempted) = discover_blocking(ctx, &[], &[], &present, &hub.stopping);
+        assert!(opened.is_empty() && attempted.is_empty());
+        drop(pass);
         close(hub);
     }
 
@@ -1814,6 +1966,313 @@ mod tests {
         assert!(!modified(), "forgotten");
         stop_all(&[h]).await;
         close(hub);
+    }
+
+    /// A device the test drives: its kind, and what the hub did to it.
+    #[derive(Clone)]
+    struct Probe {
+        kind: Arc<std::sync::Mutex<DeviceKind>>,
+        sets: Arc<std::sync::Mutex<Vec<SettingKey>>>,
+        shutdowns: Arc<std::sync::atomic::AtomicUsize>,
+        panics: bool,
+    }
+
+    impl Probe {
+        fn new(kind: DeviceKind) -> Self {
+            Self {
+                kind: Arc::new(std::sync::Mutex::new(kind)),
+                sets: Arc::default(),
+                shutdowns: Arc::default(),
+                panics: false,
+            }
+        }
+
+        fn shutdowns(&self) -> usize {
+            self.shutdowns.load(Ordering::SeqCst)
+        }
+    }
+
+    /// A connected device without controls; ticks every 10 ms.
+    struct Fake(DeviceId, Probe);
+
+    impl DeviceAdapter for Fake {
+        fn id(&self) -> &DeviceId {
+            &self.0
+        }
+        fn snapshot(&self) -> hako_core::DeviceSnapshot {
+            hako_core::DeviceSnapshot {
+                id: self.0.clone(),
+                kind: *lock(&self.1.kind),
+                name: "Fake".into(),
+                connected: true,
+                batteries: vec![],
+                settings: Default::default(),
+                controls: vec![],
+                last_error: None,
+            }
+        }
+        fn set(&mut self, key: SettingKey, _: SettingValue) -> Result<()> {
+            lock(&self.1.sets).push(key);
+            Ok(())
+        }
+        fn tick(&mut self) -> Result<()> {
+            assert!(!self.1.panics, "fake driver crash");
+            Ok(())
+        }
+        fn shutdown(&mut self) {
+            self.1.shutdowns.fetch_add(1, Ordering::SeqCst);
+        }
+        fn tick_interval(&self) -> Duration {
+            Duration::from_millis(10)
+        }
+    }
+
+    /// A runtime-probed model of its own (`pid`), never opened by discovery.
+    fn fake_model(pid: u16) -> &'static Model {
+        let pids: &'static [u16] = Box::leak(Box::new([pid]));
+        Box::leak(Box::new(Model {
+            vendor_id: 0x1d50,
+            product_ids: pids,
+            kind: DeviceKind::Mouse,
+            name: "Fake",
+            usbfs: false,
+            multi: false,
+            open: |_, _| Ok(Vec::new()),
+        }))
+    }
+
+    fn fake_id(model: &Model, instance: &str) -> DeviceId {
+        DeviceId {
+            vendor_id: model.vendor_id,
+            product_id: model.product_ids[0],
+            instance: instance.into(),
+        }
+    }
+
+    fn spawn_fake(
+        hub: &DaemonHub,
+        model: &'static Model,
+        id: &DeviceId,
+        probe: &Probe,
+    ) -> DeviceHandle {
+        let fake = Fake(id.clone(), probe.clone());
+        let nodes = vec![PathBuf::from(format!("/nonexistent/{}", id.key()))];
+        DeviceHandle::spawn(
+            model,
+            Box::new(fake),
+            hub.events.clone(),
+            nodes,
+            hub.paths.clone(),
+        )
+        .unwrap()
+    }
+
+    fn drain(events: &mut broadcast::Receiver<AdapterEvent>) -> Vec<AdapterEvent> {
+        std::iter::from_fn(|| events.try_recv().ok()).collect()
+    }
+
+    fn wait_for(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[tokio::test]
+    async fn another_device_on_a_receiver_does_not_take_its_mouse_profile() {
+        let hub = hub("profile-receiver");
+        let pro2 = drivers::models()
+            .find(|m| m.vendor_id == 0x046d && m.product_ids.contains(&0x40a8))
+            .unwrap();
+        assert!(pro2.multi && pro2.product_ids.contains(&0xc543));
+        let mouse = [("dpi".to_string(), TomlSetting::Int(800))].into();
+        let profile = ProfileFile {
+            version: 1,
+            name: "p".into(),
+            devices: [("046d_40a8".to_string(), mouse)].into(),
+            mixer: None,
+        };
+        save_profile(&hub.paths, &profile).unwrap();
+        // A keyboard paired to the mouse's receiver, opened by its model.
+        let keyboard = DeviceId {
+            vendor_id: 0x046d,
+            product_id: 0x4082,
+            instance: "2".into(),
+        };
+        let probe = Probe::new(DeviceKind::Keyboard);
+        let h = spawn_fake(&hub, pro2, &keyboard, &probe);
+        lock(&hub.devices).insert(keyboard.key(), h.clone());
+
+        hub.apply_profile("p", false).await.unwrap();
+        assert!(lock(&probe.sets).is_empty());
+        assert_eq!(
+            load_app_config(&hub.paths).unwrap().last_profile.as_deref(),
+            Some("p")
+        );
+        // Neither does saving with only the keyboard there drop it.
+        hub.save_profile("p").await.unwrap();
+        let saved = load_profile(&hub.paths, "p").unwrap();
+        assert!(saved.devices.contains_key("046d_40a8"), "{saved:?}");
+        stop_all(&[h]).await;
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn a_device_that_becomes_a_mouse_later_gets_its_remaps() {
+        let hub = hub("late-kind");
+        let model = fake_model(0x6a70);
+        let id = fake_id(model, "slot1");
+        // Asleep when its receiver opened: the kind is not known yet.
+        let probe = Probe::new(DeviceKind::Other);
+        let h = spawn_fake(&hub, model, &id, &probe);
+        lock(&hub.devices).insert(id.key(), h.clone());
+        hub.adopt(Vec::new());
+        assert!(hub.remap.snapshot(&id).is_err(), "not remappable yet");
+
+        *lock(&probe.kind) = DeviceKind::Mouse;
+        wait_for("the new kind", || h.snapshot().kind == DeviceKind::Mouse);
+        hub.adopt(Vec::new());
+        assert!(
+            hub.remap.snapshot(&id).is_ok(),
+            "attached once it is a mouse"
+        );
+        stop_all(&[h]).await;
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn an_unplugged_device_is_shut_down_and_announced() {
+        let hub = hub("unplug");
+        let model = fake_model(0x6a71);
+        let id = fake_id(model, "x");
+        let probe = Probe::new(DeviceKind::Mouse);
+        let h = spawn_fake(&hub, model, &id, &probe);
+        lock(&hub.devices).insert(id.key(), h);
+        let mut events = hub.subscribe();
+
+        // Its node is gone.
+        hub.discover(Vec::new()).await;
+        assert!(lock(&hub.devices).is_empty());
+        assert_eq!(probe.shutdowns(), 1);
+        let gone = drain(&mut events);
+        assert!(
+            gone.iter()
+                .any(|e| matches!(e, AdapterEvent::Disconnected(d) if *d == id)),
+            "{gone:?}"
+        );
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn an_open_replaces_its_models_placeholder() {
+        let hub = hub("placeholder");
+        let model = fake_model(0x6a72);
+        let pending = fake_id(model, "pending");
+        let failed = PlaceholderAdapter::permission_denied(
+            pending.clone(),
+            model.kind,
+            model.name,
+            &anyhow::anyhow!("denied"),
+        );
+        let placeholder = DeviceHandle::spawn(
+            model,
+            Box::new(failed),
+            hub.events.clone(),
+            Vec::new(),
+            hub.paths.clone(),
+        )
+        .unwrap();
+        lock(&hub.devices).insert(pending.key(), placeholder);
+        let mut events = hub.subscribe();
+
+        let id = fake_id(model, "x");
+        let probe = Probe::new(DeviceKind::Mouse);
+        let h = spawn_fake(&hub, model, &id, &probe);
+        hub.adopt(vec![h.clone()]);
+        let keys: Vec<String> = lock(&hub.devices).keys().cloned().collect();
+        assert_eq!(keys, [id.key()]);
+        let got: Vec<_> = drain(&mut events)
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AdapterEvent::Connected(_) | AdapterEvent::Disconnected(_)
+                )
+            })
+            .collect();
+        assert!(
+            matches!(&got[..], [AdapterEvent::Disconnected(d), AdapterEvent::Connected(s)]
+                if *d == pending && s.id == id),
+            "{got:?}"
+        );
+        stop_all(&[h]).await;
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn a_crashed_driver_waits_out_its_backoff() {
+        let hub = hub("crash-backoff");
+        let model = fake_model(0x6a73);
+        let id = fake_id(model, "crash");
+        let mut probe = Probe::new(DeviceKind::Mouse);
+        probe.panics = true;
+        let h = spawn_fake(&hub, model, &id, &probe);
+        wait_for("the crash", || worker::crashes(&id.key()).is_some());
+        let (n, at) = worker::crashes(&id.key()).unwrap();
+        assert!(!h.snapshot().connected);
+        let handles = [h];
+        assert_eq!(crash_skips(&handles, at).len(), 1);
+        assert!(crash_skips(&handles, at + backoff(n)).is_empty());
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_every_device_and_says_so_last() {
+        let hub = hub("shutdown-order");
+        let model = fake_model(0x6a74);
+        let probes = [
+            Probe::new(DeviceKind::Mouse),
+            Probe::new(DeviceKind::Keyboard),
+        ];
+        for (i, probe) in probes.iter().enumerate() {
+            let id = fake_id(model, &i.to_string());
+            let h = spawn_fake(&hub, model, &id, probe);
+            lock(&hub.devices).insert(id.key(), h);
+        }
+        let mut events = hub.subscribe();
+        hub.shutdown().await;
+        assert!(lock(&hub.devices).is_empty());
+        assert!(probes.iter().all(|p| p.shutdowns() == 1));
+        let got = drain(&mut events);
+        assert!(
+            matches!(got.last(), Some(AdapterEvent::ShuttingDown)),
+            "{got:?}"
+        );
+        let _ = std::fs::remove_dir_all(&hub.paths.root);
+    }
+
+    #[tokio::test]
+    async fn changes_are_refused_once_shutdown_starts() {
+        let hub = hub("shutdown-writes");
+        let patch = |ops| IpcRequest {
+            id: serde_json::json!(1),
+            method: Method::PatchMixer,
+            params: serde_json::json!({ "ops": ops }),
+        };
+        let output = serde_json::to_value(&layout("B1").outputs[0]).unwrap();
+        let put = serde_json::json!([{"op": "put_output", "output": output}]);
+        let got = hub.handle(patch(put)).await;
+        assert!(got.error.is_none(), "{:?}", got.error);
+        let file = hako_core::mixer::mixer_path(&hub.paths);
+        let before = std::fs::read(&file).unwrap();
+
+        hub.shutdown().await;
+        let mute = serde_json::json!([{"op": "set_output_mute", "output": "B1", "mute": true}]);
+        let got = hub.handle(patch(mute)).await;
+        assert_eq!(got.error.unwrap().code, "busy");
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&hub.paths.root);
     }
 
     #[tokio::test(flavor = "multi_thread")]

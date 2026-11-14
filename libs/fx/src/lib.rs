@@ -25,6 +25,14 @@ pub trait Effect: Send {
     /// Forgets everything heard so far (delay lines, tails, envelopes,
     /// smoothers, model state): the next block runs as on a new instance.
     fn reset(&mut self);
+
+    /// Work `activate` runs on the host's main thread before the `reset` it
+    /// asks for, while `process` may still run: building what `reset` swaps
+    /// in, so the audio thread neither allocates nor frees. Asked once, when
+    /// the plugin is instantiated.
+    fn reset_preparer(&mut self) -> Option<Box<dyn Fn() + Send + Sync>> {
+        None
+    }
 }
 
 /// The effect a plugin `label` runs at `rate` Hz.
@@ -187,6 +195,10 @@ struct Instance {
     effect: Box<dyn Effect>,
     ports: Vec<*mut f32>,
     controls: Vec<f32>,
+    /// The controls' table defaults, standing in for non-finite values.
+    defaults: Vec<f32>,
+    /// `Effect::reset_preparer`, run by `activate`.
+    prepare: Option<Box<dyn Fn() + Send + Sync>>,
     /// Set by `activate`: the next `run` resets the effect first.
     reset: AtomicBool,
 }
@@ -196,14 +208,25 @@ unsafe extern "C" fn instantiate(desc: *const Descriptor, rate: c_ulong) -> *mut
     let desc = unsafe { &*desc };
     // SAFETY: `label` is a NUL-terminated string we leaked.
     let label = unsafe { std::ffi::CStr::from_ptr(desc.label) };
-    let Some(effect) = label.to_str().ok().and_then(|l| effect(l, rate as f32)) else {
+    let Some(label) = label.to_str().ok() else {
+        return std::ptr::null_mut();
+    };
+    let (Some(mut effect), Some((_, defaults))) = (
+        effect(label, rate as f32),
+        AuxEffectKind::all()
+            .into_iter()
+            .filter_map(|k| k.fx_controls())
+            .find(|(l, _)| *l == label),
+    ) else {
         return std::ptr::null_mut();
     };
     let ports = desc.port_count as usize;
     Box::into_raw(Box::new(Instance {
+        prepare: effect.reset_preparer(),
         effect,
         ports: vec![std::ptr::null_mut(); ports],
         controls: vec![0.0; ports - AUDIO_PORTS.len()],
+        defaults: defaults.into_iter().map(|(_, v)| v).collect(),
         reset: AtomicBool::new(false),
     }))
     .cast()
@@ -222,19 +245,26 @@ unsafe extern "C" fn connect_port(handle: *mut c_void, port: c_ulong, data: *mut
 /// device), so stale tails must not play when it wakes. 0.3.x does not stop
 /// the data thread first, so the reset itself waits for the next `run`.
 unsafe extern "C" fn activate(handle: *mut c_void) {
-    // SAFETY: `handle` came from `instantiate`; `run` borrows `reset` shared only.
-    unsafe { &(*handle.cast::<Instance>()).reset }.store(true, Ordering::Release);
+    let instance = handle.cast::<Instance>();
+    // SAFETY: `handle` came from `instantiate`; `run` borrows `reset` shared
+    // only and never touches `prepare`.
+    let (prepare, reset) = unsafe { (&(*instance).prepare, &(*instance).reset) };
+    if let Some(prepare) = prepare {
+        prepare();
+    }
+    reset.store(true, Ordering::Release);
 }
 
 unsafe extern "C" fn run(handle: *mut c_void, samples: c_ulong) {
     let instance = handle.cast::<Instance>();
     // SAFETY: `handle` came from `instantiate`; field by field, as `activate`
     // may set `reset` meanwhile.
-    let (effect, ports, controls, reset) = unsafe {
+    let (effect, ports, controls, defaults, reset) = unsafe {
         (
             &mut (*instance).effect,
             &(*instance).ports,
             &mut (*instance).controls,
+            &(*instance).defaults,
             &(*instance).reset,
         )
     };
@@ -246,10 +276,13 @@ unsafe extern "C" fn run(handle: *mut c_void, samples: c_ulong) {
     if [in_l, in_r, out_l, out_r].iter().any(|p| p.is_null()) {
         return;
     }
-    for (value, port) in controls.iter_mut().zip(&ports[4..]) {
+    for ((value, port), default) in controls.iter_mut().zip(&ports[4..]).zip(defaults) {
         if !port.is_null() {
             // SAFETY: a connected control port points at one f32.
-            *value = unsafe { **port };
+            let v = unsafe { **port };
+            // `f32::clamp` keeps NaN (and panics on a NaN bound): it would
+            // stick in the stages' delay lines, phases and filters.
+            *value = if v.is_finite() { v } else { *default };
         }
     }
     // SAFETY: the host connected `n`-sample buffers; inputs may alias outputs
@@ -271,6 +304,12 @@ unsafe extern "C" fn run(handle: *mut c_void, samples: c_ulong) {
         };
     }
     effect.process(controls, left, right);
+    // Nor may a stage hand one on to the next.
+    for s in left.iter_mut().chain(right.iter_mut()) {
+        if !s.is_finite() {
+            *s = 0.0;
+        }
+    }
 }
 
 unsafe extern "C" fn cleanup(handle: *mut c_void) {
@@ -486,6 +525,195 @@ mod tests {
                 (poisoned - clean).abs() <= 0.02 * clean + 1e-4,
                 "{label}: {poisoned} vs {clean}"
             );
+        }
+    }
+
+    /// Instantiates plugin `label` at `rate` Hz and runs blocks of the `sizes` given of a
+    /// vowel plus sibilance in both channels through the C ABI, block `i` on `values(i)`; the
+    /// left output.
+    fn run_label(
+        label: &str,
+        rate: c_ulong,
+        sizes: &[usize],
+        values: impl Fn(usize) -> Vec<f32>,
+    ) -> Vec<f32> {
+        let desc = descriptors()
+            .iter()
+            .find(|d| unsafe { CStr::from_ptr(d.label) }.to_str() == Ok(label))
+            .expect(label);
+        let handle = unsafe { (desc.instantiate)(desc, rate) };
+        assert!(!handle.is_null(), "{label}");
+        let mut out = Vec::new();
+        for (block, &n) in sizes.iter().enumerate() {
+            let mut l: Vec<f32> = (out.len()..out.len() + n)
+                .map(|i| {
+                    let t = i as f32 / rate as f32;
+                    0.3 * (std::f32::consts::TAU * 300.0 * t).sin()
+                        + 0.2 * (std::f32::consts::TAU * 8000.0 * t).sin()
+                })
+                .collect();
+            let mut r = l.clone();
+            let mut values = values(block);
+            unsafe {
+                (desc.connect_port)(handle, 0, l.as_mut_ptr());
+                (desc.connect_port)(handle, 1, r.as_mut_ptr());
+                (desc.connect_port)(handle, 2, l.as_mut_ptr());
+                (desc.connect_port)(handle, 3, r.as_mut_ptr());
+                for (i, v) in values.iter_mut().enumerate() {
+                    (desc.connect_port)(handle, 4 + i as c_ulong, v);
+                }
+                (desc.run)(handle, n as c_ulong);
+            }
+            out.extend(l);
+        }
+        unsafe { (desc.cleanup)(handle) };
+        out
+    }
+
+    /// A NaN or infinite control value (a host bug, a corrupt config) neither sticks in a
+    /// stage nor stops it working: the output stays finite and, once the control is back on
+    /// its default, sounds as a new instance that only ever had the default.
+    #[test]
+    fn a_non_finite_control_does_not_poison_a_stage() {
+        let rms = |x: &[f32]| (x.iter().map(|s| s * s).sum::<f32>() / x.len() as f32).sqrt();
+        let n = 512;
+        // One thread per stage keeps the suite fast.
+        std::thread::scope(|scope| {
+            for (label, controls) in AuxEffectKind::all()
+                .into_iter()
+                .filter_map(|k| k.fx_controls())
+            {
+                scope.spawn(move || {
+                    let defaults: Vec<f32> = controls.iter().map(|(_, v)| *v).collect();
+                    // 5 poisoned blocks, then 2 s; denoise guards its controls itself and is
+                    // slow to load and run in a debug build, so it gets a short tail.
+                    let sizes = vec![n; 5 + if label == "denoise" { 7 } else { 188 }];
+                    let last = sizes.len() * n - n..;
+                    let expected = run_label(label, 48000, &sizes, |_| defaults.clone());
+                    let expected = rms(&expected[last.clone()]);
+                    for (port, bad) in
+                        (0..defaults.len()).flat_map(|p| [f32::NAN, f32::INFINITY].map(|b| (p, b)))
+                    {
+                        let out = run_label(label, 48000, &sizes, |block| {
+                            let mut values = defaults.clone();
+                            if block < 5 {
+                                values[port] = bad;
+                            }
+                            values
+                        });
+                        let name = controls[port].0;
+                        assert!(out.iter().all(|s| s.is_finite()), "{label} {name}={bad}");
+                        let got = rms(&out[last.clone()]);
+                        assert!(
+                            (got - expected).abs() <= 0.02 * expected + 1e-4,
+                            "{label} {name}={bad}: {got} vs {expected}"
+                        );
+                    }
+                });
+            }
+        });
+    }
+
+    /// Every stage stays finite and bounded with all controls at their minimum or maximum, at
+    /// common rates and on odd block sizes, and a nonsense rate does not panic.
+    #[test]
+    fn every_stage_survives_extreme_controls_rates_and_block_sizes() {
+        let sizes: Vec<usize> = [0]
+            .into_iter()
+            .chain([1; 480])
+            .chain([333; 15])
+            .chain([4096; 2])
+            .chain([0])
+            .collect();
+        std::thread::scope(|scope| {
+            for mut kind in AuxEffectKind::all() {
+                let Some(label) = kind.fx_label() else {
+                    continue;
+                };
+                let (mut lows, mut highs) = (Vec::new(), Vec::new());
+                for (p, _) in kind.fx_params_mut() {
+                    lows.push(p.min);
+                    highs.push(p.max);
+                }
+                for (c, _) in kind.fx_choices_mut() {
+                    lows.push(0.0);
+                    highs.push((c.options.len() - 1) as f32);
+                }
+                let defaults: Vec<f32> = kind
+                    .fx_controls()
+                    .unwrap()
+                    .1
+                    .iter()
+                    .map(|(_, v)| *v)
+                    .collect();
+                let sizes = &sizes;
+                scope.spawn(move || {
+                    for rate in [44100, 48000, 96000] {
+                        for values in [&lows, &highs] {
+                            let out = run_label(label, rate, sizes, |_| values.clone());
+                            assert!(
+                                out.iter().all(|s| s.is_finite() && s.abs() < 16.0),
+                                "{label} at {rate} Hz on {values:?}"
+                            );
+                        }
+                    }
+                    for rate in [0.0, 1.0] {
+                        let mut fx = effect(label, rate).unwrap();
+                        let (mut l, mut r) = (vec![0.5; 1024], vec![-0.5; 1024]);
+                        fx.process(&defaults, &mut l, &mut r);
+                        assert!(
+                            l.iter().chain(&r).all(|s| s.is_finite()),
+                            "{label} at {rate} Hz"
+                        );
+                    }
+                });
+            }
+        });
+    }
+
+    /// Each stage reads its controls by position, so the ports must stay in this order
+    /// whatever order the hako-core table lists them in.
+    #[test]
+    fn control_ports_are_in_the_order_the_stages_read_them() {
+        let expected: [(&str, &[&str]); 13] = [
+            ("denoise", &["max_reduction_db", "model"]),
+            ("deesser", &["threshold_db", "freq_hz", "max_reduction_db"]),
+            ("limiter", &["ceiling_db", "release_ms"]),
+            ("distortion", &["drive_db", "tone_hz", "mix_pct"]),
+            ("pitch", &["semitones", "mix_pct"]),
+            ("autotune", &["speed_ms", "mix_pct", "key", "scale"]),
+            (
+                "vocoder",
+                &["carrier_hz", "bands", "mix_pct", "carrier", "follow"],
+            ),
+            ("robot", &["freq_hz", "mix_pct"]),
+            ("bitcrusher", &["bits", "downsample", "mix_pct"]),
+            (
+                "reverb",
+                &["room_pct", "damping_pct", "width_pct", "mix_pct"],
+            ),
+            ("delay", &["time_ms", "feedback_pct", "mix_pct"]),
+            ("chorus", &["rate_hz", "depth_ms", "mix_pct"]),
+            (
+                "flanger",
+                &["rate_hz", "depth_ms", "feedback_pct", "mix_pct"],
+            ),
+        ];
+        assert_eq!(descriptors().len(), expected.len());
+        for (label, controls) in expected {
+            let desc = descriptors()
+                .iter()
+                .find(|d| unsafe { CStr::from_ptr(d.label) }.to_str() == Ok(label))
+                .expect(label);
+            let names: Vec<_> = (0..desc.port_count as usize)
+                .map(|i| {
+                    unsafe { CStr::from_ptr(*desc.port_names.add(i)) }
+                        .to_str()
+                        .unwrap()
+                })
+                .collect();
+            let expected: Vec<_> = AUDIO_PORTS.iter().chain(controls).copied().collect();
+            assert_eq!(names, expected, "{label}");
         }
     }
 }

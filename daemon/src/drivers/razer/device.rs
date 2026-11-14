@@ -983,13 +983,16 @@ mod tests {
 
     /// A device that keeps what it is set to and answers like the firmware:
     /// status ok, a set echoed, a get (command | 0x80) with the arguments of
-    /// the last matching set, whatever its storage byte.
+    /// the last matching set. Lighting keeps what it shows (NOSTORE) apart
+    /// from what it stores (VARSTORE sets both), and a get answers from the
+    /// one its storage byte names; it shows what it stores until set.
     #[derive(Default)]
     struct Fake {
         sent: Vec<[u8; 90]>,
         stages: Vec<u8>,
-        /// Last set arguments per (class, set command, LED for class 0x0f).
-        held: std::collections::HashMap<(u8, u8, u8), Vec<u8>>,
+        /// Last set arguments per (class, set command, LED, storage byte);
+        /// LED and storage byte only for lighting (class 0x0f), else 0.
+        held: std::collections::HashMap<(u8, u8, u8, u8), Vec<u8>>,
         /// Acknowledge stage writes without keeping them.
         drop_writes: bool,
         bad_crc: bool,
@@ -1013,7 +1016,11 @@ mod tests {
             self.sent.push(*req);
             let (class, cmd) = (req[6], req[7]);
             let args = &req[8..8 + usize::from(req[5])];
-            let led = if class == 0x0f { args[1] } else { 0 };
+            let (led, store) = if class == 0x0f {
+                (args[1], args[0])
+            } else {
+                (0, NOSTORE)
+            };
             if cmd & 0x80 != 0 && self.busy_reads > 0 {
                 self.busy_reads -= 1;
                 let mut resp = *req;
@@ -1031,13 +1038,17 @@ mod tests {
                     self.stages = args.to_vec();
                     args.to_vec()
                 }
-                (_, get) if get & 0x80 != 0 => self
-                    .held
-                    .get(&(class, get & 0x7f, led))
-                    .cloned()
-                    .unwrap_or_else(|| args.to_vec()),
+                (_, get) if get & 0x80 != 0 => {
+                    let held = |s| self.held.get(&(class, get & 0x7f, led, s)).cloned();
+                    held(store)
+                        .or_else(|| (store == NOSTORE).then(|| held(VARSTORE)).flatten())
+                        .unwrap_or_else(|| args.to_vec())
+                }
                 _ => {
-                    self.held.insert((class, cmd, led), args.to_vec());
+                    self.held.insert((class, cmd, led, store), args.to_vec());
+                    if store == VARSTORE {
+                        self.held.insert((class, cmd, led, NOSTORE), args.to_vec());
+                    }
                     args.to_vec()
                 }
             };
@@ -1047,6 +1058,15 @@ mod tests {
                 resp[88] ^= 0xff;
             }
             resp
+        }
+
+        /// The device stores the lighting it shows (as if saved earlier).
+        fn store_shown(&mut self) {
+            let shown: Vec<_> = (self.held.iter())
+                .filter(|(k, _)| k.0 == 0x0f && k.3 == NOSTORE)
+                .map(|(&(c, cmd, led, _), v)| ((c, cmd, led, VARSTORE), v.clone()))
+                .collect();
+            self.held.extend(shown);
         }
 
         fn link(&mut self) -> impl FnMut(u8, Cmd) -> Result<[u8; 90]> + '_ {
@@ -1212,7 +1232,8 @@ mod tests {
     fn stored_brightness_is_read_back() {
         let mut fake = Fake::new();
         let wire = p::brightness_wire(50);
-        fake.held.insert((0x0f, 0x04, 0x04), vec![0x01, 0x04, wire]);
+        fake.held
+            .insert((0x0f, 0x04, 0x04, VARSTORE), vec![0x01, 0x04, wire]);
         assert!(verify_brightness(&mut fake.link(), 0x3f, &[0x04], 50).is_ok());
         assert!(verify_brightness(&mut fake.link(), 0x3f, &[0x04], 60).is_err());
     }
@@ -1345,7 +1366,7 @@ mod tests {
             .set(SettingKey::Brightness, SettingValue::Int(40))
             .unwrap_err();
         assert!(format!("{err:#}").contains("restoring"), "{err:#}");
-        let held = fake.lock().unwrap().held[&(0x0f, 0x04, 0x04)].clone();
+        let held = fake.lock().unwrap().held[&(0x0f, 0x04, 0x04, NOSTORE)].clone();
         assert_eq!(held[2], p::brightness_wire(80));
         assert_eq!(
             get_setting(&a.settings, SettingKey::Brightness),
@@ -1406,33 +1427,33 @@ mod tests {
         let cases: [(u16, Change, (u8, u8)); 7] = [
             (
                 0x007c,
-                |f| f.held.get_mut(&(0x04, 0x05, 0)).unwrap()[2] ^= 1,
+                |f| f.held.get_mut(&(0x04, 0x05, 0, 0)).unwrap()[2] ^= 1,
                 (0x04, 0x05),
             ),
             (
                 0x007c,
-                |f| f.held.get_mut(&(0x00, 0x05, 0)).unwrap()[0] = 0x08,
+                |f| f.held.get_mut(&(0x00, 0x05, 0, 0)).unwrap()[0] = 0x08,
                 (0x00, 0x05),
             ),
             (
                 0x007c,
-                |f| f.held.get_mut(&(0x07, 0x03, 0)).unwrap()[1] ^= 1,
+                |f| f.held.get_mut(&(0x07, 0x03, 0, 0)).unwrap()[1] ^= 1,
                 (0x07, 0x03),
             ),
             (0x007c, |f| f.stages[5] ^= 1, (0x04, 0x06)),
             (
                 0x007c,
-                |f| f.held.get_mut(&(0x0f, 0x04, 0x04)).unwrap()[2] ^= 1,
+                |f| f.held.get_mut(&(0x0f, 0x04, 0x04, VARSTORE)).unwrap()[2] ^= 1,
                 (0x0f, 0x04),
             ),
             (
                 0x0287,
-                |f| f.held.get_mut(&(0x03, 0x00, 0)).unwrap()[2] = 0,
+                |f| f.held.get_mut(&(0x03, 0x00, 0, 0)).unwrap()[2] = 0,
                 (0x03, 0x00),
             ),
             (
                 0x0287,
-                |f| f.held.get_mut(&(0x0f, 0x02, 0x05)).unwrap()[6] ^= 1,
+                |f| f.held.get_mut(&(0x0f, 0x02, 0x05, VARSTORE)).unwrap()[6] ^= 1,
                 (0x0f, 0x02),
             ),
         ];
@@ -1440,6 +1461,8 @@ mod tests {
             let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake::new()));
             let mut a = fake_adapter(pid, &fake, &root);
             choose_everything(&mut a);
+            // Saved earlier: after a replug it shows what it stores.
+            fake.lock().unwrap().store_shown();
             writes(&fake);
             a.connect();
             assert_eq!(a.last_error, None);
@@ -1457,6 +1480,23 @@ mod tests {
         let sent = std::mem::take(&mut fake.lock().unwrap().sent);
         let read = sent.iter().find(|r| (r[6], r[7]) == (0x03, 0x80)).unwrap();
         assert_eq!((read[1], &read[8..11]), (0xff, &[0x01, 0x08, 0x00][..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Lighting set outside save mode is not what the device stores (and
+    /// shows after a replug): a reconnect sends it again, compared against
+    /// the stored (VARSTORE) lighting, not the shown one.
+    #[test]
+    fn unsaved_lighting_is_resent_on_reconnect() {
+        let root = std::env::temp_dir().join(format!("hako-razer-unsaved-{}", std::process::id()));
+        let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake::new()));
+        // DeathAdder V2 Mini: stored lighting on the logo LED.
+        let mut a = fake_adapter(0x008c, &fake, &root);
+        a.set(SettingKey::Brightness, SettingValue::Int(40))
+            .unwrap();
+        writes(&fake);
+        a.connect();
+        assert_eq!(writes(&fake), [(0x0f, 0x04), (0x0f, 0x02)]);
         let _ = std::fs::remove_dir_all(root);
     }
 

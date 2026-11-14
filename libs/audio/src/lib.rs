@@ -439,7 +439,15 @@ impl AudioService {
 
     pub fn set_chatmix_volumes(&self, game: f32, chat: f32) -> Result<()> {
         let mut state = self.state();
-        let (game, chat) = (game.clamp(0.0, 1.0), chat.clamp(0.0, 1.0));
+        // NaN survives `clamp` and would defeat the unchanged-volume check.
+        let dial = |v: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        let (game, chat) = (dial(game), dial(chat));
         state.dial = Some((game, chat));
         if state.handed_over {
             if let Some(hook) = self.on_dial.get() {
@@ -2230,6 +2238,16 @@ mod tests {
     #[test]
     fn config_string_escaping() {
         assert_eq!(pw_escape("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
+        // SPA-JSON's own escapes for the whitespace it knows.
+        assert_eq!(pw_escape("a\rb\tc"), "a\\rb\\tc");
+        // Other control characters (NUL, BEL, ESC, DEL, C1) would end or
+        // corrupt the string: dropped.
+        assert_eq!(pw_escape("x\u{0}\u{7}\u{1b}[0m\u{7f}\u{85}y"), "x[0my");
+        // Non-ASCII is UTF-8 inside the quotes, as is.
+        assert_eq!(
+            pw_escape("Mikrofon für Ünï 🎤 =}{[]"),
+            "Mikrofon für Ünï 🎤 =}{[]"
+        );
     }
 
     #[test]
@@ -2437,6 +2455,22 @@ mod tests {
 
         changed.effects.swap(0, 1);
         assert!(!same_effect_topology(&current, &changed));
+
+        // A bypassed stage leaves the graph.
+        let mut bypassed = current.clone();
+        bypassed.effects[0].enabled = false;
+        assert!(!same_effect_topology(&current, &bypassed));
+
+        // Another kind under the same id is another plugin.
+        let pick = |pick: fn(&AuxEffectKind) -> bool| {
+            let mut chain = current.clone();
+            chain.effects[0].kind = AuxEffectKind::all().into_iter().find(pick).unwrap();
+            chain
+        };
+        let reverb = pick(|k| matches!(k, AuxEffectKind::Reverb { .. }));
+        let delay = pick(|k| matches!(k, AuxEffectKind::Delay { .. }));
+        assert!(same_effect_topology(&reverb, &reverb.clone()));
+        assert!(!same_effect_topology(&reverb, &delay));
     }
 
     #[test]
@@ -2755,6 +2789,9 @@ mod tests {
         audio.set_chatmix_volumes(0.3, 1.0).unwrap();
         assert!(dial.lock().unwrap().is_empty());
         assert_eq!(audio.chatmix_dial(), (0.3, 1.0));
+        // Not a dial position: silent, never NaN volumes.
+        audio.set_chatmix_volumes(f32::NAN, f32::INFINITY).unwrap();
+        assert_eq!(audio.chatmix_dial(), (0.0, 0.0));
 
         audio.hand_over(true).unwrap();
         // ChatMix is not built (no PipeWire lookup happens).

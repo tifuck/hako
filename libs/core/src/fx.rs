@@ -77,6 +77,10 @@ const DENOISE_MODEL: FxChoice = FxChoice {
     default: 0,
 };
 
+/// Threshold range of the gate and the compressor (LSP stages, outside this
+/// table): `(min, max)` dB.
+pub const LSP_THRESHOLD_DB: (f32, f32) = (-60.0, 0.0);
+
 const DEESS_THRESHOLD: FxParam = param(
     "threshold_db",
     "Threshold",
@@ -551,11 +555,17 @@ impl AuxEffectKind {
     /// floor, or one that would leave its range).
     pub fn level_shifted(&self, trim_db: f32) -> Option<Self> {
         let mut kind = self.clone();
-        let (threshold, min, max) = match &mut kind {
-            Self::NoiseGate { threshold_db, .. }
-            | Self::Compressor { threshold_db, .. }
-            | Self::DeEsser { threshold_db, .. } => (threshold_db, -60.0, 0.0),
-            Self::Limiter { ceiling_db, .. } => (ceiling_db, -24.0, 0.0),
+        // The ranges validation checks, so a shifted stage always loads.
+        let (threshold, (min, max)) = match &mut kind {
+            Self::NoiseGate { threshold_db, .. } | Self::Compressor { threshold_db, .. } => {
+                (threshold_db, LSP_THRESHOLD_DB)
+            }
+            Self::DeEsser { threshold_db, .. } => {
+                (threshold_db, (DEESS_THRESHOLD.min, DEESS_THRESHOLD.max))
+            }
+            Self::Limiter { ceiling_db, .. } => {
+                (ceiling_db, (LIMIT_CEILING.min, LIMIT_CEILING.max))
+            }
             Self::Vocoder { follow: 0, .. }
             | Self::Equalizer { .. }
             | Self::Robot { .. }

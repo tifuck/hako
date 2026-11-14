@@ -270,8 +270,9 @@ impl SteelSeriesAdapter {
     fn handle_report(&mut self, b: &[u8]) -> bool {
         match b {
             [0x07, 0x45, game, chat, ..] => {
-                self.game_mix = (*game as f64) / 100.0;
-                self.chat_mix = (*chat as f64) / 100.0;
+                // Percent; a byte past 100 must not leave the controls' 0..1.
+                self.game_mix = (f64::from(*game) / 100.0).min(1.0);
+                self.chat_mix = (f64::from(*chat) / 100.0).min(1.0);
                 merge_setting(
                     &mut self.settings,
                     SettingKey::ChatMixGame,
@@ -598,6 +599,166 @@ mod tests {
         assert_eq!(headset_battery(&d), (Some(50), true, true));
         d[15] = 0x01; // offline: level byte is stale
         assert_eq!(headset_battery(&d), (None, false, false));
+    }
+
+    /// The adapter with a plain file as its hidraw node: every write lands
+    /// in it as one 64-byte record.
+    fn adapter(pid: u16, root: &std::path::Path) -> SteelSeriesAdapter {
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let node = root.join("hidraw");
+        std::fs::write(&node, []).unwrap();
+        let mut settings = SettingsMap::new();
+        defaults_into(&mut settings);
+        SteelSeriesAdapter {
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: pid,
+                instance: "fake".into(),
+            },
+            name: model_name(pid).into(),
+            dev: Some(HidrawDevice::open(&node).unwrap()),
+            settings,
+            last_error: None,
+            game_mix: 1.0,
+            chat_mix: 1.0,
+            batteries: vec![
+                BatteryState {
+                    label: "Headset".into(),
+                    percent: None,
+                    charging: false,
+                    present: true,
+                },
+                BatteryState {
+                    label: "Spare".into(),
+                    percent: None,
+                    charging: false,
+                    present: true,
+                },
+            ],
+            last_poll: Instant::now(),
+            last_chatmix_try: Instant::now(),
+            poll_failures: 0,
+            init_error: None,
+            init_failures: 0,
+            last_init_try: Instant::now(),
+            audio: Arc::new(AudioService::new()),
+            mix_dirty: false,
+            paths,
+        }
+    }
+
+    /// Reports written since the last call.
+    fn written(a: &SteelSeriesAdapter, seen: &mut usize) -> Vec<Vec<u8>> {
+        let all = std::fs::read(&a.dev.as_ref().unwrap().path).unwrap();
+        let new = all[*seen..].chunks(64).map(<[u8]>::to_vec).collect();
+        *seen = all.len();
+        new
+    }
+
+    /// `head` zero-padded to a 64-byte report.
+    fn report(head: &[u8]) -> Vec<u8> {
+        let mut r = vec![0u8; 64];
+        r[..head.len()].copy_from_slice(head);
+        r
+    }
+
+    #[test]
+    fn each_setter_is_one_report_then_the_flash_save_in_save_mode() {
+        use SettingValue::{Bool, Int};
+        let root = std::env::temp_dir().join(format!("hako-nova-set-{}", std::process::id()));
+        let mut a = adapter(0x12e5, &root);
+        let mut seen = 0;
+        let cases = [
+            (SettingKey::MicVolume, Int(7), [0x06, 0x37, 0x07]),
+            (SettingKey::MicSideTone, Int(2), [0x06, 0x39, 0x02]),
+            (SettingKey::MicLedBrightness, Int(5), [0x06, 0xbf, 0x05]),
+            (SettingKey::PmShutdown, Int(3), [0x06, 0xc1, 0x03]),
+            (
+                SettingKey::WirelessModeRange,
+                Bool(true),
+                [0x06, 0xc3, 0x01],
+            ),
+        ];
+        for (key, value, head) in cases.clone() {
+            a.set(key, value).unwrap();
+            assert_eq!(written(&a, &mut seen), [report(&head)], "{key:?}");
+        }
+        a.set(SettingKey::SaveToDevice, Bool(true)).unwrap();
+        assert_eq!(written(&a, &mut seen), [report(&[0x06, 0x09, 0x00])]);
+        for (key, value, head) in cases {
+            a.set(key, value).unwrap();
+            assert_eq!(
+                written(&a, &mut seen),
+                [report(&head), report(&[0x06, 0x09, 0x00])],
+                "{key:?}"
+            );
+        }
+        a.set(SettingKey::SaveToDevice, Bool(false)).unwrap();
+        assert!(written(&a, &mut seen).is_empty());
+        // The white X never gets the flash save.
+        let mut white = adapter(0x225d, &root);
+        let mut seen = 0;
+        white.set(SettingKey::SaveToDevice, Bool(true)).unwrap();
+        white.set(SettingKey::MicVolume, Int(4)).unwrap();
+        assert_eq!(written(&white, &mut seen), [report(&[0x06, 0x37, 0x04])]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn status_and_dial_reports_fill_every_field() {
+        let root = std::env::temp_dir().join(format!("hako-nova-status-{}", std::process::id()));
+        let mut a = adapter(0x12e5, &root);
+        // 06 b0 reply: headset 6/8 [6], spare 3/8 [7], mute LED 7 [11],
+        // auto-off 2 [12], range mode on [13], discharging [15].
+        let status = [
+            0x06, 0xb0, 0, 0, 0, 0, 0x06, 0x03, 0, 0, 0, 0x07, 0x02, 0x01, 0, 0x08,
+        ];
+        assert!(a.handle_report(&status));
+        assert_eq!(
+            (a.batteries[0].percent, a.batteries[0].charging),
+            (Some(75), false)
+        );
+        assert!(a.batteries[0].present);
+        assert_eq!(a.batteries[1].percent, Some(38));
+        let get = |a: &SteelSeriesAdapter, k| get_setting(&a.settings, k).cloned();
+        assert_eq!(
+            get(&a, SettingKey::MicLedBrightness),
+            Some(SettingValue::Int(7))
+        );
+        assert_eq!(get(&a, SettingKey::PmShutdown), Some(SettingValue::Int(2)));
+        assert_eq!(
+            get(&a, SettingKey::WirelessModeRange),
+            Some(SettingValue::Bool(true))
+        );
+        assert!(!a.handle_report(&status[..15]), "short reply");
+
+        // ChatMix dial 07 45 <game %> <chat %>, kept within its 0..1 controls.
+        assert!(!a.handle_report(&[0x07, 0x45, 100, 50]));
+        assert_eq!(
+            get(&a, SettingKey::ChatMixGame),
+            Some(SettingValue::Float(1.0))
+        );
+        assert_eq!(
+            get(&a, SettingKey::ChatMixChat),
+            Some(SettingValue::Float(0.5))
+        );
+        a.handle_report(&[0x07, 0x45, 150, 255]);
+        let controls = controls(0x12e5);
+        for key in [SettingKey::ChatMixGame, SettingKey::ChatMixChat] {
+            let v = get(&a, key).unwrap();
+            assert_eq!(v, SettingValue::Float(1.0));
+            let meta = controls.iter().find(|m| m.key == key).unwrap();
+            assert_eq!(meta.max, Some(1.0));
+        }
+        assert!(a.mix_dirty);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

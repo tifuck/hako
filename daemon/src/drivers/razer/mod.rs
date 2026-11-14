@@ -127,8 +127,13 @@ const ALL_MODELS: [Model; MODEL_COUNT] = {
 };
 
 enum Transport {
-    Usb { dev: UsbDevice, iface: u16 },
+    Usb {
+        dev: UsbDevice,
+        iface: u16,
+    },
     Hidraw(HidrawDevice),
+    #[cfg(test)]
+    Fake(std::sync::Arc<std::sync::Mutex<tests::Fake>>),
 }
 
 impl Transport {
@@ -143,6 +148,8 @@ impl Transport {
                 buf[1..].copy_from_slice(report);
                 dev.set_feature(&mut buf)
             }
+            #[cfg(test)]
+            Transport::Fake(f) => f.lock().unwrap().set(report),
         }
     }
 
@@ -156,6 +163,8 @@ impl Transport {
                 dev.get_feature(&mut buf)?;
                 resp.copy_from_slice(&buf[1..]);
             }
+            #[cfg(test)]
+            Transport::Fake(f) => resp.copy_from_slice(&f.lock().unwrap().answer),
         }
         Ok(resp)
     }
@@ -246,6 +255,8 @@ impl RazerKeyboardAdapter {
                 format!("usb {} iface={iface}", dev.path.display())
             }
             Some(Transport::Hidraw(h)) => format!("hidraw {}", h.path.display()),
+            #[cfg(test)]
+            Some(Transport::Fake(_)) => "fake".into(),
             None => "none".into(),
         };
         info!("Razer keyboard open via {via}");
@@ -502,12 +513,20 @@ impl DeviceAdapter for RazerKeyboardAdapter {
 
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
         let before = self.settings.clone();
+        // In save mode the keyboard already holds an unchanged value: storing
+        // it again would only wear the flash.
+        let unchanged = get_setting(&self.settings, key) == Some(&value);
         merge_setting(&mut self.settings, key, value.clone());
-        let store = if self.saving() { VARSTORE } else { NOSTORE };
+        let store = if self.saving() && !unchanged {
+            VARSTORE
+        } else {
+            NOSTORE
+        };
         let result = match key {
             SettingKey::ReportRate | SettingKey::GameMode => self.write_misc(key, &value),
-            // Turning it on stores the current lighting once; off sends nothing.
-            SettingKey::SaveToDevice if !self.saving() => Ok(()),
+            // Turning it on stores the current lighting once; off (or on
+            // again) sends nothing.
+            SettingKey::SaveToDevice if !self.saving() || unchanged => Ok(()),
             _ => self.apply_all(store),
         };
         if let Err(mut e) = result {
@@ -819,6 +838,151 @@ mod tests {
         assert!(m.usbfs);
         assert_eq!(MODELS.len(), 1 + models::SPECS.len() + kraken::MODELS.len());
         assert!(MODELS[1..].iter().all(|m| !m.usbfs && m.vendor_id == VID));
+    }
+
+    /// The keyboard's control interface: answers like the firmware (status
+    /// ok, arguments echoed) and keeps the stored brightness, which a
+    /// VARSTORE brightness read returns.
+    #[derive(Default)]
+    pub(super) struct Fake {
+        sent: Vec<[u8; 90]>,
+        pub(super) answer: Vec<u8>,
+        stored_brightness: u8,
+        /// Answer this (class, cmd) with failure (0x03).
+        fail: Option<(u8, u8)>,
+    }
+
+    impl Fake {
+        pub(super) fn set(&mut self, req: &[u8; 90]) -> Result<()> {
+            self.sent.push(*req);
+            let mut resp = *req;
+            resp[0] = 0x02;
+            match (req[6], req[7]) {
+                c if self.fail == Some(c) => resp[0] = 0x03,
+                (0x0f, 0x04) if req[8] == VARSTORE => self.stored_brightness = req[10],
+                (0x0f, 0x84) => resp[10] = self.stored_brightness,
+                _ => {}
+            }
+            self.answer = resp.to_vec();
+            Ok(())
+        }
+    }
+
+    fn huntsman(
+        fake: &std::sync::Arc<std::sync::Mutex<Fake>>,
+        root: &std::path::Path,
+    ) -> RazerKeyboardAdapter {
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let mut settings = SettingsMap::new();
+        defaults(&mut settings);
+        RazerKeyboardAdapter {
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: PID,
+                instance: "fake".into(),
+            },
+            transport: Some(Transport::Fake(fake.clone())),
+            settings,
+            last_error: None,
+            paths,
+            last_poll: std::time::Instant::now(),
+        }
+    }
+
+    /// Bytes 0..11 of every frame sent (header, class, cmd, first three
+    /// arguments), then forget them.
+    fn sent(fake: &std::sync::Mutex<Fake>) -> Vec<[u8; 11]> {
+        let sent = std::mem::take(&mut fake.lock().unwrap().sent);
+        sent.iter().map(|r| r[..11].try_into().unwrap()).collect()
+    }
+
+    /// Effect frame head: 00 1f 0000 00 09 0f 02 <store> 05 01 (static).
+    const fn effect(store: u8) -> [u8; 11] {
+        [0, 0x1f, 0, 0, 0, 0x09, 0x0f, 0x02, store, 0x05, 0x01]
+    }
+
+    /// Brightness frame: 00 1f 0000 00 03 0f 04 <store> 05 <wire>.
+    const fn brightness(store: u8, wire: u8) -> [u8; 11] {
+        [0, 0x1f, 0, 0, 0, 0x03, 0x0f, 0x04, store, 0x05, wire]
+    }
+
+    /// Stored-brightness read: 00 1f 0000 00 03 0f 84 01 05 00.
+    const READ_STORED: [u8; 11] = [0, 0x1f, 0, 0, 0, 0x03, 0x0f, 0x84, 0x01, 0x05, 0x00];
+
+    /// Save mode stores a lighting change once; an unchanged value or
+    /// turning the mode on again stores nothing, off sends nothing.
+    #[test]
+    fn huntsman_save_mode_stores_only_changes() {
+        let root = std::env::temp_dir().join(format!("hako-huntsman-save-{}", std::process::id()));
+        let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake::default()));
+        let mut a = huntsman(&fake, &root);
+        a.set(SettingKey::SaveToDevice, SettingValue::Bool(true))
+            .unwrap();
+        // 80 % = 0xcc.
+        assert_eq!(
+            sent(&fake),
+            [brightness(0x01, 0xcc), effect(0x01), READ_STORED]
+        );
+        a.set(SettingKey::Brightness, SettingValue::Int(80))
+            .unwrap();
+        assert_eq!(sent(&fake), [brightness(0x00, 0xcc), effect(0x00)]);
+        a.set(SettingKey::SaveToDevice, SettingValue::Bool(true))
+            .unwrap();
+        assert!(sent(&fake).is_empty());
+        // 40 % = 0x66.
+        a.set(SettingKey::Brightness, SettingValue::Int(40))
+            .unwrap();
+        assert_eq!(
+            sent(&fake),
+            [brightness(0x01, 0x66), effect(0x01), READ_STORED]
+        );
+
+        a.set(SettingKey::SaveToDevice, SettingValue::Bool(false))
+            .unwrap();
+        assert!(sent(&fake).is_empty());
+        // 41 % = 0x68.
+        a.set(SettingKey::Brightness, SettingValue::Int(41))
+            .unwrap();
+        assert_eq!(sent(&fake), [brightness(0x00, 0x68), effect(0x00)]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An effect write that fails after the brightness went out sends the
+    /// old lighting back and keeps the old value.
+    #[test]
+    fn huntsman_failed_lighting_write_resends_the_old_lighting() {
+        let root = std::env::temp_dir().join(format!("hako-huntsman-undo-{}", std::process::id()));
+        let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake {
+            fail: Some((0x0f, 0x02)),
+            ..Fake::default()
+        }));
+        let mut a = huntsman(&fake, &root);
+        let err = a
+            .set(SettingKey::Brightness, SettingValue::Int(40))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("restoring"), "{err:#}");
+        assert_eq!(
+            sent(&fake),
+            [
+                brightness(0x00, 0x66),
+                effect(0x00),
+                brightness(0x00, 0xcc),
+                effect(0x00)
+            ]
+        );
+        assert_eq!(
+            get_setting(&a.settings, SettingKey::Brightness),
+            Some(&SettingValue::Int(80))
+        );
+        assert!(a.last_error.is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Read-only: GET brightness through hidraw on interface 3.

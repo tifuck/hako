@@ -673,7 +673,7 @@ fn validate_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_label(label: &str) -> Result<(), String> {
+pub fn validate_label(label: &str) -> Result<(), String> {
     if label.trim().is_empty()
         || label.chars().count() > MAX_LABEL
         || label.chars().any(char::is_control)
@@ -694,7 +694,7 @@ fn validate_gain(db: &f32) -> Result<(), String> {
 
 /// PipeWire node names: printable, no quotes or whitespace (they end up in
 /// generated PipeWire config and link names).
-fn validate_node_name(name: &str) -> Result<(), String> {
+pub fn validate_node_name(name: &str) -> Result<(), String> {
     if name.is_empty()
         || name.len() > 255
         || !name
@@ -1198,6 +1198,145 @@ mod tests {
         let mut bad = sample();
         bad.version = MIXER_VERSION + 1;
         assert!(bad.validate().is_err(), "newer file");
+
+        for (index, id) in [(0, "A0"), (0, "A9"), (0, "A01"), (1, "B10"), (1, "B")] {
+            let mut bad = sample();
+            bad.live.outputs[index].id = id.into();
+            assert!(bad.validate().is_err(), "output id {id}");
+        }
+        for id in ["a/b", "a.b", "", "a b"] {
+            let mut bad = sample();
+            bad.live.inputs[0].id = id.into();
+            assert!(bad.validate().is_err(), "input id {id:?}");
+        }
+        let long = "x".repeat(MAX_LABEL + 1);
+        for label in ["Mic\u{7}", "Desk\tA", "   ", long.as_str()] {
+            let mut bad = sample();
+            bad.live.inputs[0].label = label.into();
+            assert!(bad.validate().is_err(), "label {label:?}");
+        }
+        let mut ok = sample();
+        ok.live.inputs[0].label = "ä".repeat(MAX_LABEL);
+        ok.validate().unwrap();
+
+        // Limits: at the limit is fine, one more is not.
+        let inputs = |n: usize| -> MixerFile {
+            let mut m = sample();
+            m.live.inputs = (0..n)
+                .map(|i| hw(&format!("in{i}"), &["alsa_input.x"], &[]))
+                .collect();
+            m
+        };
+        inputs(MAX_INPUTS).validate().unwrap();
+        assert!(inputs(MAX_INPUTS + 1).validate().is_err());
+        let outputs = |n: usize| -> MixerFile {
+            let mut m = sample();
+            m.live.inputs[0].routes.clear();
+            m.live.outputs = (1..=n.min(8))
+                .map(|i| {
+                    let sink = format!("alsa_output.{i}");
+                    out(
+                        &format!("A{i}"),
+                        OutputKind::Hardware {
+                            sink,
+                            description: String::new(),
+                        },
+                    )
+                })
+                .collect();
+            if n > 8 {
+                let name = "Hako_Mic".to_string();
+                m.live
+                    .outputs
+                    .push(out("B1", OutputKind::Virtual { node_name: name }));
+            }
+            m
+        };
+        outputs(MAX_OUTPUTS).validate().unwrap();
+        assert!(outputs(MAX_OUTPUTS + 1).validate().is_err());
+        let sources = |n: usize| -> MixerFile {
+            let nodes: Vec<String> = (0..n).map(|i| format!("alsa_input.{i}")).collect();
+            let nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
+            let mut m = sample();
+            m.live.inputs[0] = hw("voice", &nodes, &[]);
+            m
+        };
+        sources(MAX_SOURCES).validate().unwrap();
+        assert!(sources(MAX_SOURCES + 1).validate().is_err());
+        let scenes = |n: usize| -> MixerFile {
+            let mut m = sample();
+            m.scenes = (0..n)
+                .map(|i| NamedScene {
+                    name: format!("Scene {i}"),
+                    scene: Scene::default(),
+                })
+                .collect();
+            m
+        };
+        scenes(MAX_SCENES).validate().unwrap();
+        assert!(scenes(MAX_SCENES + 1).validate().is_err());
+    }
+
+    /// Folding a lone source's trim never writes a file the next load
+    /// refuses: shifted thresholds stay in the ranges validation checks.
+    #[test]
+    fn folded_trims_always_leave_a_loadable_file() {
+        let root = std::env::temp_dir().join(format!("hako-mixer-fold-{}", std::process::id()));
+        let paths = crate::ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        paths.ensure().unwrap();
+        // The stage's level control at the low or high end of its range.
+        let level = |kind: &mut AuxEffectKind, high: bool| {
+            let pick = |(min, max): (f32, f32)| if high { max } else { min };
+            match kind {
+                AuxEffectKind::NoiseGate { threshold_db, .. }
+                | AuxEffectKind::Compressor { threshold_db, .. } => {
+                    *threshold_db = pick(crate::fx::LSP_THRESHOLD_DB)
+                }
+                kind => {
+                    for (p, value) in kind.fx_params_mut() {
+                        if matches!(p.name, "threshold_db" | "ceiling_db") {
+                            *value = pick((p.min, p.max));
+                        }
+                    }
+                }
+            }
+        };
+        for kind in AuxEffectKind::all() {
+            for high in [false, true] {
+                let mut kind = kind.clone();
+                level(&mut kind, high);
+                for trim_db in [TRIM_MIN_DB, -0.5, 0.5, TRIM_MAX_DB] {
+                    for gain_db in [GAIN_MIN_DB, 0.0, GAIN_MAX_DB] {
+                        let case = format!("{kind:?} trim {trim_db} gain {gain_db}");
+                        let mut input = hw("voice", &["alsa_input.usb-mic.mono-fallback"], &[]);
+                        input.gain_db = gain_db;
+                        input.chain.effects = vec![crate::ipc::AuxEffect {
+                            id: "fx".into(),
+                            enabled: true,
+                            kind: kind.clone(),
+                        }];
+                        if let InputKind::Hardware { sources } = &mut input.kind {
+                            sources[0].trim_db = trim_db;
+                        }
+                        let mut m = sample();
+                        m.apply(&MixerOp::PutInput { input })
+                            .unwrap_or_else(|e| panic!("{case}: {e}"));
+                        m.validate().unwrap_or_else(|e| panic!("{case}: {e}"));
+                        let text = toml::to_string_pretty(&m).unwrap();
+                        std::fs::write(mixer_path(&paths), text).unwrap();
+                        let loaded = load_mixer(&paths).unwrap_or_else(|e| panic!("{case}: {e}"));
+                        assert_eq!(loaded, m, "{case}");
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
