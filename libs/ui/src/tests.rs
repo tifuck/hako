@@ -2038,9 +2038,10 @@ fn content_height(img: &image::RgbaImage) -> u32 {
     (last + 28).min(h)
 }
 
-/// The README screenshots, rendered from a live daemon: point `HAKO_UI_STATE`
-/// and `HAKO_UI_CONFIG` at dumps of `GetState` / `GetConfig` and run
-/// `cargo test -p hako-ui snapshot_readme -- --ignored`. Writes `docs/screenshots/`.
+/// The README screenshots, rendered from a live daemon: point `HAKO_UI_STATE`,
+/// `HAKO_UI_CONFIG`, `HAKO_UI_MIXER` and `HAKO_UI_NET` at dumps of `GetState` /
+/// `GetConfig` / `GetMixer` / `GetNet` and run `cargo test -p hako-ui snapshot_readme -- --ignored`.
+/// Writes `docs/screenshots/`.
 #[test]
 #[ignore = "needs a GPU (wgpu) and a live daemon dump"]
 fn snapshot_readme() {
@@ -2050,12 +2051,20 @@ fn snapshot_readme() {
     };
     let mut state: HubState = serde_json::from_str(&read("HAKO_UI_STATE")).unwrap();
     let settings: AppSettings = serde_json::from_str(&read("HAKO_UI_CONFIG")).unwrap();
+    let mut mixer_state: hako_core::mixer::MixerState =
+        serde_json::from_str(&read("HAKO_UI_MIXER")).unwrap();
+    let net_state: hako_core::net::NetState = serde_json::from_str(&read("HAKO_UI_NET")).unwrap();
     // Staged where a live setup is sparse: sample bindings on the keyboard,
-    // no leftover device warnings.
+    // no leftover device warnings, every mixer stage on.
     for d in &mut state.devices {
         d.last_error = None;
     }
     state.audio.last_error = None;
+    for i in &mut mixer_state.file.live.inputs {
+        for e in &mut i.chain.effects {
+            e.enabled = true;
+        }
+    }
     let find = |k: DeviceKind| {
         state
             .devices
@@ -2081,7 +2090,7 @@ fn snapshot_readme() {
 
     let page = |d: &DeviceSnapshot, tab: Tab, selected: u16, theme: &str, height: f32| {
         let key = d.id.key();
-        let app = HakoAppUi {
+        let mut app = HakoAppUi {
             state: Some(state.clone()),
             selected: Some(d.id.clone()),
             daemon_error: None,
@@ -2091,6 +2100,8 @@ fn snapshot_readme() {
             }),
             ..Default::default()
         };
+        app.mixer.receive(mixer_state.clone());
+        app.net.receive(net_state.clone());
         render_app(
             [1180.0, height],
             app,
@@ -2129,6 +2140,65 @@ fn snapshot_readme() {
         page(&headset, Tab::Audio, 0, "onyx", 900.0),
         None,
     );
+
+    // The mixer with line-in's drawer open. A dump has no audio, so the
+    // meters are staged.
+    let console = || {
+        let strips = mixer_state.file.live.inputs.len() + mixer_state.file.live.outputs.len();
+        let mut app = HakoAppUi {
+            state: Some(state.clone()),
+            daemon_error: None,
+            settings: Some(AppSettings {
+                theme: "onyx".into(),
+                ..settings.clone()
+            }),
+            show_mixer: true,
+            meter_levels: [
+                [0.4, 0.36],
+                [0.22, 0.2],
+                [0.05, 0.06],
+                [0.55, 0.5],
+                [0.16, 0.14],
+            ]
+            .into_iter()
+            .chain([[0.6, 0.56], [0.24, 0.22]])
+            .cycle()
+            .take(strips)
+            .collect(),
+            ..Default::default()
+        };
+        app.mixer.receive(mixer_state.clone());
+        app.net.receive(net_state.clone());
+        app.mixer.select(mixer::Strip::Input("line-in".into()));
+        app
+    };
+    save(
+        "mixer",
+        render_app([1180.0, 1400.0], console(), |_| {}, |_| {}),
+        None,
+    );
+    // The same drawer's processing chain with every stage open.
+    let top = std::cell::Cell::new(0);
+    let chain = render_app(
+        [1180.0, 2600.0],
+        console(),
+        |_| {},
+        |h| {
+            use egui_kittest::kittest::Queryable;
+            loop {
+                let Some(edit) = h.query_all_by_label("Edit").next() else {
+                    break;
+                };
+                edit.click();
+                h.run_steps(12);
+            }
+            let title = h.get_by_label("Processing chain").bounding_box().unwrap();
+            top.set(title.y0 as u32 - 34);
+        },
+    );
+    let chain = image::imageops::crop_imm(&chain, 248, top.get(), 908, chain.height() - top.get())
+        .to_image();
+    save("mixer-chain", chain, None);
 
     // The same page in every theme, half size, two by two.
     let (w, h, gap) = (590, 350, 10);

@@ -4,12 +4,13 @@ members = [
     "libs/core",
     "libs/ui",
     "libs/audio",
+    "libs/fx",
     "daemon",
     "client",
 ]
 
 [workspace.package]
-version = "0.2.12"
+version = "0.2.13"
 edition = "2021"
 license = "MIT"
 authors = ["hako"]
@@ -33,3 +34,8 @@ egui = "0.31"
 # PipeWire client (daemon audio engine only; the UI never links it).
 pipewire = "0.10.1"
 egui_extras = { version = "0.31", default-features = false, features = ["svg"] }
+
+# The effects library embeds tract and the DeepFilterNet model; its symbols
+# alone are ~11 MB.
+[profile.release.package.hako-fx]
+strip = true

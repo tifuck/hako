@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
 # Installs hako for the current user. Works from a source checkout (builds
-# first) and from an extracted release tarball (uses its prebuilt bin/).
+# first) and from an extracted release tarball (uses its prebuilt bin/ and lib/).
 # HAKO_SKIP_UDEV=1 skips the sudo step (the in-app updater sets it).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [ -x "$ROOT/bin/hakod" ] && [ -x "$ROOT/bin/hako" ]; then
   BIN="$ROOT/bin"
+  FX="$ROOT/lib/libhako_fx.so"
 else
   source "$HOME/.cargo/env" 2>/dev/null || true
   cargo build --release --manifest-path "$ROOT/Cargo.toml"
   BIN="$ROOT/target/release"
+  FX="$BIN/libhako_fx.so"
 fi
 ICONDIR="$HOME/.local/share/icons/hicolor/256x256/apps"
-mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user" "$HOME/.local/share/applications" "$ICONDIR"
+LIBDIR="$HOME/.local/lib/hako"
+mkdir -p "$HOME/.local/bin" "$LIBDIR" "$HOME/.config/systemd/user" "$HOME/.local/share/applications" "$ICONDIR"
 
 # Both binaries are staged next to their targets, then renamed into place: a
 # failure never leaves a half-written file or a new hakod with an old hako.
 DEST="$HOME/.local/bin"
-trap 'rm -f "$DEST"/.hakod.new "$DEST"/.hako.new "$DEST"/.hakod.old "$DEST"/.hako.old' EXIT
+trap 'rm -f "$DEST"/.hakod.new "$DEST"/.hako.new "$DEST"/.hakod.old "$DEST"/.hako.old "$LIBDIR"/.libhako_fx.so.new' EXIT
+# hakod's effects library (it looks in ../lib/hako), renamed into place first:
+# running mixer strips keep the old file mapped, and no new hakod runs without it.
+install -m 644 "$FX" "$LIBDIR/.libhako_fx.so.new"
+mv -f "$LIBDIR/.libhako_fx.so.new" "$LIBDIR/libhako_fx.so"
 for b in hakod hako; do
   install -m 755 "$BIN/$b" "$DEST/.$b.new"
   if [ -e "$DEST/$b" ] || [ -L "$DEST/$b" ]; then cp -a "$DEST/$b" "$DEST/.$b.old"; fi

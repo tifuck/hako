@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds hako_<version>_<arch>.deb from release binaries.
-#   packaging/deb/build-deb.sh <version> <dir with hako + hakod> <output dir>
+#   packaging/deb/build-deb.sh <version> <dir with hako, hakod, libhako_fx.so> <output dir>
 # Needs dpkg-dev (dpkg-deb, dpkg-shlibdeps).
 set -euo pipefail
 VERSION="$1"
@@ -14,6 +14,7 @@ PKG="$WORK/hako_${VERSION}_${ARCH}"
 
 install -Dm755 "$BIN/hako" "$PKG/usr/bin/hako"
 install -Dm755 "$BIN/hakod" "$PKG/usr/bin/hakod"
+install -Dm644 "$BIN/libhako_fx.so" "$PKG/usr/lib/hako/libhako_fx.so"
 sed 's|%h/.local/bin/hakod|/usr/bin/hakod|' "$ROOT/packaging/systemd/hakod.service" \
   | install -Dm644 /dev/stdin "$PKG/usr/lib/systemd/user/hakod.service"
 install -Dm644 "$ROOT/packaging/hako.desktop" "$PKG/usr/share/applications/hako.desktop"
@@ -29,7 +30,7 @@ done
 # at runtime (winit / glutin dlopen them), so they are listed by hand.
 mkdir -p "$WORK/debian"
 printf 'Source: hako\n\nPackage: hako\nArchitecture: any\n' > "$WORK/debian/control"
-LINKED="$(cd "$WORK" && dpkg-shlibdeps -O "$PKG/usr/bin/hako" "$PKG/usr/bin/hakod" | sed 's/^shlibs:Depends=//')"
+LINKED="$(cd "$WORK" && dpkg-shlibdeps -O "$PKG/usr/bin/hako" "$PKG/usr/bin/hakod" "$PKG/usr/lib/hako/libhako_fx.so" | sed 's/^shlibs:Depends=//')"
 rm -rf "$WORK/debian"
 RUNTIME="libegl1, libgl1, libwayland-client0, libwayland-cursor0, libwayland-egl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrandr2"
 

@@ -30,9 +30,9 @@
 use crate::engine::{engine, fader_pod, params_pod, Direction, Engine, Graph, LinkHandle, Node};
 use crate::{
     alsa_card, capture_level, card_capture_controls, current_input_source, db_to_gain, dsp_stages,
-    effect_params, filter_chain_config, lsp_for, node_latency, pkill, pw_escape,
+    effect_params, filter_chain_config, node_latency, pkill, plugins_for, pw_escape,
     same_effect_topology, set_capture_percent, set_input_source, spawn_pipewire, stop_child,
-    wpctl_volume, write_conf, DspNode, DspStage, FilterGraph, NODE_WAIT,
+    wpctl_volume, write_conf, DspNode, DspStage, FilterGraph, Plugin, Plugins, NODE_WAIT,
 };
 use anyhow::{anyhow, Context, Result};
 use hako_core::mixer::{
@@ -269,7 +269,7 @@ fn copy_stage() -> DspStage {
         nodes: [left, right]
             .map(|name| DspNode {
                 name,
-                lsp: false,
+                plugin: Plugin::Builtin,
                 label: "copy",
                 controls: Vec::new(),
             })
@@ -281,7 +281,7 @@ fn copy_stage() -> DspStage {
 fn mixer_node(name: &str, gains: &[f32]) -> DspNode {
     DspNode {
         name: name.to_string(),
-        lsp: false,
+        plugin: Plugin::Builtin,
         label: "mixer",
         controls: GAINS.iter().copied().zip(gains.iter().copied()).collect(),
     }
@@ -340,7 +340,7 @@ fn describe(label: &str) -> String {
 
 /// The `pipewire -c` config of a strip. No side autoconnects (the daemon
 /// makes every link) and none restores a stored volume (the fader owns it).
-fn strip_config(def: &StripDef, naming: &Naming, lsp: Option<&Path>) -> Result<String> {
+fn strip_config(def: &StripDef, naming: &Naming, plugins: &Plugins) -> Result<String> {
     def.chain.validate().map_err(anyhow::Error::msg)?;
     let common = format!(
         "node.latency = \"{}\" state.restore-props = false",
@@ -380,7 +380,7 @@ fn strip_config(def: &StripDef, naming: &Naming, lsp: Option<&Path>) -> Result<S
         &naming.args,
         &capture,
         &playback,
-        lsp,
+        plugins,
     )
 }
 
@@ -1254,8 +1254,8 @@ impl MixerGraph {
                 Some(name) => Err(anyhow::anyhow!(
                     "PipeWire node {name} already exists (another program's?)"
                 )),
-                None => lsp_for(&strip.def.chain)
-                    .and_then(|lsp| strip_config(&strip.def, &self.naming, lsp.as_deref()))
+                None => plugins_for(&strip.def.chain)
+                    .and_then(|plugins| strip_config(&strip.def, &self.naming, &plugins))
                     .and_then(|config| write_conf(&strip.conf, &config))
                     .and_then(|()| {
                         // A crashed daemon's child with this config.
@@ -1716,14 +1716,21 @@ mod tests {
         }
     }
 
-    fn lsp() -> Option<&'static Path> {
-        Some(Path::new("/usr/lib/ladspa/lsp-plugins-ladspa.so"))
+    fn lsp() -> Plugins {
+        Plugins {
+            lsp: Some("/usr/lib/ladspa/lsp-plugins-ladspa.so".into()),
+            fx: None,
+        }
     }
 
     #[test]
     fn virtual_input_is_a_sink_apps_pick_by_label() {
-        let config =
-            strip_config(&def(&scene(), Side::Input, "game"), &test_naming(), None).unwrap();
+        let config = strip_config(
+            &def(&scene(), Side::Input, "game"),
+            &test_naming(),
+            &Plugins::default(),
+        )
+        .unwrap();
         assert!(config.contains(
             "capture.props = { node.name = \"hako-test-game\" node.description = \"hako Game\" media.class = Audio/Sink node.latency = \"256/48000\" state.restore-props = false }"
         ), "{config}");
@@ -1747,7 +1754,7 @@ mod tests {
         let desk = def(&scene, Side::Input, "desk");
         assert_eq!(desk.capture, "hako-test-x-in_desk.capture");
         assert_eq!(desk.capture_channels(), ["AUX0", "AUX1", "AUX2", "AUX3"]);
-        let config = strip_config(&desk, &test_naming(), lsp()).unwrap();
+        let config = strip_config(&desk, &test_naming(), &lsp()).unwrap();
         assert!(config.contains(
             "{ type = builtin name = \"mix_l\" label = \"mixer\" control = { \"Gain 1\" = 0.1 \"Gain 2\" = 0 } }"
         ), "{config}");
@@ -1771,11 +1778,21 @@ mod tests {
     #[test]
     fn outputs_capture_privately_and_play_to_a_device_or_as_a_mic() {
         let scene = scene();
-        let a1 = strip_config(&def(&scene, Side::Output, "A1"), &test_naming(), None).unwrap();
+        let a1 = strip_config(
+            &def(&scene, Side::Output, "A1"),
+            &test_naming(),
+            &Plugins::default(),
+        )
+        .unwrap();
         assert!(a1.contains("capture.props = { node.name = \"hako-test-x-out_A1\" node.description = \"hako Headset\" node.autoconnect = false"), "{a1}");
         assert!(a1.contains("playback.props = { node.name = \"hako-test-x-out_A1.play\""));
         assert!(!a1.contains("media.class"));
-        let b1 = strip_config(&def(&scene, Side::Output, "B1"), &test_naming(), None).unwrap();
+        let b1 = strip_config(
+            &def(&scene, Side::Output, "B1"),
+            &test_naming(),
+            &Plugins::default(),
+        )
+        .unwrap();
         assert!(b1.contains(
             "playback.props = { node.name = \"hako-test-mic\" node.description = \"hako Mic\" media.class = Audio/Source"
         ), "{b1}");
@@ -2028,7 +2045,12 @@ mod tests {
     fn mono_folds_both_channels_into_each() {
         let mut scene = scene();
         scene.outputs[0].mono = true;
-        let config = strip_config(&def(&scene, Side::Output, "A1"), &test_naming(), None).unwrap();
+        let config = strip_config(
+            &def(&scene, Side::Output, "A1"),
+            &test_naming(),
+            &Plugins::default(),
+        )
+        .unwrap();
         for link in [
             "{ output = \"copy_l:Out\" input = \"mono_l:In 1\" }",
             "{ output = \"copy_r:Out\" input = \"mono_l:In 2\" }",
@@ -2574,7 +2596,7 @@ mod tests {
         let a1 = &up[&(Side::Output, "A1".to_string())];
         assert!(a1.mono, "folds although the output's mono is off");
         assert!(!up[&(Side::Output, "B1".to_string())].mono);
-        let config = strip_config(a1, &test_naming(), None).unwrap();
+        let config = strip_config(a1, &test_naming(), &Plugins::default()).unwrap();
         assert!(config.contains("control = { \"Gain 1\" = 0.5 \"Gain 2\" = 0.5 }"));
         let (links, _) = wanted_links(&scene, &up, &graph);
         let to_sink: Vec<_> = links.iter().filter(|(_, t, _)| t.0 == "headset").collect();

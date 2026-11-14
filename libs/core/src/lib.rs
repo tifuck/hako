@@ -3,6 +3,7 @@
 pub mod catalog;
 pub mod config;
 pub mod device;
+pub mod fx;
 pub mod ipc;
 pub mod mixer;
 pub mod net;

@@ -181,6 +181,8 @@ allow them for that device.
 
 ### Mixer, with line-in and a real processing chain
 
+<img src="docs/screenshots/mixer.png" alt="Mixer page: Line-in, Mic and MG-XU hardware inputs, Game and Chat virtual inputs, and Headset and hako Mic outputs as channel strips with meters, faders, mute, solo and A1/B1 routing; below, the Line-in drawer with its sound card, Line jack and input gain, and a processing chain of equalizer, noise gate and compressor" width="100%">
+
 A VoiceMeeter-style console under **Audio → Mixer**: merge several microphones
 into one strip, send line-in or apps to several devices at once, and give
 Discord or OBS their own virtual microphones. Every strip has one volume (its
@@ -194,6 +196,17 @@ turns the mixer on or off).
 | **Noise gate** | threshold, reduction, attack, hold, release, and a detector high-pass so hum can't open the gate |
 | **Compressor** | threshold, ratio, knee, attack, release, make-up gain |
 | **Parametric EQ** | up to 8 bands: peaking, low and high shelf, low and high pass |
+| **Clean up** | AI noise removal (DeepFilterNet 3 or the lighter RNNoise, on the CPU), de-esser, limiter |
+| **Voice and character** | distortion, pitch shift, auto-tune (key and scale), vocoder, robot, bitcrusher |
+| **Space** | reverb, delay, chorus, flanger |
+
+Everything but the gate, compressor and EQ runs in hako's own plugin library
+(`libhako_fx.so`), installed with hako: no extra package. The gate and
+compressor use LSP plugins.
+
+<p align="center">
+  <img src="docs/screenshots/mixer-chain.png" alt="Line-in's processing chain opened up: a five-band equalizer with its response curve and band table, a noise gate and a compressor, each with its transfer curve and threshold, ratio, attack, hold, release and gain sliders" width="720">
+</p>
 
 **Line-in** (a console, a second PC or a mixer plugged into your sound card)
 is a mixer input: the starting layout adds it next to Game, Chat and the
@@ -331,7 +344,8 @@ openSUSE, ...). Installs for your user only.
 
 3. Launch **hako** from your app menu, or run `hako`.
 
-The installer puts `hakod` and `hako` in `~/.local/bin`, adds the systemd user
+The installer puts `hakod` and `hako` in `~/.local/bin` (and the mixer's
+effects library in `~/.local/lib/hako`), adds the systemd user
 service, desktop entry and icon, installs the udev rules (it asks for `sudo`
 once), and starts the daemon. Nothing else on the system is touched.
 
@@ -353,7 +367,7 @@ gh attestation verify hako_*_amd64.deb --repo tifuck/Hako
 | Linux with **systemd** (user session) and **udev** | everything |
 | **PipeWire** (with `pw-loopback` and the `pipewire` binary) and **WirePlumber** | ChatMix and the mixer (line-in) |
 | `amixer` (alsa-utils) | line-in input jack and capture level |
-| [LSP plugins](https://lsp-plug.in/) (LADSPA), optional | the mixer's gate and compressor |
+| [LSP plugins](https://lsp-plug.in/) (LADSPA), optional | the mixer's gate and compressor (every other stage is built in) |
 | `curl`, `ssh-keygen` (openssh-client) | update checks and release signature check |
 
 The `.deb` pulls these in for you. For the tarball on Ubuntu or Debian:
@@ -377,7 +391,7 @@ change. Turn checks off, or check now, under **Settings → Updates**.
 
 ```bash
 systemctl --user disable --now hakod
-hakod --reset-audio 2>/dev/null; rm -f ~/.local/bin/hako ~/.local/bin/hakod \
+hakod --reset-audio 2>/dev/null; rm -rf ~/.local/bin/hako ~/.local/bin/hakod ~/.local/lib/hako \
   ~/.config/systemd/user/hakod.service ~/.local/share/applications/hako.desktop \
   ~/.local/share/icons/hicolor/256x256/apps/hako.png
 sudo rm -f /etc/udev/rules.d/70-hako.rules && sudo udevadm control --reload-rules
@@ -404,7 +418,7 @@ git clone https://github.com/tifuck/Hako.git && cd Hako
 Just the binaries:
 
 ```bash
-cargo build --release --workspace  # target/release/hakod and target/release/hako
+cargo build --release --workspace  # target/release/hakod, hako and libhako_fx.so
 ```
 
 Run the same checks as CI before sending a pull request:

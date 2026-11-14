@@ -1,0 +1,16 @@
+[package]
+name = "hako-fx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "hako's LADSPA plugin: the mixer stages PipeWire's filter-chain runs"
+
+[lib]
+name = "hako_fx"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hako-core = { workspace = true }
+deep-filter-rt = "0.2"
+ndarray = "0.17"
+nnnoiseless = { version = "0.5", default-features = false }

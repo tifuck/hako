@@ -149,6 +149,15 @@ gamma table from wooting-rgb-sdk src/wooting-rgb-sdk.c, Copyright 2018 Wooting
 Technologies B.V., under the Mozilla Public License 2.0
 (http://mozilla.org/MPL/2.0/). Source: https://github.com/WootingKb/wooting-rgb-sdk
 
+Linked into libhako_fx.so under their own licences (the mixer's noise removal):
+- DeepFilterNet 3, Copyright (c) 2021 Hendrik Schröter, MIT OR Apache-2.0 -
+  code and model weights, embedded through the deep-filter-rt crate. Source:
+  https://github.com/Rikorose/DeepFilterNet
+- RNNoise, Copyright (c) 2007-2017 Jean-Marc Valin, (c) 2005-2017 Xiph.Org
+  Foundation, (c) 2017 Mozilla, (c) 2003-2004 Mark Borgerding, BSD-3-Clause -
+  through the nnnoiseless port, Copyright (c) 2020 Joe Neeman, BSD-3-Clause.
+  Source: https://github.com/xiph/rnnoise, https://github.com/jneem/nnnoiseless
+
 Linux-Arctis-Manager (GPL-3.0) application source is not copied.
 No proprietary SteelSeries GG / Razer Synapse / Logitech G HUB / Corsair iCUE /
 HyperX NGENUITY / ASUS Armoury Crate code is included.

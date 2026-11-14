@@ -254,6 +254,23 @@ impl AuxEffectChain {
                         validate_finite_range("EQ Q", band.q, 0.1, 10.0)?;
                     }
                 }
+                kind => {
+                    let label = kind.label();
+                    let mut kind = kind.clone();
+                    for (p, value) in kind.fx_params_mut() {
+                        validate_finite_range(
+                            &format!("{label} {}", p.label),
+                            *value,
+                            p.min,
+                            p.max,
+                        )?;
+                    }
+                    for (c, value) in kind.fx_choices_mut() {
+                        if usize::from(*value) >= c.options.len() {
+                            return Err(format!("{label} {}: no option {value}", c.label));
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -311,7 +328,77 @@ pub enum AuxEffectKind {
         makeup_db: f32,
     },
     /// Parametric EQ, bands applied in order.
-    Equalizer { bands: Vec<EqBand> },
+    Equalizer {
+        bands: Vec<EqBand>,
+    },
+    // The stages below run in hako's own LADSPA plugin (`libs/fx`); their
+    // fields, ranges and help live in `crate::fx`. Choices are option indices.
+    NoiseSuppression {
+        max_reduction_db: f32,
+        model: u8,
+    },
+    DeEsser {
+        threshold_db: f32,
+        freq_hz: f32,
+        max_reduction_db: f32,
+    },
+    Limiter {
+        ceiling_db: f32,
+        release_ms: f32,
+    },
+    Distortion {
+        drive_db: f32,
+        tone_hz: f32,
+        mix_pct: f32,
+    },
+    PitchShift {
+        semitones: f32,
+        mix_pct: f32,
+    },
+    AutoTune {
+        speed_ms: f32,
+        mix_pct: f32,
+        key: u8,
+        scale: u8,
+    },
+    Vocoder {
+        carrier_hz: f32,
+        bands: f32,
+        mix_pct: f32,
+        carrier: u8,
+        follow: u8,
+    },
+    Robot {
+        freq_hz: f32,
+        mix_pct: f32,
+    },
+    Bitcrusher {
+        bits: f32,
+        downsample: f32,
+        mix_pct: f32,
+    },
+    Reverb {
+        room_pct: f32,
+        damping_pct: f32,
+        width_pct: f32,
+        mix_pct: f32,
+    },
+    Delay {
+        time_ms: f32,
+        feedback_pct: f32,
+        mix_pct: f32,
+    },
+    Chorus {
+        rate_hz: f32,
+        depth_ms: f32,
+        mix_pct: f32,
+    },
+    Flanger {
+        rate_hz: f32,
+        depth_ms: f32,
+        feedback_pct: f32,
+        mix_pct: f32,
+    },
 }
 
 fn d_gate_reduction() -> f32 {
@@ -383,6 +470,19 @@ impl AuxEffectKind {
             Self::NoiseGate { .. } => "Noise gate",
             Self::Compressor { .. } => "Compressor",
             Self::Equalizer { .. } => "Equalizer",
+            Self::NoiseSuppression { .. } => "AI noise removal",
+            Self::DeEsser { .. } => "De-esser",
+            Self::Limiter { .. } => "Limiter",
+            Self::Distortion { .. } => "Distortion",
+            Self::PitchShift { .. } => "Pitch shift",
+            Self::AutoTune { .. } => "Auto-tune",
+            Self::Vocoder { .. } => "Vocoder",
+            Self::Robot { .. } => "Robot",
+            Self::Bitcrusher { .. } => "Bitcrusher",
+            Self::Reverb { .. } => "Reverb",
+            Self::Delay { .. } => "Delay",
+            Self::Chorus { .. } => "Chorus",
+            Self::Flanger { .. } => "Flanger",
         }
     }
 
@@ -392,6 +492,19 @@ impl AuxEffectKind {
             Self::NoiseGate { .. } => "gate",
             Self::Compressor { .. } => "compressor",
             Self::Equalizer { .. } => "eq",
+            Self::NoiseSuppression { .. } => "denoise",
+            Self::DeEsser { .. } => "deesser",
+            Self::Limiter { .. } => "limiter",
+            Self::Distortion { .. } => "distortion",
+            Self::PitchShift { .. } => "pitch",
+            Self::AutoTune { .. } => "autotune",
+            Self::Vocoder { .. } => "vocoder",
+            Self::Robot { .. } => "robot",
+            Self::Bitcrusher { .. } => "bitcrusher",
+            Self::Reverb { .. } => "reverb",
+            Self::Delay { .. } => "delay",
+            Self::Chorus { .. } => "chorus",
+            Self::Flanger { .. } => "flanger",
         }
     }
 }

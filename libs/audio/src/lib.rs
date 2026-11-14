@@ -39,6 +39,8 @@ pub const CHATMIX_CHAT: &str = "Hako_Chat";
 /// `node.latency` in samples until `set_latency` (the "balanced" setting).
 const DEFAULT_LATENCY: u32 = 256;
 const LSP_LADSPA: &str = "lsp-plugins-ladspa.so";
+/// hako's own LADSPA library (`libs/fx`), installed next to `hakod`.
+const FX_LADSPA: &str = "libhako_fx.so";
 /// Searched after `$LADSPA_PATH`.
 const LADSPA_DIRS: [&str; 4] = [
     "/usr/lib/ladspa",
@@ -876,36 +878,93 @@ fn ladspa_dirs(ladspa_path: Option<&OsStr>) -> Vec<PathBuf> {
         .collect()
 }
 
-fn find_lsp_ladspa(dirs: &[PathBuf]) -> Option<PathBuf> {
+/// The executable's directory (a cargo build), then `../lib/hako` beside it
+/// (`/usr/bin` -> `/usr/lib/hako`, `~/.local/bin` -> `~/.local/lib/hako`).
+fn fx_dirs(exe: &Path) -> Vec<PathBuf> {
+    let dir = exe.parent();
+    dir.map(Path::to_path_buf)
+        .into_iter()
+        .chain(dir.and_then(Path::parent).map(|up| up.join("lib/hako")))
+        .collect()
+}
+
+fn find_library(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     dirs.iter()
-        .map(|dir| dir.join(LSP_LADSPA))
+        .map(|dir| dir.join(name))
         .find(|path| path.is_file())
 }
 
-/// The LSP LADSPA library if `chain` needs it (an enabled gate or compressor).
-fn lsp_for(chain: &AuxEffectChain) -> Result<Option<PathBuf>> {
-    let needs_lsp = chain
-        .effects
-        .iter()
-        .any(|effect| effect.enabled && !matches!(effect.kind, AuxEffectKind::Equalizer { .. }));
-    if !needs_lsp {
-        return Ok(None);
-    }
-    let dirs = ladspa_dirs(std::env::var_os("LADSPA_PATH").as_deref());
-    let Some(lsp) = find_lsp_ladspa(&dirs) else {
+fn require_library(dirs: &[PathBuf], name: &str, what: &str) -> Result<PathBuf> {
+    find_library(dirs, name).ok_or_else(|| {
         let searched: Vec<_> = dirs.iter().map(|dir| dir.display().to_string()).collect();
-        bail!(
-            "LSP LADSPA plugins not installed ({LSP_LADSPA} not in {})",
+        anyhow!(
+            "{what} not installed ({name} not in {})",
             searched.join(", ")
-        );
-    };
-    Ok(Some(lsp))
+        )
+    })
 }
 
-/// One filter-chain node: the LSP LADSPA plugin when `lsp`, else a PipeWire builtin.
+/// Where a filter-chain node's plugin comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Plugin {
+    Builtin,
+    Lsp,
+    Fx,
+}
+
+/// The LADSPA libraries a graph's nodes load.
+#[derive(Debug, Default)]
+struct Plugins {
+    lsp: Option<PathBuf>,
+    fx: Option<PathBuf>,
+}
+
+impl Plugins {
+    fn path(&self, plugin: Plugin) -> Result<&Path> {
+        match plugin {
+            Plugin::Builtin => bail!("builtin nodes load no library"),
+            Plugin::Lsp => self
+                .lsp
+                .as_deref()
+                .context("LSP LADSPA plugins not installed"),
+            Plugin::Fx => self
+                .fx
+                .as_deref()
+                .context("hako's effects library not installed"),
+        }
+    }
+}
+
+/// `chain`'s enabled stages run on `plugin`.
+fn needs(chain: &AuxEffectChain, plugin: Plugin) -> bool {
+    dsp_stages(chain)
+        .iter()
+        .flat_map(|stage| &stage.nodes)
+        .any(|node| node.plugin == plugin)
+}
+
+/// The libraries `chain` needs (LSP for a gate or compressor, hako's for
+/// its own stages), each looked up only when needed.
+fn plugins_for(chain: &AuxEffectChain) -> Result<Plugins> {
+    let lsp = needs(chain, Plugin::Lsp)
+        .then(|| {
+            let dirs = ladspa_dirs(std::env::var_os("LADSPA_PATH").as_deref());
+            require_library(&dirs, LSP_LADSPA, "LSP LADSPA plugins")
+        })
+        .transpose()?;
+    let fx = needs(chain, Plugin::Fx)
+        .then(|| {
+            let exe = std::env::current_exe().context("locate the running executable")?;
+            require_library(&fx_dirs(&exe), FX_LADSPA, "hako's effects library")
+        })
+        .transpose()?;
+    Ok(Plugins { lsp, fx })
+}
+
+/// One filter-chain node.
 struct DspNode {
     name: String,
-    lsp: bool,
+    plugin: Plugin,
     label: &'static str,
     controls: Vec<(&'static str, f32)>,
 }
@@ -917,13 +976,23 @@ struct DspStage {
     outputs: [String; 2],
 }
 
-fn lsp_stage(name: String, label: &'static str, controls: Vec<(&'static str, f32)>) -> DspStage {
+/// A stereo LADSPA plugin: LSP's ports are `Input L` .. `Output R`, hako's `In L` .. `Out R`.
+fn ladspa_stage(
+    plugin: Plugin,
+    name: String,
+    label: &'static str,
+    controls: Vec<(&'static str, f32)>,
+) -> DspStage {
+    let (input, output) = match plugin {
+        Plugin::Lsp => ("Input", "Output"),
+        _ => ("In", "Out"),
+    };
     DspStage {
-        inputs: [format!("{name}:Input L"), format!("{name}:Input R")],
-        outputs: [format!("{name}:Output L"), format!("{name}:Output R")],
+        inputs: [format!("{name}:{input} L"), format!("{name}:{input} R")],
+        outputs: [format!("{name}:{output} L"), format!("{name}:{output} R")],
         nodes: vec![DspNode {
             name,
-            lsp: true,
+            plugin,
             label,
             controls,
         }],
@@ -948,7 +1017,8 @@ fn dsp_stages(chain: &AuxEffectChain) -> Vec<DspStage> {
                 hold_ms,
                 release_ms,
                 detect_hpf_hz,
-            } => stages.push(lsp_stage(
+            } => stages.push(ladspa_stage(
+                Plugin::Lsp,
                 format!("fx{index}"),
                 "http://lsp-plug.in/plugins/ladspa/gate_stereo",
                 vec![
@@ -973,7 +1043,8 @@ fn dsp_stages(chain: &AuxEffectChain) -> Vec<DspStage> {
                 release_ms,
                 knee_db,
                 makeup_db,
-            } => stages.push(lsp_stage(
+            } => stages.push(ladspa_stage(
+                Plugin::Lsp,
                 format!("fx{index}"),
                 "http://lsp-plug.in/plugins/ladspa/compressor_stereo",
                 vec![
@@ -1003,7 +1074,7 @@ fn dsp_stages(chain: &AuxEffectChain) -> Vec<DspStage> {
                         nodes: [left, right]
                             .map(|name| DspNode {
                                 name,
-                                lsp: false,
+                                plugin: Plugin::Builtin,
                                 label,
                                 controls: vec![
                                     ("Freq", band.freq_hz),
@@ -1013,6 +1084,16 @@ fn dsp_stages(chain: &AuxEffectChain) -> Vec<DspStage> {
                             })
                             .into(),
                     });
+                }
+            }
+            kind => {
+                if let Some((label, controls)) = kind.fx_controls() {
+                    stages.push(ladspa_stage(
+                        Plugin::Fx,
+                        format!("fx{index}"),
+                        label,
+                        controls,
+                    ));
                 }
             }
         }
@@ -1069,14 +1150,14 @@ fn spawn_pipewire(conf: &Path) -> Result<Child> {
         .with_context(|| format!("spawn pipewire -c {}", conf.display()))
 }
 
-/// `lsp`: the LSP LADSPA library, needed when the chain has a gate or compressor.
+/// `plugins`: the libraries the chain needs (`plugins_for`).
 /// Without a `target` the playback side is never autoconnected (its owner links it).
 fn generate_dsp_config(
     sink: &str,
     target: Option<&str>,
     chain: &AuxEffectChain,
     latency: u32,
-    lsp: Option<&Path>,
+    plugins: &Plugins,
 ) -> Result<String> {
     chain.validate().map_err(anyhow::Error::msg)?;
     let graph = FilterGraph::chain(dsp_stages(chain));
@@ -1098,7 +1179,7 @@ fn generate_dsp_config(
         &format!(
             "node.name = \"{sink}_out\" {route} node.passive = true node.latency = \"{latency}\""
         ),
-        lsp,
+        plugins,
     )
 }
 
@@ -1111,19 +1192,17 @@ fn filter_chain_config(
     args: &str,
     capture: &str,
     playback: &str,
-    lsp: Option<&Path>,
+    plugins: &Plugins,
 ) -> Result<String> {
     let mut nodes = String::new();
     for node in &graph.nodes {
-        let kind = if node.lsp {
-            let lsp = lsp.ok_or_else(|| anyhow!("LSP LADSPA plugins not installed"))?;
-            format!(
+        let kind = match node.plugin {
+            Plugin::Builtin => format!("type = builtin name = \"{}\"", pw_escape(&node.name)),
+            plugin => format!(
                 "type = ladspa name = \"{}\" plugin = \"{}\"",
                 pw_escape(&node.name),
-                pw_escape(&lsp.to_string_lossy())
-            )
-        } else {
-            format!("type = builtin name = \"{}\"", pw_escape(&node.name))
+                pw_escape(&plugins.path(plugin)?.to_string_lossy())
+            ),
         };
         let controls: String = node
             .controls
@@ -1558,8 +1637,11 @@ mod tests {
         }
     }
 
-    fn lsp() -> Option<&'static Path> {
-        Some(Path::new("/usr/lib/ladspa/lsp-plugins-ladspa.so"))
+    fn lsp() -> Plugins {
+        Plugins {
+            lsp: Some("/usr/lib/ladspa/lsp-plugins-ladspa.so".into()),
+            fx: Some("/usr/lib/hako/libhako_fx.so".into()),
+        }
     }
 
     fn gate_eq_compressor() -> AuxEffectChain {
@@ -1591,7 +1673,7 @@ mod tests {
                 effect("second-gate", true, AuxEffectKind::default_gate()),
             ]),
             256,
-            lsp(),
+            &lsp(),
         )
         .unwrap();
 
@@ -1608,11 +1690,11 @@ mod tests {
         assert!(config.contains("plugin = \"/usr/lib/ladspa/lsp-plugins-ladspa.so\""));
         // Gate and compressor need the LSP library.
         let gate = chain(vec![effect("gate", true, AuxEffectKind::default_gate())]);
-        assert!(generate_dsp_config(DSP, Some("t"), &gate, 256, None).is_err());
+        assert!(generate_dsp_config(DSP, Some("t"), &gate, 256, &Plugins::default()).is_err());
         assert!(!config.contains("node.autoconnect"));
 
         // Untargeted (the latency test): nothing routes the playback side.
-        let config = generate_dsp_config("x", None, &gate, 256, lsp()).unwrap();
+        let config = generate_dsp_config("x", None, &gate, 256, &lsp()).unwrap();
         assert!(!config.contains("node.target"));
         assert!(config.contains(
             "node.name = \"x_out\" node.autoconnect = false node.dont-reconnect = true node.dont-fallback = true node.passive = true"
@@ -1651,7 +1733,7 @@ mod tests {
                 ),
             ]),
             256,
-            lsp(),
+            &lsp(),
         )
         .unwrap();
 
@@ -1666,7 +1748,7 @@ mod tests {
     #[test]
     fn config_builds_stereo_biquad_chain_for_eq() {
         let config =
-            generate_dsp_config(DSP, Some("target"), &gate_eq_compressor(), 256, lsp()).unwrap();
+            generate_dsp_config(DSP, Some("target"), &gate_eq_compressor(), 256, &lsp()).unwrap();
 
         let order = [
             "gate_stereo",
@@ -1703,7 +1785,8 @@ mod tests {
             eq(&[(EqBandKind::LowShelf, 100.0)]),
         )]);
         // EQ alone needs no LADSPA library.
-        let config = generate_dsp_config(DSP, Some("target"), &eq_only, 128, None).unwrap();
+        let config =
+            generate_dsp_config(DSP, Some("target"), &eq_only, 128, &Plugins::default()).unwrap();
         assert!(config.contains("node.latency = \"128/48000\""));
         assert!(config.contains("inputs = [ \"fx0_b0_l:In\" \"fx0_b0_r:In\" ]"));
         assert!(config.contains("outputs = [ \"fx0_b0_l:Out\" \"fx0_b0_r:Out\" ]"));
@@ -1713,7 +1796,7 @@ mod tests {
     #[test]
     fn config_rejects_invalid_or_empty_chain() {
         let config =
-            |chain: &AuxEffectChain| generate_dsp_config(DSP, Some("t"), chain, 256, lsp());
+            |chain: &AuxEffectChain| generate_dsp_config(DSP, Some("t"), chain, 256, &lsp());
         assert!(config(&AuxEffectChain::default()).is_err());
         let disabled = chain(vec![effect("gate", false, AuxEffectKind::default_gate())]);
         assert!(config(&disabled).is_err());
@@ -1751,6 +1834,86 @@ mod tests {
         }
         // 8 gate + 2 bands * 2 channels * 3 + 7 compressor (incl. detector ports)
         assert_eq!(params.matches("\" ").count(), 27);
+    }
+
+    /// Every stage the UI offers, in menu order: `fx{i}` is `all()[i]`.
+    fn every_stage() -> AuxEffectChain {
+        let effects = AuxEffectKind::all()
+            .into_iter()
+            .enumerate()
+            .map(|(i, kind)| effect(&format!("s{i}"), true, kind))
+            .collect();
+        chain(effects)
+    }
+
+    #[test]
+    fn config_runs_every_fx_stage_on_hako_plugin() {
+        let all = every_stage();
+        let config = generate_dsp_config(DSP, Some("t"), &all, 256, &lsp()).unwrap();
+        let mut fx_stages = 0;
+        for (i, stage) in all.effects.iter().enumerate() {
+            let Some((label, controls)) = stage.kind.fx_controls() else {
+                continue;
+            };
+            fx_stages += 1;
+            let controls: String = controls
+                .iter()
+                .map(|(port, value)| format!(" \"{port}\" = {value}"))
+                .collect();
+            let node = format!(
+                "{{ type = ladspa name = \"fx{i}\" plugin = \"/usr/lib/hako/libhako_fx.so\" label = \"{label}\" control = {{{controls} }} }}"
+            );
+            assert!(config.contains(&node), "missing {node}");
+            assert!(config.contains(&format!("\"fx{i}:In L\"")));
+            assert!(config.contains(&format!("\"fx{i}:Out R\"")));
+        }
+        assert_eq!(fx_stages, 13);
+        assert_eq!(
+            config
+                .matches("plugin = \"/usr/lib/hako/libhako_fx.so\"")
+                .count(),
+            fx_stages
+        );
+        assert!(config.contains("inputs = [ \"fx0:In L\" \"fx0:In R\" ]"));
+        let no_fx = Plugins { fx: None, ..lsp() };
+        assert!(generate_dsp_config(DSP, Some("t"), &all, 256, &no_fx).is_err());
+    }
+
+    #[test]
+    fn live_params_cover_every_fx_control() {
+        let all = every_stage();
+        let params = effect_params(&all);
+        let mut expected = 0;
+        for (i, stage) in all.effects.iter().enumerate() {
+            for (port, value) in stage.kind.fx_controls().map(|(_, c)| c).unwrap_or_default() {
+                expected += 1;
+                let key = format!("fx{i}:{port}");
+                assert!(params.contains(&(key.clone(), value)), "missing {key}");
+            }
+        }
+        assert!(expected > 13);
+    }
+
+    #[test]
+    fn chains_need_only_the_libraries_their_enabled_stages_use() {
+        let one = |enabled, kind| chain(vec![effect("s", enabled, kind)]);
+        let reverb = AuxEffectKind::all()
+            .into_iter()
+            .find(|kind| kind.fx_label() == Some("reverb"))
+            .unwrap();
+        let fx_only = one(true, reverb.clone());
+        assert!(needs(&fx_only, Plugin::Fx) && !needs(&fx_only, Plugin::Lsp));
+        let gate_only = one(true, AuxEffectKind::default_gate());
+        assert!(needs(&gate_only, Plugin::Lsp) && !needs(&gate_only, Plugin::Fx));
+        let off = chain(vec![
+            effect("gate", false, AuxEffectKind::default_gate()),
+            effect("reverb", false, reverb),
+            effect("eq", true, eq(&[(EqBandKind::Peaking, 1000.0)])),
+        ]);
+        assert!(!needs(&off, Plugin::Lsp) && !needs(&off, Plugin::Fx));
+        // Nothing is looked up for a chain that loads no library.
+        let plugins = plugins_for(&off).unwrap();
+        assert_eq!((plugins.lsp, plugins.fx), (None, None));
     }
 
     #[test]
@@ -2203,11 +2366,34 @@ mod tests {
         let dirs = ladspa_dirs(Some(&path));
         assert_eq!(dirs[..2], [empty.clone(), with_lsp.clone()]);
         assert_eq!(dirs[2..], LADSPA_DIRS.map(PathBuf::from));
-        assert_eq!(find_lsp_ladspa(&dirs), Some(with_lsp.join(LSP_LADSPA)));
-        assert_eq!(find_lsp_ladspa(std::slice::from_ref(&empty)), None);
+        assert_eq!(
+            find_library(&dirs, LSP_LADSPA),
+            Some(with_lsp.join(LSP_LADSPA))
+        );
+        assert_eq!(find_library(std::slice::from_ref(&empty), LSP_LADSPA), None);
         // Empty entries (`::`) are no directory.
         assert_eq!(ladspa_dirs(Some(OsStr::new("::"))).len(), LADSPA_DIRS.len());
         assert_eq!(ladspa_dirs(None).len(), LADSPA_DIRS.len());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn fx_library_is_found_next_to_the_executable_first() {
+        assert_eq!(
+            fx_dirs(Path::new("/usr/bin/hakod")),
+            [PathBuf::from("/usr/bin"), PathBuf::from("/usr/lib/hako")]
+        );
+        let root = std::env::temp_dir().join(format!("hako-fx-test-{}", std::process::id()));
+        let (bin, lib) = (root.join("bin"), root.join("lib/hako"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        let dirs = fx_dirs(&bin.join("hakod"));
+        assert_eq!(dirs, [bin.clone(), lib.clone()]);
+        assert_eq!(find_library(&dirs, FX_LADSPA), None);
+        std::fs::write(lib.join(FX_LADSPA), b"").unwrap();
+        assert_eq!(find_library(&dirs, FX_LADSPA), Some(lib.join(FX_LADSPA)));
+        std::fs::write(bin.join(FX_LADSPA), b"").unwrap();
+        assert_eq!(find_library(&dirs, FX_LADSPA), Some(bin.join(FX_LADSPA)));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -2365,10 +2551,16 @@ mod tests {
         };
         // Unlinked and suspended, filter-chain reports every control as 0:
         // always-process keeps it running (on the dummy driver).
-        let config = generate_dsp_config(SINK, Some("hako-test-nowhere"), &chain(3.0), 256, None)
-            .unwrap()
-            .replace("node.passive = true", "node.autoconnect = false")
-            .replace("node.latency", "node.always-process = true node.latency");
+        let config = generate_dsp_config(
+            SINK,
+            Some("hako-test-nowhere"),
+            &chain(3.0),
+            256,
+            &Plugins::default(),
+        )
+        .unwrap()
+        .replace("node.passive = true", "node.autoconnect = false")
+        .replace("node.latency", "node.always-process = true node.latency");
         let path = std::env::temp_dir().join(format!("hako-test-dsp-{}.conf", std::process::id()));
         std::fs::write(&path, config).unwrap();
         let mut child = Command::new("pipewire")
@@ -2418,5 +2610,108 @@ mod tests {
             "configured gain not reported"
         );
         assert_eq!(updated.flatten(), Some(-4.5));
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session and a built hako-fx"]
+    fn live_fx_stages_load_and_update() {
+        const SINK: &str = "hakotest_fx";
+        // A test binary sits somewhere below the cargo-built library.
+        let exe = std::env::current_exe().unwrap();
+        let fx = exe
+            .ancestors()
+            .find_map(|dir| find_library(&[dir.to_path_buf()], FX_LADSPA))
+            .expect("build hako-fx first (cargo build -p hako-fx)");
+        let chain = |mix_pct| {
+            let mut chain = chain(
+                AuxEffectKind::all()
+                    .into_iter()
+                    .filter(|kind| matches!(kind.fx_label(), Some("robot" | "reverb" | "delay")))
+                    .enumerate()
+                    .map(|(i, kind)| effect(&format!("s{i}"), true, kind))
+                    .collect(),
+            );
+            for (param, value) in chain.effects[1].kind.fx_params_mut() {
+                if param.name == "mix_pct" {
+                    *value = mix_pct;
+                }
+            }
+            chain
+        };
+        let plugins = Plugins {
+            lsp: None,
+            fx: Some(fx),
+        };
+        let config =
+            generate_dsp_config(SINK, Some("hakotest-nowhere"), &chain(25.0), 256, &plugins)
+                .unwrap()
+                .replace("node.passive = true", "node.autoconnect = false")
+                .replace("node.latency", "node.always-process = true node.latency");
+        let path = std::env::temp_dir().join(format!("hakotest-fx-{}.conf", std::process::id()));
+        let log = path.with_extension("log");
+        std::fs::write(&path, config).unwrap();
+        let mut child = Command::new("pipewire")
+            .arg("-c")
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap();
+        let params = || -> Vec<serde_json::Value> {
+            dumped_props(SINK)
+                .iter()
+                .filter_map(|p| p.get("params")?.as_array().cloned())
+                .flatten()
+                .collect()
+        };
+        let mix_becomes = |want: f64| {
+            let mut mix = None;
+            for _ in 0..20 {
+                std::thread::sleep(Duration::from_millis(100));
+                let params = params();
+                let at = params.iter().position(|v| v == "fx1:mix_pct");
+                mix = at.and_then(|at| params.get(at + 1)?.as_f64());
+                if mix == Some(want) {
+                    break;
+                }
+            }
+            mix
+        };
+        let configured = engine()
+            .unwrap()
+            .wait_for(NODE_WAIT, |graph| {
+                ensure_running(&mut child, SINK)?;
+                Ok(graph.has_ports(SINK, Direction::In, &PLAYBACK))
+            })
+            .and_then(|up| {
+                anyhow::ensure!(up, "{SINK} did not appear");
+                Ok(mix_becomes(25.0))
+            });
+        let reported = configured.is_ok().then(params).unwrap_or_default();
+        let updated = configured.is_ok().then(|| {
+            let id = resolve_node_id(SINK).unwrap();
+            let pod = engine::params_pod(&effect_params(&chain(80.0))).unwrap();
+            engine().unwrap().set_props(id, pod).unwrap();
+            mix_becomes(80.0)
+        });
+        let _ = stop_child(&mut child);
+        let _ = std::fs::remove_file(&path);
+        let errors = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_file(&log);
+        println!("{SINK} params: {reported:?}\npipewire stderr: {errors:?}");
+        assert!(!errors.contains("ladspa"), "{errors}");
+        assert_eq!(
+            configured.unwrap(),
+            Some(25.0),
+            "configured mix not reported"
+        );
+        for (key, _) in effect_params(&chain(25.0)) {
+            assert!(
+                reported.iter().any(|v| *v == key.as_str()),
+                "{key} not reported"
+            );
+        }
+        assert_eq!(updated.flatten(), Some(80.0));
     }
 }

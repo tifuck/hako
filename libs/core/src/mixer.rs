@@ -6,7 +6,7 @@
 //! [`MixerOp`]s, which [`MixerFile::apply`] interprets the same way on both
 //! sides.
 
-use crate::ipc::{AuxEffectChain, AuxEffectKind};
+use crate::ipc::AuxEffectChain;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -431,9 +431,9 @@ impl MixerFile {
 impl Scene {
     /// An input with one source has one volume, its fader: the source's trim
     /// and mute (which only balance merged sources) fold into the strip. The
-    /// trim sat before the effects, so gate and compressor thresholds move
-    /// with it and the strip sounds the same; a trim the fader or a threshold
-    /// cannot absorb within its range stays on the source.
+    /// trim sat before the effects, so level thresholds move with it and the
+    /// strip sounds the same ([`crate::ipc::AuxEffectKind::level_shifted`]); a trim the
+    /// fader or a stage cannot absorb stays on the source.
     pub fn normalize(&mut self) {
         for input in &mut self.inputs {
             let InputKind::Hardware { sources } = &mut input.kind else {
@@ -448,24 +448,22 @@ impl Scene {
                 continue;
             }
             let gain = input.gain_db + trim;
-            let thresholds_fit = input.chain.effects.iter().all(|e| match e.kind {
-                AuxEffectKind::NoiseGate { threshold_db, .. }
-                | AuxEffectKind::Compressor { threshold_db, .. } => {
-                    (-60.0..=0.0).contains(&(threshold_db - trim))
-                }
-                AuxEffectKind::Equalizer { .. } => true,
-            });
-            if !(GAIN_MIN_DB..=GAIN_MAX_DB).contains(&gain) || !thresholds_fit {
+            let shifted: Option<Vec<_>> = input
+                .chain
+                .effects
+                .iter()
+                .map(|e| e.kind.level_shifted(trim))
+                .collect();
+            let Some(shifted) = shifted else {
+                continue;
+            };
+            if !(GAIN_MIN_DB..=GAIN_MAX_DB).contains(&gain) {
                 continue;
             }
             source.trim_db = 0.0;
             input.gain_db = gain;
-            for effect in &mut input.chain.effects {
-                match &mut effect.kind {
-                    AuxEffectKind::NoiseGate { threshold_db, .. }
-                    | AuxEffectKind::Compressor { threshold_db, .. } => *threshold_db -= trim,
-                    AuxEffectKind::Equalizer { .. } => {}
-                }
+            for (effect, kind) in input.chain.effects.iter_mut().zip(shifted) {
+                effect.kind = kind;
             }
         }
     }
@@ -864,6 +862,7 @@ pub enum DeviceDirection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::AuxEffectKind;
 
     fn hw(id: &str, nodes: &[&str], routes: &[&str]) -> Input {
         Input {
@@ -1184,7 +1183,7 @@ mod tests {
             .map(|e| match e.kind {
                 AuxEffectKind::NoiseGate { threshold_db, .. }
                 | AuxEffectKind::Compressor { threshold_db, .. } => threshold_db,
-                AuxEffectKind::Equalizer { .. } => unreachable!(),
+                _ => unreachable!(),
             })
             .collect();
         assert_eq!(thresholds, [-49.0, -24.0]);

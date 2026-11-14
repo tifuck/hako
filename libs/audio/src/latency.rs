@@ -18,8 +18,8 @@
 use crate::engine::{engine, Direction, Graph, LinkHandle};
 use crate::mixer::{MixerGraph, Naming};
 use crate::{
-    ensure_running, find_lsp_ladspa, generate_dsp_config, ladspa_dirs, meters, node_latency,
-    spawn_pipewire, stop_child, write_conf, LSP_LADSPA, NODE_WAIT,
+    ensure_running, generate_dsp_config, meters, node_latency, plugins_for, spawn_pipewire,
+    stop_child, write_conf, NODE_WAIT,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use hako_core::ipc::{AuxEffect, AuxEffectChain, AuxEffectKind};
@@ -237,10 +237,8 @@ struct Dsp {
 
 impl Dsp {
     fn spawn(sink: &str, latency: u32) -> Result<Self> {
-        let dirs = ladspa_dirs(std::env::var_os("LADSPA_PATH").as_deref());
-        let lsp = find_lsp_ladspa(&dirs)
-            .ok_or_else(|| anyhow!("LSP LADSPA plugins not installed ({LSP_LADSPA} not found)"))?;
-        let config = generate_dsp_config(sink, None, &default_chain(), latency, Some(&lsp))?;
+        let chain = default_chain();
+        let config = generate_dsp_config(sink, None, &chain, latency, &plugins_for(&chain)?)?;
         let conf = hako_core::default_socket_path().with_file_name(format!("{sink}.conf"));
         write_conf(&conf, &config)?;
         match spawn_pipewire(&conf) {

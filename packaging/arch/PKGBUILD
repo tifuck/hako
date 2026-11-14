@@ -24,6 +24,7 @@ sha256sums=('c46290741f0c8fc2acae02909bf27072c66b4c10db9a3c71a77af52e83a8f56f')
 package() {
   cd "$_dir"
   install -Dm755 bin/hako bin/hakod -t "$pkgdir/usr/bin/"
+  install -Dm644 lib/libhako_fx.so -t "$pkgdir/usr/lib/hako/"
   sed 's|%h/.local/bin/hakod|/usr/bin/hakod|' packaging/systemd/hakod.service \
     | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/hakod.service"
   install -Dm644 packaging/hako.desktop "$pkgdir/usr/share/applications/hako.desktop"

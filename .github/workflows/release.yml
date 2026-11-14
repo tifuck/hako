@@ -47,13 +47,14 @@ jobs:
           # Every PipeWire function must resolve against the runner's 0.3.48.
           LD_BIND_NOW=1 target/release/hakod --version
           target/release/hako --version
-          if ldd target/release/hako target/release/hakod | grep 'not found'; then exit 1; fi
+          if ldd target/release/hako target/release/hakod target/release/libhako_fx.so | grep 'not found'; then exit 1; fi
       - name: Package
         run: |
           name="hako-${GITHUB_REF_NAME#v}-x86_64-linux"
           d="dist/$name"
-          mkdir -p "$d/bin"
+          mkdir -p "$d/bin" "$d/lib"
           cp target/release/hakod target/release/hako "$d/bin/"
+          cp target/release/libhako_fx.so "$d/lib/"
           cp --parents scripts/install-user.sh scripts/fix-hidraw-perms.sh \
             packaging/hako.desktop packaging/systemd/hakod.service \
             udev/70-hako.rules client/assets/icon.png "$d/"
@@ -67,6 +68,7 @@ jobs:
           dpkg -s hako | grep -E '^(Version|Depends)'
           /usr/bin/hako --version && /usr/bin/hakod --version
           test -f /usr/lib/udev/rules.d/70-hako.rules
+          test -f /usr/lib/hako/libhako_fx.so
           test -f /usr/lib/systemd/user/hakod.service
           test -L /etc/systemd/user/default.target.wants/hakod.service
           sudo apt-get remove -y hako

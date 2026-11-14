@@ -1,8 +1,9 @@
-//! Ordered processing chain editor (a mixer strip's gate / EQ / compressor).
+//! Ordered processing chain editor (a mixer strip's stages).
 
 use crate::theme::{self, pal};
 use crate::widgets;
 use egui::{pos2, vec2, Rect, Sense, Stroke, Ui};
+use hako_core::fx::FxChoice;
 use hako_core::ipc::{
     AuxEffect, AuxEffectChain, AuxEffectKind, EqBand, EqBandKind, MAX_AUX_EFFECTS as MAX_STAGES,
     MAX_EQ_BANDS,
@@ -80,11 +81,12 @@ pub fn chain_editor(ui: &mut Ui, chain: &mut AuxEffectChain) -> bool {
     ui.add_space(theme::SPACE_XS);
     ui.add_enabled_ui(chain.effects.len() < MAX_STAGES, |ui| {
         ui.menu_button("+  Add stage", |ui| {
-            for kind in [
-                AuxEffectKind::default_gate(),
-                AuxEffectKind::default_compressor(),
-                AuxEffectKind::default_equalizer(),
-            ] {
+            let mut group = "";
+            for kind in AuxEffectKind::all() {
+                if kind.group() != group {
+                    group = kind.group();
+                    ui.label(theme::eyebrow(group));
+                }
                 if ui.button(kind.label()).clicked() {
                     let id = next_id(chain, kind.id_prefix());
                     egui::collapsing_header::CollapsingState::load_with_default_open(
@@ -133,6 +135,27 @@ fn summary(kind: &AuxEffectKind) -> String {
                 .filter(|b| !b.kind.has_gain() || b.gain_db.abs() >= 0.1)
                 .count();
             format!("{} bands · {active} shaping", bands.len())
+        }
+        kind => {
+            let mut kind = kind.clone();
+            let mut parts: Vec<String> = kind
+                .fx_choices_mut()
+                .into_iter()
+                .map(|(c, v)| {
+                    c.options
+                        .get(usize::from(*v))
+                        .copied()
+                        .unwrap_or("?")
+                        .to_string()
+                })
+                .collect();
+            parts.extend(
+                kind.fx_params_mut()
+                    .into_iter()
+                    .take(2)
+                    .map(|(p, v)| format!("{} {}", p.label, value_text(*v, p.unit))),
+            );
+            parts.join(" · ")
         }
     }
 }
@@ -389,8 +412,53 @@ fn stage_editor(ui: &mut Ui, kind: &mut AuxEffectKind) -> bool {
             ui.add_space(theme::SPACE_SM);
             c |= eq_table(ui, bands);
         }
+        kind => {
+            for (choice, v) in kind.fx_choices_mut() {
+                c |= choice_row(ui, choice, v);
+            }
+            for (p, v) in kind.fx_params_mut() {
+                c |= param(ui, p.label, p.help, v, p.min..=p.max, p.unit, p.log);
+            }
+        }
     }
     c
+}
+
+/// The label column of a parameter row.
+fn row_label(ui: &mut Ui, label: &str, help: &str) {
+    ui.allocate_ui_with_layout(
+        vec2(130.0, 20.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_width(130.0);
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(
+                egui::RichText::new(label)
+                    .size(13.0)
+                    .color(pal().text_muted),
+            );
+            widgets::info(ui, help);
+        },
+    );
+}
+
+/// Labeled dropdown for a choice; returns true when it changed.
+fn choice_row(ui: &mut Ui, choice: &FxChoice, v: &mut u8) -> bool {
+    let mut commit = false;
+    ui.horizontal(|ui| {
+        ui.set_min_height(30.0);
+        row_label(ui, choice.label, choice.help);
+        let selected = choice.options.get(usize::from(*v)).copied().unwrap_or("?");
+        widgets::dropdown(ui.id().with(("choice", choice.name)), selected, 200.0).show_ui(
+            ui,
+            |ui| {
+                for (i, option) in (0u8..).zip(choice.options) {
+                    commit |= ui.selectable_value(v, i, *option).changed();
+                }
+            },
+        );
+    });
+    commit
 }
 
 /// Labeled slider for one parameter; returns true when the value is final.
@@ -406,20 +474,7 @@ fn param(
     let mut commit = false;
     ui.horizontal(|ui| {
         ui.set_min_height(30.0);
-        ui.allocate_ui_with_layout(
-            vec2(130.0, 20.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.set_min_width(130.0);
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(
-                    egui::RichText::new(label)
-                        .size(13.0)
-                        .color(pal().text_muted),
-                );
-                widgets::info(ui, help);
-            },
-        );
+        row_label(ui, label, help);
         let (min, max) = (*range.start(), *range.end());
         let resp = widgets::slider(
             ui,
@@ -431,18 +486,23 @@ fn param(
         );
         widgets::knob(ui, &resp, widgets::fraction(*v, min, max, log));
         commit = resp.drag_stopped() || (resp.changed() && !resp.dragged());
-        let text = if unit == "Hz" && *v == 0.0 {
-            "Off".to_string()
-        } else if unit == ":1" {
-            format!("{v:.1}:1")
-        } else if *v >= 100.0 || unit == "dB" {
-            format!("{v:.0} {unit}")
-        } else {
-            format!("{v:.1} {unit}")
-        };
-        ui.label(widgets::value_text(text));
+        ui.label(widgets::value_text(value_text(*v, unit)));
     });
     commit
+}
+
+fn value_text(v: f32, unit: &str) -> String {
+    if unit == "Hz" && v == 0.0 {
+        "Off".to_string()
+    } else if unit == ":1" {
+        format!("{v:.1}:1")
+    } else if unit.is_empty() || unit == "×" {
+        format!("{v:.0}{unit}")
+    } else if v.abs() >= 100.0 || matches!(unit, "dB" | "%") {
+        format!("{v:.0} {unit}")
+    } else {
+        format!("{v:.1} {unit}")
+    }
 }
 
 /// Soft-knee static compressor curve (input dB → output dB). The knee width

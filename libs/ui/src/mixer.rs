@@ -947,6 +947,19 @@ fn fx_abbrev(kind: &AuxEffectKind) -> &'static str {
         AuxEffectKind::NoiseGate { .. } => "Gate",
         AuxEffectKind::Compressor { .. } => "Comp",
         AuxEffectKind::Equalizer { .. } => "EQ",
+        AuxEffectKind::NoiseSuppression { .. } => "AI NR",
+        AuxEffectKind::DeEsser { .. } => "DeEss",
+        AuxEffectKind::Limiter { .. } => "Lim",
+        AuxEffectKind::Distortion { .. } => "Dist",
+        AuxEffectKind::PitchShift { .. } => "Pitch",
+        AuxEffectKind::AutoTune { .. } => "Tune",
+        AuxEffectKind::Vocoder { .. } => "Voc",
+        AuxEffectKind::Robot { .. } => "Robot",
+        AuxEffectKind::Bitcrusher { .. } => "Crush",
+        AuxEffectKind::Reverb { .. } => "Verb",
+        AuxEffectKind::Delay { .. } => "Delay",
+        AuxEffectKind::Chorus { .. } => "Chor",
+        AuxEffectKind::Flanger { .. } => "Flang",
     }
 }
 
