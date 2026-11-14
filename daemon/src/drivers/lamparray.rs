@@ -1040,6 +1040,7 @@ mod tests {
         std::fs::write(root.join("hid/report_descriptor"), SPEC).unwrap();
         let lamp = fallback_model(&[&node]).unwrap();
         assert!(!std::ptr::eq(generic, lamp));
+        assert!(!generic.same(lamp) && lamp.same(lamp));
         std::fs::remove_file(root.join("hid/report_descriptor")).unwrap();
         assert!(std::ptr::eq(lamp, fallback_model(&[&node]).unwrap()));
         let _ = std::fs::remove_dir_all(root);

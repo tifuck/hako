@@ -337,15 +337,25 @@ impl NetService {
 impl Shared {
     fn apply(self: &Arc<Self>, op: &NetOp) -> Result<(), PatchError> {
         match op {
-            NetOp::Pair { address } => {
+            NetOp::Pair { address, key } => {
                 let addr = resolve(address).map_err(PatchError::Invalid)?;
                 let (want, there) = {
                     let inner = lock(&self.inner);
-                    let want = inner
-                        .nearby
-                        .values()
-                        .find(|s| s.addr == addr)
-                        .map(|s| s.beacon.key.clone());
+                    let want = match key {
+                        Some(key) => Some(key.clone()),
+                        None => {
+                            // Beacons are unauthenticated: with two claiming
+                            // one address, neither key can be expected.
+                            let mut claims = inner.nearby.values().filter(|s| s.addr == addr);
+                            let want = claims.next().map(|s| s.beacon.key.clone());
+                            if claims.next().is_some() {
+                                return Err(PatchError::Invalid(format!(
+                                    "several machines announce {addr}: pair from the Nearby list"
+                                )));
+                            }
+                            want
+                        }
+                    };
                     let there = inner
                         .sessions
                         .values()
@@ -607,7 +617,7 @@ impl Shared {
             bail!("no Hello");
         };
         let s = Arc::new(Session::new(&stream, hs, &name, port)?);
-        let admitted = {
+        let (admitted, old) = {
             let mut inner = lock(&self.inner);
             let stage = if s.key == own {
                 Err("this machine's own key".to_string())
@@ -620,8 +630,20 @@ impl Shared {
             } else {
                 Ok(Stage::Incoming)
             };
-            stage.and_then(|stage| register(&mut inner, &s, stage, stop).map(|()| stage))
+            // A paired machine dialling again lost its old session (it
+            // restarted without Bye): the new one replaces it. Only the
+            // lower id redials, so two sessions never keep replacing each
+            // other.
+            let old = matches!(stage, Ok(Stage::Live))
+                .then(|| inner.sessions.remove(&s.key))
+                .flatten();
+            let admitted =
+                stage.and_then(|stage| register(&mut inner, &s, stage, stop).map(|()| stage));
+            (admitted, old)
         };
+        if let Some(old) = old {
+            self.close(&old.session, Some(&Control::Bye));
+        }
         let stage = match admitted {
             Ok(stage) => stage,
             Err(e) => {
@@ -788,15 +810,23 @@ impl Shared {
                 )));
             }
             let fresh = known.is_none();
-            if known.is_none_or(|p| p.name != s.name) {
-                self.save(&mut inner, |f| {
+            let renamed = known.is_none_or(|p| p.name != s.name);
+            if renamed || known.is_some_and(|p| p.address != Some(s.addr)) {
+                let saved = self.save(&mut inner, |f| {
                     f.trust(Peer {
                         id: s.id.clone(),
                         name: s.name.clone(),
                         key: s.key.clone(),
                         jitter_ms: DEFAULT_JITTER_MS,
+                        address: Some(s.addr),
                     })
-                })?;
+                });
+                match saved {
+                    Err(e) if renamed => return Err(e),
+                    // Only the address: `seen_at` still has it this run.
+                    Err(e) => warn!("net: {}: address not saved: {}", s.name, message(e)),
+                    Ok(()) => {}
+                }
             }
             fresh
         };
@@ -915,8 +945,10 @@ impl Shared {
                                 lock(&self.inner).problem =
                                     Some(format!("pairing with {}: {e}", s.name));
                             }
-                            // The other side unpins what it just pinned.
-                            self.close(s, Some(&Control::Denied));
+                            // The other side unpins what it just pinned
+                            // (`try_send` would skip it during a ping).
+                            let _ = s.send(&Control::Denied);
+                            self.close(s, None);
                             return;
                         }
                     }
@@ -1191,6 +1223,7 @@ impl Shared {
                     address: s
                         .map(|s| s.addr)
                         .or_else(|| inner.seen_at.get(&p.key).copied())
+                        .or(p.address)
                         .map(|a| a.to_string()),
                     link: s.map(|_| inner.stats.get(&p.key).copied().unwrap_or_default()),
                     problem: match s {
@@ -1210,6 +1243,7 @@ impl Shared {
             .map(|s| NearbyPeer {
                 id: s.beacon.id.clone(),
                 name: s.beacon.name.clone(),
+                key: s.beacon.key.clone(),
                 address: s.addr.to_string(),
             })
             .collect();
@@ -1302,7 +1336,8 @@ fn register(
 /// Paired machines to dial now: not connected or being dialled, due (see
 /// `REDIAL`), with a known address, and a higher id than this machine (the
 /// lower id dials). Addresses in order: the beacon's (it may have moved),
-/// then where it last connected (a beacon proves nothing).
+/// then where it last connected this run, then the one saved in `net.toml`
+/// (a beacon proves nothing).
 fn reconnects(inner: &mut Inner, now: Instant) -> Vec<(String, Vec<SocketAddr>)> {
     let Some(own) = inner.identity.as_ref().map(|i| peer_id(&i.public)) else {
         return Vec::new();
@@ -1324,7 +1359,10 @@ fn reconnects(inner: &mut Inner, now: Instant) -> Vec<(String, Vec<SocketAddr>)>
                 .map(|s| s.addr)
                 .into_iter()
                 .collect();
-            if let Some(&at) = inner.seen_at.get(&p.key) {
+            for at in [inner.seen_at.get(&p.key).copied(), p.address]
+                .into_iter()
+                .flatten()
+            {
                 if !addrs.contains(&at) {
                     addrs.push(at);
                 }
@@ -1620,6 +1658,7 @@ mod tests {
         let (a_id, b_id) = (turn_on(&a), turn_on(&b));
         a.patch(&[NetOp::Pair {
             address: format!("127.0.0.1:{b_port}"),
+            key: None,
         }])
         .unwrap();
         b.patch(&[NetOp::Respond {
@@ -1729,6 +1768,7 @@ mod tests {
         let state = a
             .patch(&[NetOp::Pair {
                 address: format!("127.0.0.1:{b_port}"),
+                key: None,
             }])
             .unwrap();
         let out = state.requests.first().expect("outgoing request").clone();
@@ -1779,6 +1819,7 @@ mod tests {
         turn_on(&b);
         let pair = [NetOp::Pair {
             address: format!("localhost:{b_port}"),
+            key: None,
         }];
         a.patch(&pair).unwrap();
         b.patch(&[NetOp::Respond {
@@ -1824,6 +1865,7 @@ mod tests {
         };
         let pair = [NetOp::Pair {
             address: format!("127.0.0.1:{b_port}"),
+            key: None,
         }];
         let impostor = "00".repeat(32);
         announce(&impostor);
@@ -1832,11 +1874,26 @@ mod tests {
             Err(PatchError::Invalid(e)) => assert!(e.contains("announced"), "{e}"),
             other => panic!("{other:?}"),
         }
-        lock(&a.shared.inner).nearby.clear();
+        // Two beacons claim the address: a typed address expects neither,
+        // the Nearby row clicked names its key.
         announce(&b_key);
-        let state = a.patch(&pair).unwrap();
+        match a.patch(&pair) {
+            Err(PatchError::Invalid(e)) => assert!(e.contains("several"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        let row = |key: &str| {
+            [NetOp::Pair {
+                address: format!("127.0.0.1:{b_port}"),
+                key: Some(key.into()),
+            }]
+        };
+        match a.patch(&row(&impostor)) {
+            Err(PatchError::Invalid(e)) => assert!(e.contains("announced"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        let state = a.patch(&row(&b_key)).unwrap();
         assert_eq!(state.requests.len(), 1);
-        assert!(state.nearby.len() == 1, "not paired yet: still nearby");
+        assert!(state.nearby.len() == 2, "not paired yet: still nearby");
         done([(a, a_paths), (b, b_paths)]);
     }
 
@@ -1852,6 +1909,7 @@ mod tests {
         assert!(TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok());
         let pair = NetOp::Pair {
             address: "127.0.0.1".into(),
+            key: None,
         };
         assert!(matches!(net.patch(&[pair]), Err(PatchError::Invalid(_))));
         let ops = vec![NetOp::SetEnabled { on: false }; MAX_NET_OPS + 1];
@@ -1977,21 +2035,104 @@ mod tests {
         turn_on(&b);
         a.patch(&[NetOp::Pair {
             address: format!("127.0.0.1:{b_port}"),
+            key: None,
         }])
         .unwrap();
         let mode = |m| std::fs::Permissions::from_mode(m);
         std::fs::set_permissions(&a_paths.root, mode(0o500)).unwrap();
+        // A ping holding alpha's writer must not cost the Denied.
+        let s = lock(&a.shared.inner)
+            .sessions
+            .values()
+            .next()
+            .unwrap()
+            .session
+            .clone();
+        let writing = lock(&s.writer);
         b.patch(&[NetOp::Respond {
             id: a_id.clone(),
             accept: true,
         }])
         .unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        while a.state().problem.is_none() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(writing);
         wait("bravo unpinned alpha", || {
             !trusts(&b_paths, &a_id) && b.state().peers.is_empty()
         });
         wait("alpha shows why", || a.state().problem.is_some());
         std::fs::set_permissions(&a_paths.root, mode(0o700)).unwrap();
         assert!(load_net(&a_paths).unwrap().peers.is_empty());
+        done([(a, a_paths), (b, b_paths)]);
+    }
+
+    /// Paired and connected over loopback: `(alpha, bravo, alpha's id,
+    /// bravo's id)` with their paths.
+    fn paired(prefix: &str) -> ([(NetService, ConfigPaths); 2], String, String, u16) {
+        let (a, a_paths, _) = machine(&format!("{prefix}-a"));
+        let (b, b_paths, b_port) = machine(&format!("{prefix}-b"));
+        let (a_id, b_id) = (turn_on(&a), turn_on(&b));
+        a.patch(&[NetOp::Pair {
+            address: format!("127.0.0.1:{b_port}"),
+            key: None,
+        }])
+        .unwrap();
+        b.patch(&[NetOp::Respond {
+            id: a_id.clone(),
+            accept: true,
+        }])
+        .unwrap();
+        wait("connected", || connected(&a, &b_id) && connected(&b, &a_id));
+        ([(a, a_paths), (b, b_paths)], a_id, b_id, b_port)
+    }
+
+    #[test]
+    fn both_restarting_without_beacons_reconnect_to_the_saved_address() {
+        let ([(a, a_paths), (b, b_paths)], a_id, b_id, b_port) = paired("restart");
+        let saved = load_net(&a_paths).unwrap().peers[0].address;
+        assert_eq!(saved, Some(SocketAddr::from(([127, 0, 0, 1], b_port))));
+        a.shutdown();
+        b.shutdown();
+        let start = |paths: &ConfigPaths| {
+            let (events, _) = broadcast::channel(256);
+            NetService::start(paths.clone(), events, None, None)
+        };
+        let (a, b) = (start(&a_paths), start(&b_paths));
+        wait("reconnected", || {
+            connected(&a, &b_id) && connected(&b, &a_id)
+        });
+        done([(a, a_paths), (b, b_paths)]);
+    }
+
+    #[test]
+    fn a_paired_machine_back_without_bye_replaces_its_old_session() {
+        let ([(a, a_paths), (b, b_paths)], a_id, b_id, _) = paired("stale");
+        let (low, high, low_id, high_id) = if a_id < b_id {
+            (&a, &b, &a_id, &b_id)
+        } else {
+            (&b, &a, &b_id, &a_id)
+        };
+        let session = |net: &NetService| {
+            lock(&net.shared.inner)
+                .sessions
+                .values()
+                .next()
+                .map(|e| e.session.clone())
+        };
+        let old = session(high).unwrap();
+        // The lower id forgets its session as a crash would; the connection
+        // stays up (it still answers pings), so the higher keeps the old one.
+        lock(&low.shared.inner).sessions.clear();
+        lock(&low.shared.links).clear();
+        wait("replaced", || {
+            session(high).is_some_and(|s| !Arc::ptr_eq(&s, &old))
+                && connected(low, high_id)
+                && connected(high, low_id)
+        });
+        assert!(low.state().peers.iter().all(|p| p.problem.is_none()));
+        drop(old);
         done([(a, a_paths), (b, b_paths)]);
     }
 
@@ -2002,6 +2143,7 @@ mod tests {
         let (a_id, b_id) = (turn_on(&a), turn_on(&b));
         a.patch(&[NetOp::Pair {
             address: format!("127.0.0.1:{b_port}"),
+            key: None,
         }])
         .unwrap();
         b.patch(&[NetOp::Respond {
@@ -2042,9 +2184,11 @@ mod tests {
             name: "Peer".into(),
             key: key.clone(),
             jitter_ms: DEFAULT_JITTER_MS,
+            address: Some("10.0.0.3:47821".parse().unwrap()),
         });
         let beacon: SocketAddr = "10.0.0.9:47821".parse().unwrap();
         let verified: SocketAddr = "10.0.0.2:47821".parse().unwrap();
+        let saved: SocketAddr = "10.0.0.3:47821".parse().unwrap();
         inner.seen_at.insert(key.clone(), verified);
         inner.nearby.insert(
             key.clone(),
@@ -2062,7 +2206,7 @@ mod tests {
         let now = Instant::now();
         assert_eq!(
             reconnects(&mut inner, now),
-            [(key.clone(), vec![beacon, verified])]
+            [(key.clone(), vec![beacon, verified, saved])]
         );
         assert!(reconnects(&mut inner, now).is_empty(), "in flight");
         let mut at = now;
@@ -2143,7 +2287,7 @@ mod tests {
         let silent = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = silent.local_addr().unwrap().to_string();
         std::thread::scope(|scope| {
-            let pair = scope.spawn(|| net.patch(&[NetOp::Pair { address }]));
+            let pair = scope.spawn(|| net.patch(&[NetOp::Pair { address, key: None }]));
             std::thread::sleep(Duration::from_millis(300));
             let start = Instant::now();
             net.patch(&[NetOp::SetName {

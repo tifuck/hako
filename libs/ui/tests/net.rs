@@ -37,6 +37,7 @@ fn sample() -> NetState {
         nearby: vec![NearbyPeer {
             id: "2233445566778899".into(),
             name: "Tower".into(),
+            key: "22".repeat(32),
             address: "192.168.1.30:47821".into(),
         }],
         requests: vec![
@@ -139,6 +140,22 @@ fn accepting_an_incoming_request_sends_respond() {
         [NetOp::Respond {
             id: "1122334455667788".into(),
             accept: true
+        }]
+    );
+}
+
+#[test]
+fn pairing_a_nearby_machine_names_its_key() {
+    let mut st = sample();
+    st.requests.clear();
+    let out = drive(app(Some(st), true), |h| {
+        h.get_by_label("Pair").click();
+    });
+    assert_eq!(
+        patches(&out),
+        [NetOp::Pair {
+            address: "192.168.1.30:47821".into(),
+            key: Some("22".repeat(32)),
         }]
     );
 }

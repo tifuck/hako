@@ -41,8 +41,8 @@ pub type SendFn = Box<dyn FnMut(u64, &[i16]) + Send>;
 const FRAMES_PER_MS: usize = NET_RATE as usize / 1000;
 /// Bytes per S16LE stereo frame.
 const STRIDE: usize = NET_CHANNELS * 2;
-/// A gap in the peer's positions up to this long is played as silence;
-/// a longer one restarts the buffer.
+/// A gap in the peer's positions up to this long is played as silence; a
+/// longer one is a pause (silence is not sent): silence only up to the target.
 const MAX_GAP: usize = 20 * FRAMES_PER_MS;
 /// Audio further behind the buffer than this: the peer started counting
 /// again, so restart instead of dropping it forever.
@@ -74,6 +74,8 @@ pub struct PortStats {
     /// Audio waiting in the receive buffer.
     pub buffered_ms: f32,
     /// Times the receive buffer ran dry while audio was arriving.
+    /// ponytail: a pause of up to 20 ms that runs it dry counts too (packets
+    /// don't say silence was skipped); a flag in the packet if that misleads.
     pub dropouts: u64,
     /// Audio arrived in the last second.
     pub receiving: bool,
@@ -96,6 +98,8 @@ struct Jitter {
     /// Ran dry while playing; a dropout once more audio follows on time
     /// (not when the peer had just stopped sending).
     starved: bool,
+    /// Silence played since it ran dry: part of the next gap already.
+    starved_for: usize,
     dropouts: u64,
 }
 
@@ -110,6 +114,7 @@ impl Jitter {
             pulled: 0,
             playing: false,
             starved: false,
+            starved_for: 0,
             dropouts: 0,
         }
     }
@@ -136,15 +141,21 @@ impl Jitter {
             self.end = None;
             self.playing = false;
             self.starved = false;
+            self.starved_for = 0;
             return;
         };
         match self.end {
             Some(end) if pos < end && end - pos <= MAX_BEHIND => return,
-            Some(end) if pos >= end && pos - end <= MAX_GAP as u64 => {
-                if std::mem::take(&mut self.starved) {
+            Some(end) if pos >= end => {
+                let gap = usize::try_from(pos - end).unwrap_or(usize::MAX);
+                if std::mem::take(&mut self.starved) && gap <= MAX_GAP {
                     self.dropouts += 1;
                 }
-                for _ in end..pos {
+                let mut fill = gap.saturating_sub(std::mem::take(&mut self.starved_for));
+                if gap > MAX_GAP {
+                    fill = fill.min((self.target + self.pulled).saturating_sub(self.len));
+                }
+                for _ in 0..fill {
                     self.put([0; 2]);
                 }
             }
@@ -152,6 +163,7 @@ impl Jitter {
                 self.len = 0;
                 self.playing = false;
                 self.starved = false;
+                self.starved_for = 0;
             }
         }
         for frame in frames {
@@ -179,6 +191,9 @@ impl Jitter {
                 if self.playing {
                     self.playing = false;
                     self.starved = true;
+                }
+                if self.starved {
+                    self.starved_for = self.starved_for.saturating_add(1);
                 }
                 [0; 2]
             };
@@ -980,7 +995,8 @@ mod tests {
         // Running dry because the peer stopped (a long gap) is no dropout.
         j.push(4 * MS as u64 + 100 * MS as u64, &block(6 * MS, 1));
         pull(&mut j, 2 * MS);
-        pull(&mut j, 8 * MS);
+        pull(&mut j, 20 * MS);
+        assert!(j.starved);
         j.push(1_000 * MS as u64, &block(MS, 1));
         assert_eq!(j.dropouts, 1);
     }
@@ -998,16 +1014,50 @@ mod tests {
         assert_eq!(j.ring[j.start], [2, 2]);
     }
 
+    /// 5 ms packets and 5 ms pulls; `sending(ms)`: a packet at that time.
+    /// Every frame of audio played, and the fill after each pull.
+    fn stream(j: &mut Jitter, ms: usize, sending: impl Fn(usize) -> bool) -> (usize, Vec<usize>) {
+        let (mut played, mut fills) = (0, Vec::new());
+        for t in (0..ms).step_by(5) {
+            if sending(t) {
+                j.push((t * MS) as u64, &block(5 * MS, 1));
+            }
+            played += pull(j, 5 * MS).iter().filter(|&&s| s == 1).count();
+            fills.push(j.len);
+        }
+        (played, fills)
+    }
+
     #[test]
-    fn a_big_gap_restarts_at_the_new_audio() {
+    fn a_pause_keeps_the_audio_before_it_and_its_length() {
+        let mut j = Jitter::new(100);
+        let pause = |t| (1_000..1_050).contains(&t) || t >= 2_050;
+        let (played, fills) = stream(&mut j, 2_600, |t| !pause(t));
+        assert_eq!(played, 2_000 * MS);
+        // The pause is played as silence: the fill after it is the target.
+        assert_eq!(fills[1_050 / 5], 100 * MS);
+        // A long gap with the buffer full adds no silence past the target.
         let mut j = Jitter::new(2);
         j.push(0, &block(10 * MS, 1));
         pull(&mut j, MS);
-        assert!(j.playing);
         j.push(10 * MS as u64 + MAX_GAP as u64 + 1, &block(3 * MS, 2));
-        assert_eq!(j.len, 3 * MS);
-        assert!(!j.playing);
+        assert_eq!(j.len, 12 * MS);
+        assert!(j.playing);
+        assert_eq!(pull(&mut j, 9 * MS), vec![1; 9 * MS]);
         assert_eq!(pull(&mut j, MS), vec![2; MS]);
+    }
+
+    #[test]
+    fn silence_played_while_dry_is_not_inserted_again() {
+        let mut j = Jitter::new(12);
+        let (_, fills) = stream(&mut j, 200, |t| !(100..120).contains(&t));
+        // Ran dry 5 ms before the 20 ms pause ended; the fill comes back to
+        // where it was, not 5 ms higher.
+        assert_eq!(fills[95 / 5], 15 * MS);
+        assert_eq!(fills[115 / 5], 0);
+        assert_eq!(fills[195 / 5], 15 * MS);
+        // Still a dropout: the wire can't tell skipped silence from loss.
+        assert_eq!(j.dropouts, 1);
     }
 
     #[test]

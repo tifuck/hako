@@ -108,7 +108,8 @@ pub struct LogitechMouseAdapter {
     has_rgb: bool,
     /// Feature index table: feature_id → index on device.
     feat: FeatureMap,
-    lod: u8,
+    /// Raw 0x2202 lift-off byte last read back; DPI writes resend it.
+    lod: Option<u8>,
     rgb_cluster: u8,
     /// Effect-id → cluster slot index, enumerated from the device at open.
     rgb_slots: std::collections::HashMap<u16, u8>,
@@ -171,7 +172,7 @@ impl LogitechMouseAdapter {
             paths,
             has_rgb: false,
             feat: FeatureMap::default(),
-            lod: 2,
+            lod: None,
             rgb_cluster: 0,
             rgb_slots: std::collections::HashMap::new(),
             rr_hz: Vec::new(),
@@ -206,6 +207,7 @@ impl LogitechMouseAdapter {
         self.last_probe = Instant::now();
         // Power-up brings the onboard profile back.
         self.host_mode = false;
+        self.lod = None;
         if !self.index_known {
             match self.dev.as_mut().context("no dev").and_then(discover_index) {
                 Ok(idx) => {
@@ -432,9 +434,7 @@ impl LogitechMouseAdapter {
                     }
                     // Solaar ExtendedAdjustableDpi read: sensor, x, default x,
                     // y, default y, lod (0 low / 1 medium / 2 high) at param[9].
-                    if r[13] <= 2 {
-                        self.lod = r[13];
-                    }
+                    self.lod = Some(r[13]);
                 }
             } else {
                 // classic 0x2201 get dpi fn 0x20
@@ -493,7 +493,8 @@ impl LogitechMouseAdapter {
             let lo = (dpi & 0xff) as u8;
             // write fn 0x60: sensor, x BE, y BE, lod (keep the device's LOD).
             // Rejections surface as HID++ error frames from hidpp_long.
-            let lod = self.lod;
+            let lod = hidpp::ext_dpi_lod(self.lod, || self.hidpp_long(idx, 0x05, &[0x00]))?;
+            self.lod = Some(lod);
             self.hidpp_long(idx, 0x06, &[0x00, hi, lo, hi, lo, lod])?;
         } else {
             let hi = (dpi >> 8) as u8;
@@ -852,8 +853,6 @@ fn controls(
         .filter(|(k, _, _)| supported.contains_key(&k.effect_id()))
         .map(|(_, v, l)| SettingOption::text(v, l))
         .collect();
-        let has_speed = matches!(effect, MouseEffectKind::Pulse | MouseEffectKind::Breathe);
-        let has_color = has_speed || effect == MouseEffectKind::Static;
         c.push(SettingMeta::dropdown(Effect, "Effect", effect_opts));
         c.push(
             SettingMeta::dropdown(
@@ -865,10 +864,10 @@ fn controls(
                     SettingOption::text("fast", "Fast"),
                 ],
             )
-            .hidden(!has_speed),
+            .hidden(!effect.has_speed()),
         );
         for (key, label) in [(ColorR, "Red"), (ColorG, "Green"), (ColorB, "Blue")] {
-            c.push(SettingMeta::color(key, label).hidden(!has_color));
+            c.push(SettingMeta::color(key, label).hidden(!effect.has_color()));
         }
     }
     c.extend(super::device::memory_placeholders(Some(BLOCK_SAVE), None));

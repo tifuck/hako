@@ -79,9 +79,26 @@ impl Model {
         id.vendor_id == self.vendor_id && self.product_ids.contains(&id.product_id)
     }
 
-    /// Same registry entry (models are unique by vendor + PID list).
+    /// Same registry entry. Table models are unique by vendor + PID list (a
+    /// `const` entry may sit at several addresses); runtime-probed ones are
+    /// leaked once each and compared by address, since a device's generic and
+    /// specific model share its IDs.
     pub fn same(&self, other: &Model) -> bool {
+        self.same_ids(other) && (std::ptr::eq(self, other) || self.listed())
+    }
+
+    /// Same vendor + PID list: the same physical device, maybe another model.
+    pub fn same_ids(&self, other: &Model) -> bool {
         self.vendor_id == other.vendor_id && self.product_ids == other.product_ids
+    }
+
+    /// A table entry, not a runtime-probed model (those exist only for
+    /// VID:PIDs no table lists).
+    fn listed(&self) -> bool {
+        models().any(|m| {
+            m.vendor_id == self.vendor_id
+                && self.product_ids.iter().any(|p| m.product_ids.contains(p))
+        })
     }
 
     /// PIDs the remap engine should treat as this device: the model's own,
@@ -414,8 +431,9 @@ const COLOR_KEYS: [SettingKey; 3] = [SettingKey::ColorR, SettingKey::ColorG, Set
 /// three channels: the other channels are stored first, so one `set` writes
 /// the lighting once. A changed channel goes through `set`, so its own change
 /// checks (e.g. what save mode stores) see the change, and its value shows
-/// whether `set` rolled back; the stored channels then roll back with it.
-/// Anything but distinct colour channels is set one by one.
+/// whether `set` rolled back; the stored channels then roll back with it, and
+/// the old colour is sent again (the lighting `set` restored already held the
+/// other new channels). Anything but distinct colour channels is set one by one.
 pub fn set_colors<A: DeviceAdapter>(
     a: &mut A,
     values: &[(SettingKey, SettingValue)],
@@ -429,9 +447,15 @@ pub fn set_colors<A: DeviceAdapter>(
         return set_each(a, values);
     }
     let before: Vec<SettingsMap> = maps(a).into_iter().map(|m| m.clone()).collect();
+    let restore = |a: &mut A| {
+        for (m, b) in maps(a).into_iter().zip(&before) {
+            *m = b.clone();
+        }
+    };
+    let changed = |k: SettingKey, v: &SettingValue| get_setting(&before[0], k) != Some(v);
     let last = values
         .iter()
-        .rposition(|(k, v)| get_setting(&before[0], *k) != Some(v))
+        .rposition(|(k, v)| changed(*k, v))
         .unwrap_or(values.len() - 1);
     for (k, v) in values[..last].iter().chain(&values[last + 1..]) {
         for m in maps(a) {
@@ -439,13 +463,39 @@ pub fn set_colors<A: DeviceAdapter>(
         }
     }
     let (key, value) = &values[last];
-    let result = a.set(*key, value.clone());
-    if result.is_err() && get_setting(&*maps(a)[0], *key) != Some(value) {
-        for (m, b) in maps(a).into_iter().zip(before) {
-            *m = b;
-        }
+    let Err(e) = a.set(*key, value.clone()) else {
+        return Ok(());
+    };
+    if get_setting(&*maps(a)[0], *key) == Some(value) {
+        return Err(e);
     }
-    result
+    restore(a);
+    if !values[..last].iter().any(|(k, v)| changed(*k, v)) {
+        return Err(e);
+    }
+    // Sent as a change back from the new value (preferably a channel that
+    // changed), so the driver writes it like any change (save mode stores it).
+    let resend = values
+        .iter()
+        .filter_map(|(k, v)| Some((*k, v, get_setting(&before[0], *k)?.clone())))
+        .max_by_key(|(_, v, old)| *v != old);
+    let restored = match resend {
+        Some((k, new, old)) => {
+            for m in maps(a) {
+                merge_setting(m, k, new.clone());
+            }
+            let r = a.set(k, old);
+            restore(a);
+            r
+        }
+        None => Err(anyhow::anyhow!("no previous colour is known")),
+    };
+    match restored {
+        Ok(()) => Err(e),
+        Err(re) => Err(anyhow::anyhow!(
+            "{e:#}; restoring the previous colour also failed ({re:#}), the device may show part of the change"
+        )),
+    }
 }
 
 /// Shown when a known device is plugged in but hidraw cannot be opened (usually permissions).
@@ -564,13 +614,36 @@ mod tests {
         }
     }
 
-    /// Stores what it is set to and counts lighting writes; a failing write
-    /// keeps the value (`revert` false) or puts the old one back.
+    #[test]
+    fn table_models_match_at_any_address_and_probed_ones_by_address() {
+        let m = super::models().next().unwrap();
+        let copy = Model { open: m.open, ..*m };
+        assert!(m.same(&copy) && copy.same(m));
+        // A device the generic probe accepted, then a specific one.
+        let probed = |name| Model {
+            vendor_id: 0x1d50,
+            product_ids: &[0x6a6b],
+            kind: DeviceKind::Mouse,
+            name,
+            usbfs: false,
+            multi: false,
+            open: m.open,
+        };
+        let (generic, specific) = (probed("Mouse"), probed("Mouse"));
+        assert!(generic.same(&generic) && generic.same_ids(&specific));
+        assert!(!generic.same(&specific));
+    }
+
+    /// Stores what it is set to and counts lighting writes; the next `fail`
+    /// writes fail and keep the value (`revert` false) or put the old one
+    /// back and send the lighting it started from again. `shown` is what the
+    /// device last got.
     struct Lamp {
         id: DeviceId,
         settings: SettingsMap,
+        shown: SettingsMap,
         writes: usize,
-        fail: bool,
+        fail: usize,
         revert: bool,
     }
 
@@ -585,12 +658,15 @@ mod tests {
             let before = self.settings.clone();
             merge_setting(&mut self.settings, key, value);
             self.writes += 1;
-            if self.fail {
+            if self.fail > 0 {
+                self.fail -= 1;
                 if self.revert {
                     self.settings = before;
+                    self.shown = self.settings.clone();
                 }
                 anyhow::bail!("unplugged");
             }
+            self.shown = self.settings.clone();
             Ok(())
         }
         fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
@@ -612,43 +688,60 @@ mod tests {
                 (SettingKey::ColorB, int(b)),
             ]
         };
-        let lamp = |fail, revert| Lamp {
-            id: DeviceId {
-                vendor_id: 1,
-                product_id: 2,
-                instance: "lamp".into(),
-            },
-            settings: rgb(9, 9, 9)
+        let lamp = |fail, revert| {
+            let settings: SettingsMap = rgb(9, 9, 9)
                 .into_iter()
                 .map(|(k, v)| (k.as_str().into(), v))
-                .collect(),
-            writes: 0,
-            fail,
-            revert,
+                .collect();
+            Lamp {
+                id: DeviceId {
+                    vendor_id: 1,
+                    product_id: 2,
+                    instance: "lamp".into(),
+                },
+                shown: settings.clone(),
+                settings,
+                writes: 0,
+                fail,
+                revert,
+            }
         };
-        let stored = |a: &Lamp| {
-            [SettingKey::ColorR, SettingKey::ColorG, SettingKey::ColorB]
-                .map(|k| get_setting(&a.settings, k).and_then(|v| v.as_int()))
-        };
+        let channels =
+            |m: &SettingsMap| COLOR_KEYS.map(|k| get_setting(m, k).and_then(|v| v.as_int()));
+        let stored = |a: &Lamp| channels(&a.settings);
 
-        let mut a = lamp(false, true);
+        let mut a = lamp(0, true);
         a.set_many(&rgb(1, 2, 3)).unwrap();
         assert_eq!((a.writes, stored(&a)), (1, [Some(1), Some(2), Some(3)]));
         // Only the first channel changes: it is the one `set` sees.
         a.set_many(&rgb(4, 2, 3)).unwrap();
         assert_eq!((a.writes, stored(&a)), (2, [Some(4), Some(2), Some(3)]));
 
-        // A failed write the driver rolls back takes the whole colour back.
-        let mut a = lamp(true, true);
+        // A failed write the driver rolls back takes the whole colour back,
+        // on the device too: the old colour is sent again.
+        let mut a = lamp(1, true);
         assert!(a.set_many(&rgb(1, 9, 3)).is_err());
-        assert_eq!((a.writes, stored(&a)), (1, [Some(9); 3]));
+        assert_eq!((a.writes, stored(&a)), (2, [Some(9); 3]));
+        assert_eq!(channels(&a.shown), [Some(9); 3]);
+        // A single changed channel: the driver's own rollback is enough.
+        let mut a = lamp(1, true);
+        assert!(a.set_many(&rgb(9, 9, 3)).is_err());
+        assert_eq!((a.writes, channels(&a.shown)), (1, [Some(9); 3]));
+        // Sending it again fails too: the error says so.
+        let mut a = lamp(2, true);
+        let e = a.set_many(&rgb(1, 9, 3)).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("restoring the previous colour also failed"),
+            "{e:#}"
+        );
+        assert_eq!(stored(&a), [Some(9); 3]);
         // A driver that keeps a failed value keeps the whole colour.
-        let mut a = lamp(true, false);
+        let mut a = lamp(1, false);
         assert!(a.set_many(&rgb(1, 9, 3)).is_err());
         assert_eq!((a.writes, stored(&a)), (1, [Some(1), Some(9), Some(3)]));
 
         // Anything else is one `set` per value.
-        let mut a = lamp(false, true);
+        let mut a = lamp(0, true);
         let mixed = [
             (SettingKey::Brightness, int(50)),
             (SettingKey::ColorR, int(1)),

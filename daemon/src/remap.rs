@@ -111,6 +111,8 @@ impl DevState {
 struct EngineInner {
     paths: ConfigPaths,
     devices: Vec<DevState>,
+    /// Number of the last capture / record session started (one runs at a time).
+    session: u64,
 }
 
 impl EngineInner {
@@ -141,6 +143,7 @@ impl RemapEngine {
         let inner = Arc::new(Mutex::new(EngineInner {
             paths,
             devices: Vec::new(),
+            session: 0,
         }));
         let edits = Arc::new(Mutex::new(()));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -288,8 +291,11 @@ impl RemapEngine {
         let mut guard = lock(&self.inner);
         let d = &mut guard.devices[idx];
         d.bindings = next;
-        if d.capturing.take().is_some() {
+        if let Some(role) = d.capturing.take() {
             d.capture_source = None;
+            if role == CaptureRole::Record {
+                d.recorded.clear();
+            }
             self.send(Cmd::CancelCapture { idx })?;
         }
         self.send(Cmd::SetBindings {
@@ -299,12 +305,14 @@ impl RemapEngine {
         Ok(d.snapshot())
     }
 
+    /// Start listening; also returns the session's number (for
+    /// [`Self::cancel_session`]).
     pub fn start_capture(
         &self,
         device_id: DeviceId,
         role: CaptureRole,
         source: Option<EvdevKey>,
-    ) -> Result<DeviceRemaps> {
+    ) -> Result<(DeviceRemaps, u64)> {
         if role == CaptureRole::Target && source.is_none() {
             anyhow::bail!("target capture needs a source button");
         }
@@ -327,6 +335,8 @@ impl RemapEngine {
                 let _ = self.events.send(AdapterEvent::RemapsUpdated(d.snapshot()));
             }
         }
+        g.session += 1;
+        let session = g.session;
         let d = &mut g.devices[idx];
         d.capturing = Some(role);
         d.capture_source = if role == CaptureRole::Target {
@@ -340,14 +350,32 @@ impl RemapEngine {
         }
         let snap = d.snapshot();
         self.send(Cmd::StartCapture { idx })?;
-        Ok(snap)
+        Ok((snap, session))
     }
 
     /// Stop listening. For a record session `keep` stores the take in `recorded`.
     pub fn cancel_capture(&self, device_id: DeviceId, keep: bool) -> Result<DeviceRemaps> {
         let mut g = lock(&self.inner);
         let idx = g.find(&device_id)?;
-        let d = &mut g.devices[idx];
+        self.stop_capture(&mut g.devices[idx], idx, keep)
+    }
+
+    /// Stop session `session` (from [`Self::start_capture`]) if it still
+    /// runs, dropping its take; None when it has ended or another started.
+    pub fn cancel_session(
+        &self,
+        device_id: DeviceId,
+        session: u64,
+    ) -> Result<Option<DeviceRemaps>> {
+        let mut g = lock(&self.inner);
+        let idx = g.find(&device_id)?;
+        if g.session != session || g.devices[idx].capturing.is_none() {
+            return Ok(None);
+        }
+        self.stop_capture(&mut g.devices[idx], idx, false).map(Some)
+    }
+
+    fn stop_capture(&self, d: &mut DevState, idx: usize, keep: bool) -> Result<DeviceRemaps> {
         if d.capturing.take() == Some(CaptureRole::Record) {
             d.recorded = if keep {
                 finish_recording(std::mem::take(&mut d.recorded), true)
@@ -2050,6 +2078,61 @@ mod tests {
         d.last_error = None;
         assert!(d.error_event(Some("grab: busy")).is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An engine with one attached keyboard no input node belongs to.
+    fn engine(name: &str) -> (RemapEngine, ConfigPaths, DeviceId) {
+        let root = std::env::temp_dir().join(format!("hako-remap-{name}-{}", std::process::id()));
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root,
+        };
+        paths.ensure().unwrap();
+        let engine = RemapEngine::start(paths.clone(), broadcast::channel(64).0);
+        let id = DeviceId {
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            instance: "x".into(),
+        };
+        engine.attach(id.clone(), DeviceKind::Keyboard, vec![0x5678], "Keyboard");
+        (engine, paths, id)
+    }
+
+    #[test]
+    fn a_closed_connection_stops_only_its_own_capture() {
+        let (engine, paths, id) = engine("session");
+        let (_, first) = engine
+            .start_capture(id.clone(), CaptureRole::Source, None)
+            .unwrap();
+        // It ended on its own (captured / Esc / timeout), then another started.
+        lock(&engine.inner).devices[0].capturing = None;
+        let (_, second) = engine
+            .start_capture(id.clone(), CaptureRole::Source, None)
+            .unwrap();
+        assert!(engine.cancel_session(id.clone(), first).unwrap().is_none());
+        assert!(engine.snapshot(&id).unwrap().capturing.is_some());
+        let snap = engine.cancel_session(id.clone(), second).unwrap().unwrap();
+        assert!(snap.capturing.is_none());
+        engine.shutdown();
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    #[test]
+    fn editing_bindings_mid_recording_drops_the_take() {
+        let (engine, paths, id) = engine("edit-record");
+        engine
+            .start_capture(id.clone(), CaptureRole::Record, None)
+            .unwrap();
+        lock(&engine.inner).devices[0].recorded = vec![step(A, false, 0), step(A, true, 40)];
+        let snap = engine
+            .set_binding(id.clone(), RemapBinding::tap(EvdevKey(30), B))
+            .unwrap();
+        assert!(snap.capturing.is_none() && snap.recorded.is_empty());
+        engine.shutdown();
+        let _ = std::fs::remove_dir_all(paths.root);
     }
 
     #[test]

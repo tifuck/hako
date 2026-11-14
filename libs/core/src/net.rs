@@ -5,6 +5,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -94,6 +95,10 @@ pub struct Peer {
     /// Receive buffer for its audio.
     #[serde(default = "default_jitter")]
     pub jitter_ms: u32,
+    /// `ip:port` (IPv4) of its last session: reconnects try it when no
+    /// beacon is heard, also after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<SocketAddr>,
 }
 
 fn default_jitter() -> u32 {
@@ -110,9 +115,12 @@ pub enum NetOp {
     SetName {
         name: String,
     },
-    /// Dial `address` (`host` or `host:port`) and ask to pair.
+    /// Dial `address` (`host` or `host:port`) and ask to pair. `key`: the
+    /// Nearby machine's key that must answer (`None`: a typed address).
     Pair {
         address: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
     },
     /// A pending request by peer id: an incoming one is accepted or denied;
     /// an outgoing one is cancelled (`accept: false`).
@@ -160,11 +168,14 @@ impl NetFile {
         Ok(())
     }
 
-    /// Pin `peer` (new, or a known key under a new name).
+    /// Pin `peer` (new, or a known key under a new name or address).
     pub fn trust(&mut self, peer: Peer) -> Result<(), String> {
         let mut next = self.clone();
         match next.peers.iter_mut().find(|p| p.key == peer.key) {
-            Some(slot) => slot.name = peer.name,
+            Some(slot) => {
+                slot.name = peer.name;
+                slot.address = peer.address;
+            }
             None => next.peers.push(peer),
         }
         next.validate()?;
@@ -199,6 +210,9 @@ impl NetFile {
             }
             validate_name(&p.name)?;
             validate_jitter(p.jitter_ms)?;
+            if p.address.is_some_and(|a| !a.is_ipv4() || a.port() == 0) {
+                return Err(format!("peer {:?}: address must be IPv4 ip:port", p.id));
+            }
         }
         Ok(())
     }
@@ -349,6 +363,9 @@ pub struct LinkStats {
 pub struct NearbyPeer {
     pub id: String,
     pub name: String,
+    /// Its announced key, for `NetOp::Pair` (empty from older daemons).
+    #[serde(default)]
+    pub key: String,
     /// `ip:port` to pass to `NetOp::Pair`.
     pub address: String,
 }
@@ -376,6 +393,7 @@ mod tests {
             name: "Desktop".into(),
             key: KEY.into(),
             jitter_ms: DEFAULT_JITTER_MS,
+            address: None,
         }
     }
 
@@ -416,6 +434,7 @@ mod tests {
             NetOp::Forget { id: "nope".into() },
             NetOp::Pair {
                 address: "10.0.0.2".into(),
+                key: None,
             },
         ] {
             assert!(f.apply(&bad).is_err(), "{bad:?}");
@@ -430,6 +449,9 @@ mod tests {
         let mut bad = peer();
         bad.id = "ffffffffffffffff".into();
         assert!(f.trust(bad).is_err(), "id not from key");
+        let mut bad = peer();
+        bad.address = Some("[::1]:47821".parse().unwrap());
+        assert!(f.trust(bad).is_err(), "IPv6 address");
     }
 
     #[test]
@@ -437,6 +459,12 @@ mod tests {
         let mut f = NetFile::default();
         f.trust(peer()).unwrap();
         let text = toml::to_string_pretty(&f).unwrap();
+        assert_eq!(toml::from_str::<NetFile>(&text).unwrap(), f);
+        let mut moved = peer();
+        moved.address = Some("192.168.1.20:47821".parse().unwrap());
+        f.trust(moved).unwrap();
+        let text = toml::to_string_pretty(&f).unwrap();
+        assert!(text.contains(r#"address = "192.168.1.20:47821""#), "{text}");
         assert_eq!(toml::from_str::<NetFile>(&text).unwrap(), f);
         let old: NetFile = toml::from_str("version = 1\n").unwrap();
         assert_eq!(old, NetFile::default());
@@ -452,6 +480,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<PatchNetParams>(&json).unwrap(),
             patch
+        );
+        let older_ui = r#"{"op":"pair","address":"10.0.0.2"}"#;
+        assert_eq!(
+            serde_json::from_str::<NetOp>(older_ui).unwrap(),
+            NetOp::Pair {
+                address: "10.0.0.2".into(),
+                key: None
+            }
         );
         let state = NetState {
             enabled: true,

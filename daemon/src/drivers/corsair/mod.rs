@@ -572,7 +572,10 @@ impl Peripheral {
         self.last_battery = Some(Instant::now());
         match self.backend.battery() {
             Ok(b) => {
-                self.failures = 0;
+                // No battery means nothing was exchanged: proves nothing.
+                if b.is_some() {
+                    self.failures = 0;
+                }
                 self.batteries = b.into_iter().collect();
                 if let Some(up) = self.backend.mic_up() {
                     merge_setting(
@@ -923,6 +926,10 @@ mod tests {
         }
         fn report_rate(&mut self) -> Option<u32> {
             Some(1000)
+        }
+        /// Never answered, like a hung device.
+        fn keepalive(&mut self) -> Result<()> {
+            anyhow::bail!("no reply")
         }
         /// Refuses 250 Hz, like a device whose read-back differs.
         fn store(&mut self, writes: &[(u8, u32)]) -> Result<()> {
@@ -1317,6 +1324,23 @@ mod tests {
         assert!(rate.persistent && rate.blocked.is_none() && !rate.read_only);
         let hz: Vec<_> = rate.options.iter().map(|o| o.value.clone()).collect();
         assert_eq!(hz, [125, 250, 500, 1000].map(SettingValue::Int));
+        let _ = std::fs::remove_dir_all(&p.paths.root);
+    }
+
+    /// A battery-less device whose keepalive fails is dropped: the battery
+    /// poll exchanges nothing, so it does not count as an answer.
+    #[test]
+    fn hung_wired_device_is_dropped() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut p = mouse(log);
+        let long_ago = Instant::now() - Duration::from_secs(60);
+        for _ in 0..MAX_FAILURES {
+            assert!(p.snapshot().connected);
+            p.last_keepalive = long_ago;
+            p.last_battery = Some(long_ago);
+            p.tick().unwrap();
+        }
+        assert!(!p.snapshot().connected);
         let _ = std::fs::remove_dir_all(&p.paths.root);
     }
 

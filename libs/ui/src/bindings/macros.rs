@@ -264,10 +264,12 @@ fn step_list(ui: &mut Ui, id: egui::Id, draft: &mut Draft) {
                 });
                 if dragging {
                     let resp = ui.interact(row.response.rect, id.with(("drop", i)), Sense::hover());
-                    if resp.dnd_hover_payload::<StepDrag>().is_some() {
+                    if let Some(from) = resp.dnd_hover_payload::<StepDrag>() {
+                        // A step dragged down lands after this row, up before it.
                         let r = row.response.rect;
+                        let y = if from.0 < i { r.bottom() } else { r.top() };
                         ui.painter().line_segment(
-                            [r.left_top(), r.right_top()],
+                            [pos2(r.left(), y), pos2(r.right(), y)],
                             Stroke::new(2.0_f32, pal().accent),
                         );
                     }

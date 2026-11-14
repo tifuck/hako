@@ -11,7 +11,6 @@ use hako_core::ipc::{
     SubscribeMetersParams, MAX_METER_TARGETS,
 };
 use hako_core::protocol::AdapterEvent;
-use hako_core::remap::StartCaptureParams;
 use hako_core::{read_json_frame, write_json_frame};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -100,12 +99,12 @@ async fn handle_client(mut stream: UnixStream, hub: Arc<DaemonHub>) -> Result<()
     result
 }
 
-/// Request loop of one connection. `capture` tracks the device of the last
-/// capture this connection started.
+/// Request loop of one connection. `capture` tracks the device and session
+/// of the last capture this connection started.
 async fn serve_requests(
     stream: &mut UnixStream,
     hub: &DaemonHub,
-    capture: &mut Option<DeviceId>,
+    capture: &mut Option<(DeviceId, u64)>,
 ) -> Result<()> {
     loop {
         let v = match read_json_frame(stream).await {
@@ -184,18 +183,23 @@ async fn serve_requests(
             break;
         }
 
-        let method = req.method;
-        let started = (method == Method::StartCapture)
-            .then(|| serde_json::from_value::<StartCaptureParams>(req.params.clone()).ok())
-            .flatten();
-        let resp = hub.handle(req).await;
-        if resp.ok {
-            match method {
-                Method::StartCapture => *capture = started.map(|p| p.device_id),
-                Method::CancelCapture => *capture = None,
-                _ => {}
+        let resp = match req.method {
+            Method::StartCapture => {
+                let (resp, started) = hub.start_capture(req);
+                if started.is_some() {
+                    *capture = started;
+                }
+                resp
             }
-        }
+            Method::CancelCapture => {
+                let resp = hub.handle(req).await;
+                if resp.ok {
+                    *capture = None;
+                }
+                resp
+            }
+            _ => hub.handle(req).await,
+        };
         write_json_frame(stream, &resp).await?;
     }
     Ok(())

@@ -13,7 +13,8 @@
 //!
 //! DPI: `dpi_stage_1..N` are the onboard stages, `dpi_stage_active` the stage
 //! the DPI button selected and `dpi` mirrors the active stage's value (the
-//! active stage is re-read every few seconds, as the button changes it).
+//! active stage is re-read on connect and every few seconds, as the button
+//! changes it; it is never pushed back on connect).
 
 pub use super::mouse_models::{find, find_omni, MouseSpec};
 use super::protocol::{self as p, Battery, Exchange, Lod, Transport, VID};
@@ -142,7 +143,8 @@ impl MouseAdapter {
     }
 
     /// Take unset performance values from the device, then push every setting.
-    /// Runs on open and whenever a wireless mouse comes back.
+    /// The active DPI stage is never pushed: the mouse's is adopted (see
+    /// [`adopt`]). Runs on open and whenever a wireless mouse comes back.
     fn connect(&mut self) {
         if self.spec.battery != Battery::None {
             if let Err(e) = self.poll_battery() {
@@ -153,17 +155,11 @@ impl MouseAdapter {
         let mut errors = Vec::new();
         let spec = self.spec;
         match self.t().and_then(|t| read_performance(spec, t)) {
-            Ok(hw) => {
-                for (k, v) in hw {
-                    self.settings.entry(k).or_insert(v);
-                }
-            }
+            Ok(hw) => adopt(spec, &mut self.settings, hw),
             Err(e) => errors.push(format!("read settings: {e}")),
         }
         use SettingKey::*;
         let keys = STAGE_KEYS.into_iter().chain([
-            DpiStageActive,
-            Dpi,
             ReportRate,
             Debounce,
             AngleSnapping,
@@ -240,22 +236,10 @@ impl MouseAdapter {
             d.zero_based,
         );
         if int_of(&self.settings, SettingKey::DpiStageActive, 0) != i64::from(stage) {
-            self.mirror_active(stage);
+            mirror_active(&mut self.settings, stage);
             self.persist()?;
         }
         Ok(())
-    }
-
-    /// Record `stage` as active and copy its DPI into `dpi`.
-    fn mirror_active(&mut self, stage: u8) {
-        merge_setting(
-            &mut self.settings,
-            SettingKey::DpiStageActive,
-            SettingValue::Int(stage.into()),
-        );
-        if let Some(v) = get_setting(&self.settings, stage_key(stage)).cloned() {
-            merge_setting(&mut self.settings, SettingKey::Dpi, v);
-        }
     }
 
     fn apply(&mut self, key: SettingKey) -> Result<()> {
@@ -288,7 +272,7 @@ impl MouseAdapter {
                 let stage = u8::try_from(stage).context("no such DPI stage")?;
                 let cmd = p::set_active_stage(stage, d.zero_based)?;
                 self.t()?.transact(&cmd)?;
-                self.mirror_active(stage);
+                mirror_active(&mut self.settings, stage);
                 Ok(())
             }
             SettingKey::ReportRate => {
@@ -389,6 +373,37 @@ impl MouseAdapter {
             .copied()
             .unwrap_or(self.id.product_id);
         hako_core::config::save_device_settings(&self.paths, VID, config_pid, &self.settings)
+    }
+}
+
+/// Record `stage` as active and copy its DPI into `dpi`.
+fn mirror_active(settings: &mut SettingsMap, stage: u8) {
+    merge_setting(
+        settings,
+        SettingKey::DpiStageActive,
+        SettingValue::Int(stage.into()),
+    );
+    match get_setting(settings, stage_key(stage)).cloned() {
+        Some(v) => merge_setting(settings, SettingKey::Dpi, v),
+        None => {
+            settings.remove(SettingKey::Dpi.as_str());
+        }
+    }
+}
+
+/// Take the values read from the mouse (`hw`) for unset keys. The active
+/// stage is always the mouse's, as the DPI button may have moved it while
+/// hakod was off or the mouse asleep (also on models with a stage dropdown:
+/// the stage poll treats the button as the truth too), and `dpi` follows that
+/// stage, so a stale saved `dpi` is never written into it.
+fn adopt(spec: &MouseSpec, settings: &mut SettingsMap, hw: SettingsMap) {
+    let stage = get_setting(&hw, SettingKey::DpiStageActive).and_then(|v| v.as_int());
+    for (k, v) in hw {
+        settings.entry(k).or_insert(v);
+    }
+    let active = spec.dpi.is_some_and(|d| d.active);
+    if let Some(stage) = stage.and_then(|s| u8::try_from(s).ok()).filter(|_| active) {
+        mirror_active(settings, stage);
     }
 }
 
@@ -778,6 +793,39 @@ mod tests {
             p::set_dpi(1, 26_000, 1, None),
             vec![0x51, 0x31, 0x00, 0x00, 0x8f, 0x65]
         );
+    }
+
+    #[test]
+    fn connect_adopts_the_mouses_active_stage() {
+        // Keris Wireless: active-stage DPI, no stage dropdown.
+        let keris = find(0x1960).unwrap();
+        let int = |m: &SettingsMap, k| get_setting(m, k).and_then(|v| v.as_int());
+        let mut saved = SettingsMap::new();
+        for (k, v) in [
+            (SettingKey::DpiStage1, 800),
+            (SettingKey::DpiStage2, 1600),
+            (SettingKey::DpiStageActive, 1),
+            (SettingKey::Dpi, 800),
+        ] {
+            merge_setting(&mut saved, k, SettingValue::Int(v));
+        }
+        // The DPI button moved the mouse to stage 2 while hakod was off.
+        let mut hw = SettingsMap::new();
+        for (k, v) in [
+            (SettingKey::DpiStage1, 400),
+            (SettingKey::DpiStage2, 3200),
+            (SettingKey::DpiStage3, 6400),
+            (SettingKey::DpiStageActive, 2),
+            (SettingKey::Dpi, 3200),
+        ] {
+            merge_setting(&mut hw, k, SettingValue::Int(v));
+        }
+        adopt(keris, &mut saved, hw);
+        assert_eq!(int(&saved, SettingKey::DpiStageActive), Some(2));
+        // The user's stage values win; `dpi` is the active one's.
+        assert_eq!(int(&saved, SettingKey::DpiStage2), Some(1600));
+        assert_eq!(int(&saved, SettingKey::Dpi), Some(1600));
+        assert_eq!(int(&saved, SettingKey::DpiStage3), Some(6400));
     }
 
     /// A mouse whose active profile answers `12 04 00` / `12 00` with fixed

@@ -358,12 +358,14 @@ fn starter(
 }
 
 /// The headset's pre-mixer line-in, from its device file: whether it was on
-/// (`aux_enabled`) and its capture level.
+/// (`aux_enabled`) and its capture level. A headset with several PIDs has a
+/// file per PID: any that has it on counts.
 fn legacy_line_in(paths: &ConfigPaths) -> (bool, Option<u8>) {
     let files = std::fs::read_dir(&paths.devices_dir)
         .into_iter()
         .flatten()
         .flatten();
+    let mut off = None;
     for file in files {
         let name = file.file_name();
         let Some((vid, pid)) = name
@@ -386,10 +388,13 @@ fn legacy_line_in(paths: &ConfigPaths) -> (bool, Option<u8>) {
             let percent = get_setting(&settings, SettingKey::AuxCapturePercent)
                 .and_then(|v| v.as_int())
                 .map(|p| p.clamp(0, 100) as u8);
-            return (on, percent);
+            if on {
+                return (true, percent);
+            }
+            off.get_or_insert((false, percent));
         }
     }
-    (false, None)
+    off.unwrap_or((false, None))
 }
 
 /// A line-in that was on moves into the mixer, once: only while the mixer
@@ -901,6 +906,27 @@ mod tests {
         assert!(!mixer_path(&paths).exists());
         mixer.shutdown();
         let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_line_in_on_in_any_headset_file_counts() {
+        let save = |paths: &ConfigPaths, pid, on: bool| {
+            let settings = [(
+                SettingKey::AuxEnabled.as_str().to_string(),
+                hako_core::SettingValue::Bool(on),
+            )]
+            .into();
+            hako_core::config::save_device_settings(paths, 0x1038, pid, &settings).unwrap();
+        };
+        // Both write orders: one of them lists the file with it off first.
+        for (n, order) in [[0x12e0, 0x12e5], [0x12e5, 0x12e0]].iter().enumerate() {
+            let paths = paths(&format!("legacy-two-{n}"));
+            for &pid in order {
+                save(&paths, pid, pid == 0x12e5);
+            }
+            assert_eq!(legacy_line_in(&paths), (true, None), "{order:x?}");
+            let _ = std::fs::remove_dir_all(&paths.root);
+        }
     }
 
     #[test]

@@ -7,7 +7,8 @@
 //! (hardware; builtin `mixer` nodes sum them with each source's trim), then
 //! the effect chain; its playback side `hako_in_<id>` carries the fader.
 //! Output: a child capturing on `hako_out_<id>` (the fader), the chain, an
-//! optional mono fold, and a playback side linked to the device sink
+//! optional mono fold (always for a one-channel sink, which gets one side),
+//! and a playback side linked to the device sink
 //! (hardware) or shown to apps as a microphone (virtual). Routes are links
 //! from input playback to output capture ports; PipeWire sums them.
 //!
@@ -185,10 +186,13 @@ fn source_trim(source: &Source) -> f32 {
 }
 
 /// The strips `scene` wants, plus problems of strips that cannot exist.
+/// A hardware output whose sink is `mono_sink` folds to mono: only one of
+/// its channels is linked there (`wanted_links`).
 fn strip_defs(
     scene: &Scene,
     naming: &Naming,
     latency: u32,
+    mono_sink: impl Fn(&str) -> bool,
 ) -> (Vec<(StripKey, StripDef)>, Vec<StripProblem>) {
     let mut defs = Vec::new();
     let mut problems = Vec::new();
@@ -223,9 +227,13 @@ fn strip_defs(
     }
     for output in &scene.outputs {
         let capture = format!("{}out_{}", naming.nodes, output.id);
-        let (playback, source) = match &output.kind {
-            OutputKind::Hardware { .. } => (format!("{capture}.play"), false),
-            OutputKind::Virtual { node_name } => (node_name.clone(), true),
+        let (playback, source, mono) = match &output.kind {
+            OutputKind::Hardware { sink, .. } => (
+                format!("{capture}.play"),
+                false,
+                output.mono || mono_sink(sink),
+            ),
+            OutputKind::Virtual { node_name } => (node_name.clone(), true, output.mono),
         };
         defs.push((
             (Side::Output, output.id.clone()),
@@ -237,7 +245,7 @@ fn strip_defs(
                 source,
                 trims: Vec::new(),
                 chain: output.chain.clone(),
-                mono: output.mono,
+                mono,
                 latency,
             },
         ));
@@ -460,6 +468,16 @@ fn pair(channels: &[&str]) -> Option<(String, String)> {
     }
 }
 
+/// A sink with one channel for both sides (its strip folds to mono).
+fn mono_sink(graph: &Graph, sink: &str) -> bool {
+    let channels: Vec<&str> = graph
+        .channels(sink, Direction::In)
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect();
+    pair(&channels).is_some_and(|(left, right)| left == right)
+}
+
 /// `(node, channel)`.
 type End = (String, String);
 
@@ -528,6 +546,11 @@ fn wanted_links(
             .map(|(_, c)| c)
             .collect();
         match pair(&channels) {
+            // One channel: PipeWire would sum both sides (+6 dB); the strip
+            // folds to mono instead (`mono_sink`), one side is enough.
+            Some((left, right)) if left == right => {
+                links.push((end(&def.playback, "FL"), end(sink, &left), key.clone()));
+            }
             Some((left, right)) => {
                 for (from, to) in [("FL", left), ("FR", right)] {
                     links.push((end(&def.playback, from), end(sink, &to), key.clone()));
@@ -551,7 +574,7 @@ pub struct DeviceInfo {
 
 /// Node names hako makes (its own prefixes) are never offered as devices,
 /// except network peers' nodes (`hako_net.`): they are the network racks.
-fn is_hako_node(name: &str) -> bool {
+pub(crate) fn is_hako_node(name: &str) -> bool {
     !name.starts_with(hako_core::net::NODE_PREFIX)
         && ["hako_", "Hako_", "hako-"]
             .iter()
@@ -639,7 +662,7 @@ pub fn devices(created: &[&str]) -> Result<(Vec<DeviceInfo>, Option<String>)> {
         if let (DeviceDirection::Source, Some(card)) = (info.device.direction, &info.alsa_card) {
             (info.device.inputs, info.device.capture) = capture_controls(&info.device.node, card);
             if info.device.capture {
-                info.device.capture_now = capture_level(card);
+                info.device.capture_now = capture_level(&info.device.node, card);
             }
         }
     }
@@ -1058,8 +1081,16 @@ impl MixerGraph {
     /// Bring the graph in line with `scene` (healing it when called again
     /// with the same scene); `dial` is the ChatMix dial (game, chat).
     pub fn reconcile(&mut self, scene: &Scene, dial: (f32, f32)) {
-        let (wanted, mut problems) = strip_defs(scene, &self.naming, self.latency);
-        let engine = match engine() {
+        let engine = engine();
+        let (wanted, mut problems) = match &engine {
+            Ok(engine) => engine.with_graph(|graph| {
+                strip_defs(scene, &self.naming, self.latency, |sink| {
+                    mono_sink(graph, sink)
+                })
+            }),
+            Err(_) => strip_defs(scene, &self.naming, self.latency, |_| false),
+        };
+        let engine = match engine {
             Ok(engine) => engine,
             Err(error) => {
                 self.running = false;
@@ -1454,6 +1485,18 @@ impl MixerGraph {
             let Some((id, card)) = present.get(node) else {
                 continue;
             };
+            // The settings are the card's: one node holds them (a second
+            // would take the first one's input for the card's own).
+            if let Some((other, claim)) = self.cards.iter().find(|(other, claim)| {
+                *other != node
+                    && claim.card == *card
+                    && present.get(*other).is_some_and(|(_, c)| c == card)
+            }) {
+                if claim.applied != *want {
+                    problems.push(problem(input, format!("its card is set for {other}")));
+                }
+                continue;
+            }
             let current = self.cards.get(node);
             if let Some(c) = current.filter(|c| c.node_id == *id && c.applied == *want) {
                 problems.extend(c.error.as_ref().map(|e| problem(&c.input, e.clone())));
@@ -1652,7 +1695,7 @@ mod tests {
     }
 
     fn defs(scene: &Scene) -> Vec<(StripKey, StripDef)> {
-        strip_defs(scene, &test_naming(), 256).0
+        strip_defs(scene, &test_naming(), 256, |_| false).0
     }
 
     fn def(scene: &Scene, side: Side, id: &str) -> StripDef {
@@ -1856,6 +1899,44 @@ mod tests {
         assert!(amixer_calls().is_empty(), "nothing to give back");
     }
 
+    /// Two capture nodes of one card: the first to claim it sets it, the
+    /// other leaves it alone (it would take the first one's input for the
+    /// card's own and give that back last).
+    #[test]
+    fn one_node_sets_a_card() {
+        use crate::tests::amixer_calls;
+        let (a, b) = (
+            "hako-test-card-a".to_string(),
+            "hako-test-card-b".to_string(),
+        );
+        let mut graph = MixerGraph::new(test_naming(), 256);
+        let line = |node: &String, item: &str| {
+            let want = (Some(item.to_string()), None);
+            (node.clone(), format!("in-{node}"), want)
+        };
+        let both = HashMap::from([
+            (a.clone(), (5, "7".to_string())),
+            (b.clone(), (6, "7".to_string())),
+        ]);
+        graph.sync_cards(&[line(&a, "Line")], &both);
+        amixer_calls();
+        let problems = graph.sync_cards(&[line(&a, "Line"), line(&b, "Line")], &both);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(amixer_calls().is_empty());
+        let problems = graph.sync_cards(&[line(&a, "Line"), line(&b, "Front Mic")], &both);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].strip, format!("in-{b}"));
+        assert!(amixer_calls().is_empty());
+        // The holder goes: the card's own input comes back, then the other
+        // node takes the card from there.
+        graph.sync_cards(&[line(&b, "Line")], &both);
+        let calls = amixer_calls();
+        assert_eq!(calls.first().unwrap(), "7 sset Input Source Rear Mic");
+        assert_eq!(calls.last().unwrap(), "7 sset Input Source Line");
+        graph.sync_cards(&[], &both);
+        assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
+    }
+
     #[test]
     fn a_fresh_strip_is_linked_once_its_fader_is_written() {
         let mut graph = MixerGraph::new(test_naming(), 256);
@@ -1964,7 +2045,7 @@ mod tests {
     fn a_hardware_input_without_sources_is_a_problem_not_a_strip() {
         let mut scene = scene();
         scene.inputs[1].kind = InputKind::Hardware { sources: vec![] };
-        let (defs, problems) = strip_defs(&scene, &test_naming(), 256);
+        let (defs, problems) = strip_defs(&scene, &test_naming(), 256, |_| false);
         assert!(!defs.iter().any(|(k, _)| k.1 == "desk"));
         assert_eq!(problems, [problem("desk", "no source selected")]);
     }
@@ -2060,7 +2141,7 @@ mod tests {
         assert!(steps.iter().all(|(_, s)| *s == Step::Keep));
 
         // A new latency rebuilds everything.
-        let relatency: Vec<_> = strip_defs(&before, &test_naming(), 128).0;
+        let relatency: Vec<_> = strip_defs(&before, &test_naming(), 128, |_| false).0;
         let (_, steps) = plan(&running, &relatency);
         assert!(steps.iter().all(|(_, s)| *s == Step::Build));
     }
@@ -2458,6 +2539,48 @@ mod tests {
             ]
         );
         assert!(!links.iter().any(|(_, t, _)| t.0 == "hako-test-x-out_B1"));
+    }
+
+    /// A one-channel sink (Bluetooth HFP, a speakerphone) gets the strip's
+    /// 0.5 / 0.5 fold on one link, not both sides summed into its port.
+    #[test]
+    fn a_mono_sink_gets_a_folded_downmix_on_one_link() {
+        let scene = scene();
+        let mut graph = graph_with(&[("mic-a", "Audio/Source", &[])]);
+        graph.nodes.insert(
+            50,
+            Node {
+                name: "headset".into(),
+                media_class: "Audio/Sink".into(),
+                props: HashMap::new(),
+            },
+        );
+        graph.ports.insert(
+            51,
+            Port {
+                node: 50,
+                name: "playback_MONO".into(),
+                direction: Direction::In,
+                channel: "MONO".into(),
+            },
+        );
+        assert!(mono_sink(&graph, "headset"));
+        assert!(!mono_sink(
+            &graph_with(&[("headset", "Audio/Sink", &[])]),
+            "headset"
+        ));
+        let (defs, _) = strip_defs(&scene, &test_naming(), 256, |s| mono_sink(&graph, s));
+        let up: BTreeMap<_, _> = defs.into_iter().collect();
+        let a1 = &up[&(Side::Output, "A1".to_string())];
+        assert!(a1.mono, "folds although the output's mono is off");
+        assert!(!up[&(Side::Output, "B1".to_string())].mono);
+        let config = strip_config(a1, &test_naming(), None).unwrap();
+        assert!(config.contains("control = { \"Gain 1\" = 0.5 \"Gain 2\" = 0.5 }"));
+        let (links, _) = wanted_links(&scene, &up, &graph);
+        let to_sink: Vec<_> = links.iter().filter(|(_, t, _)| t.0 == "headset").collect();
+        assert_eq!(to_sink.len(), 1, "{to_sink:?}");
+        assert_eq!(to_sink[0].0, end("hako-test-x-out_A1.play", "FL"));
+        assert_eq!(to_sink[0].1, end("headset", "MONO"));
     }
 
     // ── live ─────────────────────────────────────────────────────────

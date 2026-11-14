@@ -191,6 +191,11 @@ fn apply_xtd(b: &[u8], change: Change) -> Result<Vec<u8>> {
                 i < 5 && (min..=max).contains(&dpi) && dpi % step == 0,
                 "DPI {dpi} is not a Kone XTD value"
             );
+            ensure!(
+                out[6] & (1 << i) != 0,
+                "stage {} is disabled in this profile",
+                i + 1
+            );
             let raw = (dpi / 50) as u8;
             out[7 + i] = raw;
             out[13 + i] = raw;
@@ -341,7 +346,7 @@ impl Mouse {
         read_active(dev, self.spec.family, PAUSE)
     }
 
-    /// Show `b`'s current DPI, report rate and (on the XTD) every stage.
+    /// Show `b`'s current DPI, report rate and (on the XTD) every enabled stage.
     fn show(&mut self, b: &[u8]) -> Result<()> {
         let (dpi, rate) = parse(self.spec.family, b).context("unexpected settings report")?;
         self.state.clear();
@@ -355,8 +360,10 @@ impl Mouse {
         }
         if self.spec.family == Family::Xtd {
             for (i, key) in STAGES.into_iter().enumerate() {
-                let v = i64::from(b[7 + i]) * 50;
-                merge_setting(&mut self.state, key, SettingValue::Int(v));
+                if b[6] & (1 << i) != 0 {
+                    let v = i64::from(b[7 + i]) * 50;
+                    merge_setting(&mut self.state, key, SettingValue::Int(v));
+                }
             }
             let active = i64::from(b[12]) + 1;
             merge_setting(
@@ -391,6 +398,11 @@ impl Mouse {
             None => m.persistent(),
         };
         let (min, max, step) = dpi_range(self.spec.family);
+        // The XTD shows only the stages its mask enables (see `show`); the
+        // others' placeholders list all five.
+        let enabled = |key: SettingKey| {
+            self.spec.family != Family::Xtd || self.state.contains_key(key.as_str())
+        };
         let mut c = vec![SettingMeta::readonly(Dpi, "Current DPI", 0.0, 12750.0).unit("dpi")];
         for (i, key) in STAGES.into_iter().enumerate() {
             c.push(gate(
@@ -401,14 +413,17 @@ impl Mouse {
                     max as f64,
                     step as f64,
                 )
-                .unit("dpi"),
+                .unit("dpi")
+                .hidden(!enabled(key)),
             ));
         }
         c.push(gate(SettingMeta::dropdown(
             DpiStageActive,
             "Active DPI stage",
-            (1..=5)
-                .map(|i| SettingOption::int(i, &i.to_string()))
+            (1..)
+                .zip(STAGES)
+                .filter(|&(_, key)| enabled(key))
+                .map(|(i, _)| SettingOption::int(i, &i.to_string()))
                 .collect(),
         )));
         c.push(gate(SettingMeta::dropdown(
@@ -748,7 +763,7 @@ mod tests {
 
     #[test]
     fn controls_offer_xtd_writes_and_block_the_rest() {
-        let make = |spec: &'static Spec<Family>| {
+        let make_with = |spec: &'static Spec<Family>, block: &[u8]| {
             let mut m = Mouse {
                 spec,
                 id: DeviceId {
@@ -762,12 +777,13 @@ mod tests {
                 last_error: None,
             };
             if spec.family == Family::Xtd {
-                m.show(&XTD_FACTORY).unwrap();
+                m.show(block).unwrap();
             } else {
                 merge_setting(&mut m.state, SettingKey::Dpi, SettingValue::Int(800));
             }
-            m.controls()
+            (m.controls(), m.state)
         };
+        let make = |spec| make_with(spec, &XTD_FACTORY).0;
         let xtd = make(&KONE_XTD);
         for c in &xtd {
             match c.key {
@@ -789,5 +805,22 @@ mod tests {
             change_for(SettingKey::DpiStageActive, &SettingValue::Int(3)).unwrap(),
             Change::Active(2)
         );
+
+        // Stages 1 and 3 enabled: the others are hidden, unset and unwritable.
+        let mut two = XTD_FACTORY;
+        two[6] = 0b00101;
+        let (c, state) = make_with(&KONE_XTD, &two);
+        let meta = |key| c.iter().find(|m| m.key == key).unwrap();
+        assert!(!meta(SettingKey::DpiStage3).hidden);
+        assert!(meta(SettingKey::DpiStage2).hidden);
+        assert!(!state.contains_key("dpi_stage_2"));
+        let active: Vec<_> = meta(SettingKey::DpiStageActive)
+            .options
+            .iter()
+            .map(|o| o.value.clone())
+            .collect();
+        assert_eq!(active, [1, 3].map(SettingValue::Int));
+        assert!(apply_xtd(&two, Change::Stage(1, 400)).is_err());
+        assert!(apply_xtd(&two, Change::Stage(2, 400)).is_ok());
     }
 }

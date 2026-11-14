@@ -247,6 +247,24 @@ fn link_dpi(s: &mut SettingsMap, key: SettingKey) {
     }
 }
 
+/// Set `key` in the saved (`user`) and shown (`settings`) values. Chosen
+/// stages imply the DPI: a stale saved one would land in the active stage on
+/// the next re-apply, so it goes; the shown one follows [`link_dpi`].
+fn record(
+    user: &mut SettingsMap,
+    settings: &mut SettingsMap,
+    key: SettingKey,
+    value: &SettingValue,
+) {
+    if key == SettingKey::DpiStageActive || STAGES.contains(&key) {
+        user.remove(SettingKey::Dpi.as_str());
+    }
+    for s in [user, settings] {
+        merge_setting(s, key, value.clone());
+        link_dpi(s, key);
+    }
+}
+
 /// A `33 02` reply that is a plausible DPI table: known rate code, the active
 /// stage enabled, every enabled stage's DPI in range.
 fn check_table(r: &[u8]) -> Result<()> {
@@ -779,14 +797,7 @@ impl DeviceAdapter for UniversalMouse {
             self.store(None)?;
         }
         let before = (self.user.clone(), self.settings.clone());
-        for s in [&mut self.user, &mut self.settings] {
-            // Chosen stages imply the DPI; a stale one would land in the active stage.
-            if key == SettingKey::DpiStageActive || STAGES.contains(&key) {
-                s.remove(SettingKey::Dpi.as_str());
-            }
-            merge_setting(s, key, value.clone());
-            link_dpi(s, key);
-        }
+        record(&mut self.user, &mut self.settings, key, &value);
         // An asleep mouse gets everything on its next link-up instead.
         let applied = key != SettingKey::SaveToDevice && self.online;
         if applied {
@@ -1234,6 +1245,23 @@ mod tests {
         merge_setting(&mut s, SettingKey::DpiStage2, int(500));
         link_dpi(&mut s, SettingKey::DpiStage2);
         assert_eq!(get_setting(&s, SettingKey::Dpi), Some(&int(2000)));
+    }
+
+    #[test]
+    fn editing_another_stage_keeps_the_shown_dpi() {
+        let int = SettingValue::Int;
+        let mut shown = SettingsMap::new();
+        merge_setting(&mut shown, SettingKey::DpiStage3, int(1600));
+        merge_setting(&mut shown, SettingKey::DpiStageActive, int(3));
+        merge_setting(&mut shown, SettingKey::Dpi, int(1600));
+        let mut user = SettingsMap::new();
+        merge_setting(&mut user, SettingKey::Dpi, int(1600));
+        record(&mut user, &mut shown, SettingKey::DpiStage2, &int(500));
+        assert_eq!(get_setting(&shown, SettingKey::Dpi), Some(&int(1600)));
+        // The saved one has no active stage to follow: dropped.
+        assert_eq!(get_setting(&user, SettingKey::Dpi), None);
+        record(&mut user, &mut shown, SettingKey::DpiStage3, &int(800));
+        assert_eq!(get_setting(&shown, SettingKey::Dpi), Some(&int(800)));
     }
 
     #[test]

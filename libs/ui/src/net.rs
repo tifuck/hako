@@ -375,6 +375,7 @@ impl HakoAppUi {
                             {
                                 ops.push(NetOp::Pair {
                                     address: n.address.clone(),
+                                    key: (!n.key.is_empty()).then(|| n.key.clone()),
                                 });
                             }
                         });
@@ -398,7 +399,7 @@ impl HakoAppUi {
                         let enter =
                             edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if !address.is_empty() && (connect || enter) {
-                            ops.push(NetOp::Pair { address });
+                            ops.push(NetOp::Pair { address, key: None });
                             self.net.address.clear();
                         }
                     },

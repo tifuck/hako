@@ -71,15 +71,17 @@ const SET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// so the ticks in between succeed.
 const RECOVERED_AFTER: Duration = Duration::from_secs(60);
 
+type Reply = oneshot::Sender<Result<DeviceSnapshot>>;
+
 enum Cmd {
     Set {
         key: SettingKey,
         value: SettingValue,
-        reply: oneshot::Sender<Result<DeviceSnapshot>>,
+        reply: Reply,
     },
     SetMany {
         values: Vec<(SettingKey, SettingValue)>,
-        reply: oneshot::Sender<Result<DeviceSnapshot>>,
+        reply: Reply,
     },
     Shutdown(mpsc::Sender<()>),
 }
@@ -366,6 +368,14 @@ fn run(
             snap
         })
     };
+    // The hub announces a successful write; a failed one may still have
+    // changed the snapshot (e.g. the driver lost its device).
+    let settle = |result: Result<()>, snap: DeviceSnapshot, reply: Reply| {
+        if let (Some(snap), true) = (publish(snap.clone()), result.is_err()) {
+            let _ = events.send(AdapterEvent::Updated(snap));
+        }
+        let _ = reply.send(result.map(|()| snap));
+    };
     let mut next_tick = Instant::now() + adapter.tick_interval();
     // Tick error last pushed as an `Error` event, and when a tick last failed.
     let mut reported = None;
@@ -385,16 +395,14 @@ fn run(
             }
             Ok(Cmd::Set { key, value, reply }) => {
                 let result = set_checked(adapter.as_mut(), &mut gate, key, value);
-                publish(gate.view(adapter.as_ref()));
-                let _ = reply.send(result.map(|()| gate.view(adapter.as_ref())));
+                settle(result, gate.view(adapter.as_ref()), reply);
             }
             Ok(Cmd::SetMany { reply, .. }) if reply.is_closed() => {
                 info!("{}: dropped a batch nobody waits for", adapter.id().key());
             }
             Ok(Cmd::SetMany { values, reply }) => {
                 let result = set_many_checked(adapter.as_mut(), &mut gate, &values);
-                publish(gate.view(adapter.as_ref()));
-                let _ = reply.send(result.map(|()| gate.view(adapter.as_ref())));
+                settle(result, gate.view(adapter.as_ref()), reply);
             }
             Ok(Cmd::Shutdown(ack)) => {
                 adapter.shutdown();
@@ -852,6 +860,53 @@ mod tests {
         run(Box::new(a), gate, rx, shared, broadcast::channel(4).0);
         done.recv().unwrap();
         assert!(!Gate::load(paths.clone(), stem).allowed);
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    /// Loses its device on the first write.
+    struct Unplugged(Fake, bool);
+
+    impl DeviceAdapter for Unplugged {
+        fn id(&self) -> &DeviceId {
+            self.0.id()
+        }
+        fn snapshot(&self) -> DeviceSnapshot {
+            DeviceSnapshot {
+                connected: self.1,
+                ..self.0.snapshot()
+            }
+        }
+        fn set(&mut self, _: SettingKey, _: SettingValue) -> Result<()> {
+            self.1 = false;
+            bail!("unplugged")
+        }
+        fn tick(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn shutdown(&mut self) {}
+    }
+
+    #[test]
+    fn a_failed_set_that_changes_the_device_is_announced() {
+        let paths = temp_paths("failed-set");
+        let a = Unplugged(fake(), true);
+        let gate = Gate::load(paths.clone(), a.id().config_stem());
+        let shared = Arc::new(Mutex::new(gate.view(&a)));
+        let (tx, rx) = mpsc::channel();
+        let (reply, answer) = oneshot::channel();
+        let (key, value) = (SettingKey::Dpi, SettingValue::Int(400));
+        tx.send(Cmd::Set { key, value, reply }).unwrap();
+        tx.send(Cmd::Shutdown(mpsc::channel().0)).unwrap();
+        let (events, mut sub) = broadcast::channel(16);
+        run(Box::new(a), gate, rx, shared, events);
+        assert!(answer.blocking_recv().unwrap().is_err());
+        let mut updated = Vec::new();
+        while let Ok(ev) = sub.try_recv() {
+            if let AdapterEvent::Updated(s) = ev {
+                updated.push(s.connected);
+            }
+        }
+        assert_eq!(updated, [false]);
         let _ = std::fs::remove_dir_all(paths.root);
     }
 

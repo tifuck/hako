@@ -16,7 +16,7 @@
 //!   fn 1 read / fn 2 write, minutes).
 
 use crate::hid::HidrawDevice;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use hako_core::device::DeviceKind;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -430,6 +430,16 @@ pub fn ext_dpi_has_lod(flags: u8) -> bool {
     flags & 0x02 != 0
 }
 
+/// The lift-off byte a 0x2202 SetSensorDpi (fn 6) must carry so it keeps the
+/// device's: `known` (raw fn 5 params\[9\], last read back), else `read` (fn 5)
+/// now. Unreadable fails the write rather than guessing a lift-off distance.
+pub fn ext_dpi_lod(known: Option<u8>, read: impl FnOnce() -> Result<[u8; 20]>) -> Result<u8> {
+    match known {
+        Some(lod) => Ok(lod),
+        None => Ok(read().context("reading the lift-off distance")?[13]),
+    }
+}
+
 /// Extended report-rate index → Hz (Solaar ExtendedReportRate).
 pub const EXT_RR_HZ: [u32; 7] = [125, 250, 500, 1000, 2000, 4000, 8000];
 
@@ -492,10 +502,10 @@ impl MouseEffectKind {
         }
     }
     pub fn has_speed(self) -> bool {
-        matches!(self, Self::Pulse | Self::Breathe)
+        matches!(self, Self::Pulse | Self::Cycle | Self::Breathe)
     }
     pub fn has_color(self) -> bool {
-        self.has_speed() || self == Self::Static
+        matches!(self, Self::Static | Self::Pulse | Self::Breathe)
     }
 }
 
@@ -701,6 +711,27 @@ mod tests {
             &p[..10],
             &[0x11, 0xff, 0x09, 0x6a, 0x00, 0x03, 0x20, 0x03, 0x20, 0x01]
         );
+    }
+
+    #[test]
+    fn dpi_writes_keep_the_read_lift_off_byte() {
+        // Known (even outside 0..=2, as PRO X 2 reports 3): sent back as is.
+        let unread = || -> Result<[u8; 20]> { panic!("read again") };
+        assert_eq!(ext_dpi_lod(Some(3), unread).unwrap(), 3);
+        // Unknown: fn 5 is read first, params[9].
+        let mut r = [0u8; 20];
+        r[13] = 1;
+        assert_eq!(ext_dpi_lod(None, || Ok(r)).unwrap(), 1);
+        // Unreadable: the write fails instead of guessing.
+        assert!(ext_dpi_lod(None, || bail!("timeout")).is_err());
+    }
+
+    #[test]
+    fn cycle_has_speed_but_no_color() {
+        assert!(MouseEffectKind::Cycle.has_speed());
+        assert!(!MouseEffectKind::Cycle.has_color());
+        assert!(MouseEffectKind::Breathe.has_speed() && MouseEffectKind::Breathe.has_color());
+        assert!(!MouseEffectKind::Static.has_speed() && MouseEffectKind::Static.has_color());
     }
 
     #[test]

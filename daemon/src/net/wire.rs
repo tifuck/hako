@@ -332,18 +332,35 @@ pub fn read_control(stream: &mut impl Read, cipher: &Cipher, last: &mut u64) -> 
         .context("unreadable control frame")
 }
 
-/// A name from the network: printable, at most `MAX_NAME` characters,
-/// `fallback` when nothing is left.
+/// A name from the network: no control or invisible format characters
+/// (bidi overrides, zero-width, tags), trimmed, at most `MAX_NAME`
+/// characters, `fallback` when nothing is left.
 pub fn clean_name(name: &str, fallback: &str) -> String {
-    let name: String = name
+    let shown: String = name
         .chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_NAME)
+        .filter(|&c| !c.is_control() && !is_format(c))
         .collect();
-    match name.trim() {
+    let name: String = shown.trim().chars().take(MAX_NAME).collect();
+    match name.trim_end() {
         "" => fallback.to_string(),
         name => name.to_string(),
     }
+}
+
+/// Invisible formatting characters (Unicode `Cf`) a name could hide behind.
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
 }
 
 /// A discovery beacon: who is here and where its control port is.
@@ -555,5 +572,18 @@ pub(super) mod tests {
             HashMap::from([("fresh".to_string(), seen(1)), ("old".to_string(), seen(7))]);
         expire(&mut nearby, now);
         assert_eq!(nearby.keys().collect::<Vec<_>>(), ["fresh"]);
+    }
+
+    #[test]
+    fn names_lose_invisible_characters_and_leading_spaces_cost_nothing() {
+        let padded = format!("{}Workstation", " ".repeat(30));
+        assert_eq!(clean_name(&padded, "x"), "Workstation");
+        assert_eq!(
+            clean_name("\u{202E}moc.\u{200B}ab\u{E0041}\u{FEFF}d\u{2066}", "x"),
+            "moc.abd"
+        );
+        assert_eq!(clean_name("\u{200B} \u{00AD}", "x"), "x");
+        let long = format!(" {}", "n".repeat(40));
+        assert_eq!(clean_name(&long, "x"), "n".repeat(MAX_NAME));
     }
 }

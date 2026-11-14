@@ -169,17 +169,19 @@ fn fmt_value(meta: &SettingMeta, v: f32) -> String {
 }
 
 /// Snap DPI to a magnitude-appropriate step (50 < 1k, 100 < 10k, 1000 above,
-/// never finer than the device's step), kept inside the device's range.
-pub fn snap_dpi(v: f32, min: f32, max: f32, step: f32) -> f32 {
-    let magnitude: f32 = if v < 1000.0 {
+/// rounded up to a multiple of the device's step), then onto the device's
+/// grid and range.
+pub fn snap_dpi(meta: &SettingMeta, v: f64) -> Option<f64> {
+    let magnitude = if v < 1000.0 {
         50.0
     } else if v < 10000.0 {
         100.0
     } else {
         1000.0
     };
-    let step = magnitude.max(step);
-    ((v / step).round() * step).clamp(min, max)
+    let step = meta.step.filter(|s| *s > 0.0).unwrap_or(1.0);
+    let step = (magnitude / step).ceil() * step;
+    meta.snap((v / step).round() * step)
 }
 
 /// Slider that keeps a local draft while dragging and commits on release.
@@ -220,15 +222,17 @@ fn slider(
     if resp.changed() {
         // Only the user's input snaps; the device's own value shows as is.
         if dpi {
-            v = snap_dpi(v, min, max, meta.step.unwrap_or(1.0) as f32);
+            v = snap_dpi(meta, v.into()).map_or(v, |s| s as f32);
         }
         ui.ctx().data_mut(|m| m.insert_temp(id, v));
     }
     if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+        // The grid is computed in f64: an f32 0.7 is below a 0.7 minimum.
+        let n = meta.snap(v.into()).unwrap_or(v.into());
         let value = if int {
-            SettingValue::Int(v.round() as i64)
+            SettingValue::Int(n.round() as i64)
         } else {
-            SettingValue::Float(v as f64)
+            SettingValue::Float(n)
         };
         set(out, d, key, value);
     }
@@ -814,6 +818,7 @@ pub fn dpi(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec<Ui
         return;
     };
     let step = meta.step.unwrap_or(1.0).max(1.0) as f32;
+    let snap = |v: f32| meta.snap(v.into()).map_or(v, |s| s as f32);
     let server = num(d, key).unwrap_or(1600.0) as f32;
     let live = ui.ctx().data(|m| m.get_temp::<f32>(id)).unwrap_or(server);
     let commit = |ui: &Ui, out: &mut Vec<UiCommand>, v: f32| {
@@ -837,6 +842,7 @@ pub fn dpi(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec<Ui
                 ui.add(
                     egui::DragValue::new(&mut v)
                         .range(min..=max)
+                        .clamp_existing_to_range(false)
                         .speed(step.max(10.0))
                         .max_decimals(0)
                         .update_while_editing(false),
@@ -844,7 +850,7 @@ pub fn dpi(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec<Ui
             })
             .inner
             .on_hover_text("Drag sideways, or click to type an exact value");
-        let snapped = ((v / step).round() * step).clamp(min, max);
+        let snapped = snap(v);
         if resp.changed() {
             if resp.dragged() {
                 ui.ctx().data_mut(|m| m.insert_temp(id, snapped));
@@ -901,7 +907,7 @@ pub fn dpi(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec<Ui
             color,
         );
         if r.clicked() && !current {
-            commit(ui, out, mark as f32);
+            commit(ui, out, snap(mark as f32));
         }
     }
 }

@@ -310,12 +310,15 @@ impl MixerFile {
                 input,
                 source,
                 trim_db,
-            } => live.source(input, *source)?.trim_db = *trim_db,
+            } => {
+                live.balance_source(input, *source, *trim_db != 0.0)?
+                    .trim_db = *trim_db
+            }
             MixerOp::SetSourceMute {
                 input,
                 source,
                 mute,
-            } => live.source(input, *source)?.mute = *mute,
+            } => live.balance_source(input, *source, *mute)?.mute = *mute,
             MixerOp::SetSourceCapture {
                 input,
                 source,
@@ -429,7 +432,8 @@ impl Scene {
     /// An input with one source has one volume, its fader: the source's trim
     /// and mute (which only balance merged sources) fold into the strip. The
     /// trim sat before the effects, so gate and compressor thresholds move
-    /// with it and the strip sounds the same.
+    /// with it and the strip sounds the same; a trim the fader or a threshold
+    /// cannot absorb within its range stays on the source.
     pub fn normalize(&mut self) {
         for input in &mut self.inputs {
             let InputKind::Hardware { sources } = &mut input.kind else {
@@ -439,17 +443,27 @@ impl Scene {
                 continue;
             };
             input.mute |= std::mem::take(&mut source.mute);
-            let trim = std::mem::take(&mut source.trim_db);
+            let trim = source.trim_db;
             if trim == 0.0 || !trim.is_finite() {
                 continue;
             }
-            input.gain_db = (input.gain_db + trim).clamp(GAIN_MIN_DB, GAIN_MAX_DB);
+            let gain = input.gain_db + trim;
+            let thresholds_fit = input.chain.effects.iter().all(|e| match e.kind {
+                AuxEffectKind::NoiseGate { threshold_db, .. }
+                | AuxEffectKind::Compressor { threshold_db, .. } => {
+                    (-60.0..=0.0).contains(&(threshold_db - trim))
+                }
+                AuxEffectKind::Equalizer { .. } => true,
+            });
+            if !(GAIN_MIN_DB..=GAIN_MAX_DB).contains(&gain) || !thresholds_fit {
+                continue;
+            }
+            source.trim_db = 0.0;
+            input.gain_db = gain;
             for effect in &mut input.chain.effects {
                 match &mut effect.kind {
                     AuxEffectKind::NoiseGate { threshold_db, .. }
-                    | AuxEffectKind::Compressor { threshold_db, .. } => {
-                        *threshold_db = (*threshold_db - trim).clamp(-60.0, 0.0);
-                    }
+                    | AuxEffectKind::Compressor { threshold_db, .. } => *threshold_db -= trim,
                     AuxEffectKind::Equalizer { .. } => {}
                 }
             }
@@ -619,6 +633,24 @@ impl Scene {
             .iter()
             .find(|o| o.id == id)
             .ok_or_else(|| format!("no output {id:?}"))
+    }
+
+    /// A source to give its own trim or mute (`level`): only one of merged
+    /// sources, since a lone source's level is the strip's (`normalize`
+    /// folds it there, so setting it again would add up). Clearing is allowed.
+    fn balance_source(
+        &mut self,
+        input: &str,
+        index: usize,
+        level: bool,
+    ) -> Result<&mut Source, String> {
+        let lone = matches!(&self.input(input)?.kind, InputKind::Hardware { sources } if sources.len() == 1);
+        if lone && level {
+            return Err(format!(
+                "input {input} has one source: use the strip's fader and mute"
+            ));
+        }
+        self.source(input, index)
     }
 
     fn source(&mut self, input: &str, index: usize) -> Result<&mut Source, String> {
@@ -1114,18 +1146,30 @@ mod tests {
                 kind: AuxEffectKind::default_compressor(),
             },
         ];
-        m.apply(&MixerOp::SetSourceTrim {
-            input: "voice".into(),
-            source: 0,
-            trim_db: 4.0,
-        })
-        .unwrap();
-        m.apply(&MixerOp::SetSourceMute {
-            input: "voice".into(),
-            source: 0,
-            mute: true,
-        })
-        .unwrap();
+        // A lone source's level is set on the strip: a trim op would add
+        // up with every repeat, and a mute could not be taken back.
+        for op in [
+            MixerOp::SetSourceTrim {
+                input: "voice".into(),
+                source: 0,
+                trim_db: 4.0,
+            },
+            MixerOp::SetSourceMute {
+                input: "voice".into(),
+                source: 0,
+                mute: true,
+            },
+        ] {
+            assert!(m.apply(&op).is_err(), "{op:?}");
+        }
+        // One left from an older file or an unmerge folds in.
+        let mut voice = m.live.inputs[0].clone();
+        if let InputKind::Hardware { sources } = &mut voice.kind {
+            sources[0].trim_db = 4.0;
+            sources[0].mute = true;
+        }
+        let mut too_loud = voice.clone();
+        m.apply(&MixerOp::PutInput { input: voice }).unwrap();
         let voice = &m.live.inputs[0];
         assert_eq!((voice.gain_db, voice.mute), (4.0, true));
         let InputKind::Hardware { sources } = &voice.kind else {
@@ -1144,6 +1188,24 @@ mod tests {
             })
             .collect();
         assert_eq!(thresholds, [-49.0, -24.0]);
+
+        // A trim the fader cannot take in full stays on the source.
+        too_loud.gain_db = 10.0;
+        m.apply(&MixerOp::PutInput { input: too_loud }).unwrap();
+        let voice = &m.live.inputs[0];
+        let InputKind::Hardware { sources } = &voice.kind else {
+            unreachable!()
+        };
+        assert_eq!((voice.gain_db, voice.mute), (10.0, true));
+        assert_eq!((sources[0].trim_db, sources[0].mute), (4.0, false));
+        assert_eq!(voice.chain.effects[0].kind, AuxEffectKind::default_gate());
+        // Clearing it is allowed.
+        m.apply(&MixerOp::SetSourceTrim {
+            input: "voice".into(),
+            source: 0,
+            trim_db: 0.0,
+        })
+        .unwrap();
 
         // Merged sources keep their own balance.
         let mut merged = hw("pair", &["alsa_input.a", "alsa_input.b"], &[]);

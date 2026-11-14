@@ -457,17 +457,6 @@ fn controls(effect: KbEffectKind) -> Vec<SettingMeta> {
         SettingOption::text("left", "Left"),
         SettingOption::text("right", "Right"),
     ];
-    let has_speed = matches!(
-        effect,
-        KbEffectKind::Wave | KbEffectKind::Reactive | KbEffectKind::Starlight
-    );
-    let has_color = matches!(
-        effect,
-        KbEffectKind::Static
-            | KbEffectKind::Breathing
-            | KbEffectKind::Reactive
-            | KbEffectKind::Starlight
-    );
     let rate_opts = POLL_RATES
         .iter()
         .map(|&hz| SettingOption::int(i64::from(hz), &format!("{hz} Hz")))
@@ -481,10 +470,10 @@ fn controls(effect: KbEffectKind) -> Vec<SettingMeta> {
         SettingMeta::slider(Brightness, "Brightness", 0.0, 100.0, 1.0).unit("%"),
         SettingMeta::dropdown(Direction, "Direction", dir_opts)
             .hidden(effect != KbEffectKind::Wave),
-        SettingMeta::dropdown(Speed, "Speed", speed_opts).hidden(!has_speed),
-        SettingMeta::color(ColorR, "Red").hidden(!has_color),
-        SettingMeta::color(ColorG, "Green").hidden(!has_color),
-        SettingMeta::color(ColorB, "Blue").hidden(!has_color),
+        SettingMeta::dropdown(Speed, "Speed", speed_opts).hidden(!effect.has_speed()),
+        SettingMeta::color(ColorR, "Red").hidden(!effect.has_color()),
+        SettingMeta::color(ColorG, "Green").hidden(!effect.has_color()),
+        SettingMeta::color(ColorB, "Blue").hidden(!effect.has_color()),
         SettingMeta::toggle(SaveToDevice, "Save changes to device memory").persistent(),
     ]
 }
@@ -682,6 +671,19 @@ mod tests {
         for pct in 0..=100u8 {
             assert_eq!(pct_from_wire((u16::from(pct) * 255 / 100) as u8), pct);
         }
+    }
+
+    #[test]
+    fn wave_speed_is_fixed_so_hidden() {
+        let speed_hidden = |e| {
+            controls(e)
+                .iter()
+                .find(|m| m.key == SettingKey::Speed)
+                .unwrap()
+                .hidden
+        };
+        assert!(speed_hidden(KbEffectKind::Wave));
+        assert!(!speed_hidden(KbEffectKind::Reactive));
     }
 
     #[test]

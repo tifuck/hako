@@ -252,11 +252,24 @@ pub fn load_device_settings(paths: &ConfigPaths, vid: u16, pid: u16) -> Result<S
     let text = fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
     let file: DeviceConfigFile =
         toml::from_str(&text).with_context(|| format!("parse {}", p.display()))?;
-    Ok(file
-        .settings
-        .into_iter()
-        .map(|(k, v)| (normalize_key(k), v.into()))
-        .collect())
+    Ok(normalize_settings(
+        file.settings.into_iter().map(|(k, v)| (k, v.into())),
+    ))
+}
+
+/// Settings under their canonical keys; a canonical key wins over a legacy
+/// alias of the same setting in one file.
+fn normalize_settings(pairs: impl IntoIterator<Item = (String, SettingValue)>) -> SettingsMap {
+    let mut out = SettingsMap::new();
+    for (k, v) in pairs {
+        let key = normalize_key(k.clone());
+        if key == k {
+            out.insert(key, v);
+        } else {
+            out.entry(key).or_insert(v);
+        }
+    }
+    out
 }
 
 pub fn save_device_settings(
@@ -338,9 +351,10 @@ pub fn delete_profile(paths: &ConfigPaths, name: &str) -> Result<bool> {
 }
 
 pub fn settings_from_profile_device(map: &BTreeMap<String, TomlSetting>) -> SettingsMap {
-    map.iter()
-        .map(|(k, v)| (normalize_key(k.clone()), SettingValue::from(v.clone())))
-        .collect()
+    normalize_settings(
+        map.iter()
+            .map(|(k, v)| (k.clone(), SettingValue::from(v.clone()))),
+    )
 }
 
 pub fn remap_config_path(paths: &ConfigPaths, vid: u16, pid: u16) -> PathBuf {
@@ -419,6 +433,21 @@ mod tests {
             Some(&SettingValue::Text("wave".into()))
         );
         assert!(s.contains_key("odd"), "unknown keys survive");
+        // The canonical key wins over its legacy alias, whatever the order.
+        let both = BTreeMap::from([
+            (
+                "brightness".to_string(),
+                TomlSetting::from(&SettingValue::Int(80)),
+            ),
+            (
+                "kb_brightness".to_string(),
+                TomlSetting::from(&SettingValue::Int(10)),
+            ),
+        ]);
+        assert_eq!(
+            get_setting(&settings_from_profile_device(&both), SettingKey::Brightness),
+            Some(&SettingValue::Int(80))
+        );
 
         save_device_settings(&paths, 0x1532, 0x026b, &s).unwrap();
         let text = fs::read_to_string(&file).unwrap();

@@ -11,8 +11,8 @@ use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, Ui};
 use hako_core::ipc::{AuxEffectKind, MeterTargetSpec};
 use hako_core::mixer::{
     AudioDevice, ChatMixSide, DeviceDirection, EffectChain, Input, InputKind, MixerOp, MixerState,
-    Output, OutputKind, Scene, Source, MAX_INPUTS, MAX_LABEL, MAX_SOURCES, TRIM_MAX_DB,
-    TRIM_MIN_DB,
+    Output, OutputKind, Scene, Source, MAX_INPUTS, MAX_LABEL, MAX_OUTPUTS, MAX_SOURCES,
+    TRIM_MAX_DB, TRIM_MIN_DB,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -166,8 +166,12 @@ pub fn new_node_name(label: &str, scene: &Scene) -> String {
     unique(format!("Hako_{name}"), '_', |c| taken.contains(c))
 }
 
-/// The first free output id with `prefix` (`A` hardware, `B` virtual).
+/// The first free output id with `prefix` (`A` hardware, `B` virtual), or
+/// `None` once the scene has `MAX_OUTPUTS` outputs.
 pub fn next_output_id(outputs: &[Output], prefix: char) -> Option<String> {
+    if outputs.len() >= MAX_OUTPUTS {
+        return None;
+    }
     (1..=8)
         .map(|n| format!("{prefix}{n}"))
         .find(|id| !outputs.iter().any(|o| &o.id == id))
@@ -1596,7 +1600,11 @@ fn apps_row(ui: &mut Ui, i: &Input, apps: &[String], st: &MixerState, edits: &mu
                 } else {
                     format!("{app} (not playing)")
                 };
-                if ui.selectable_label(on, text).clicked() {
+                let free = on || apps.len() < MAX_SOURCES;
+                if ui
+                    .add_enabled(free, egui::SelectableLabel::new(on, text))
+                    .clicked()
+                {
                     edits.push(Edit::Send(set_app(i, app, !on)));
                 }
             }
@@ -2094,8 +2102,12 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
                         .show(ui, |ui| {
                             for dev in devices {
                                 let mut on = picked.contains(&dev.node);
+                                let free = on || picked.len() < MAX_SOURCES;
                                 let text = format!("{} · {}", dev.description, channels(dev));
-                                if ui.checkbox(&mut on, text).changed() {
+                                if ui
+                                    .add_enabled(free, egui::Checkbox::new(&mut on, text))
+                                    .changed()
+                                {
                                     if on {
                                         picked.push(dev.node.clone());
                                         if name.trim().is_empty() {
@@ -2117,7 +2129,11 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
                         .show(ui, |ui| {
                             for app in apps {
                                 let mut on = picked.iter().any(|p| p == app);
-                                if ui.checkbox(&mut on, app).changed() {
+                                let free = on || picked.len() < MAX_SOURCES;
+                                if ui
+                                    .add_enabled(free, egui::Checkbox::new(&mut on, app))
+                                    .changed()
+                                {
                                     if on {
                                         picked.push(app.to_string());
                                         if name.trim().is_empty() {
@@ -2177,7 +2193,7 @@ fn add_dialog(ctx: &egui::Context, d: &mut Dialog, st: &MixerState) -> DialogEnd
                 widgets::hint(
                     ui,
                     &match (&id, *virt) {
-                        (None, _) => format!("All eight {prefix} outputs are in use."),
+                        (None, _) => format!("All {MAX_OUTPUTS} outputs are in use."),
                         (Some(id), true) => {
                             format!("{id}: a microphone Discord, OBS or a game can record from.")
                         }
@@ -2598,6 +2614,35 @@ mod tests {
 
         assert_eq!(next_output_id(&scene.outputs, 'A').as_deref(), Some("A1"));
         assert_eq!(next_output_id(&scene.outputs, 'B').as_deref(), Some("B2"));
+
+        // Ids run out where the model's output limit is, not at A8 + B8.
+        let mut file = hako_core::mixer::MixerFile::default();
+        let mut virt = false;
+        while let Some(id) = next_output_id(&file.live.outputs, if virt { 'B' } else { 'A' }) {
+            let kind = if virt {
+                OutputKind::Virtual {
+                    node_name: format!("Hako_{id}"),
+                }
+            } else {
+                OutputKind::Hardware {
+                    sink: format!("alsa_output.{id}"),
+                    description: String::new(),
+                }
+            };
+            let output = Output {
+                id: id.clone(),
+                label: id,
+                kind,
+                chain: EffectChain::default(),
+                gain_db: 0.0,
+                mute: false,
+                mono: false,
+            };
+            file.apply(&MixerOp::PutOutput { output }).unwrap();
+            virt = !virt;
+        }
+        assert_eq!(file.live.outputs.len(), MAX_OUTPUTS);
+        assert_eq!(next_output_id(&file.live.outputs, 'B'), None);
 
         // Whatever these produce passes the model's own validation.
         let mut file = hako_core::mixer::MixerFile::default();

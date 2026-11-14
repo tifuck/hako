@@ -7,8 +7,8 @@ use crate::widgets;
 use crate::UiCommand;
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, Ui};
 use hako_core::remap::{
-    CaptureRole, EvdevKey, MacroRepeat, MacroStep, RemapBinding, RemapMode, MAX_MACRO_STEPS,
-    MIN_INTERVAL_MS,
+    clamp_interval, CaptureRole, EvdevKey, MacroRepeat, MacroStep, RemapBinding, RemapMode,
+    MAX_INTERVAL_MS, MAX_MACRO_STEPS, MIN_INTERVAL_MS,
 };
 
 /// Local edit state for one source. Server truth is re-adopted whenever the
@@ -461,13 +461,14 @@ fn target_row(ui: &mut Ui, cx: &mut Cx, source: EvdevKey, draft: &mut Draft) {
 
 /// Log slider for repeat periods. Returns true when the value is final.
 pub(super) fn interval_row(ui: &mut Ui, label: &str, ms: &mut u32) -> bool {
+    // A Tap binding's unused interval may be out of range once it repeats.
+    *ms = clamp_interval(*ms);
     let mut commit = false;
     widgets::row(ui, label, None, |ui| {
         let rate = 1000.0 / *ms as f32;
         ui.label(widgets::value_text(format!("{ms} ms · {rate:.1}/s")));
         let mut v = *ms as f32;
-        // Above 2 s a repeat stops feeling like one; the daemon allows more.
-        let (min, max) = (MIN_INTERVAL_MS as f32, 2000.0);
+        let (min, max) = (MIN_INTERVAL_MS as f32, MAX_INTERVAL_MS as f32);
         let width = (ui.available_width() - 16.0).clamp(80.0, 220.0);
         let resp = widgets::slider(
             ui,
@@ -477,7 +478,9 @@ pub(super) fn interval_row(ui: &mut Ui, label: &str, ms: &mut u32) -> bool {
             width,
         );
         widgets::knob(ui, &resp, widgets::fraction(v, min, max, true));
-        *ms = v.round() as u32;
+        if resp.changed() {
+            *ms = v.round() as u32;
+        }
         commit = resp.drag_stopped() || (resp.changed() && !resp.dragged());
     });
     commit
@@ -504,5 +507,29 @@ mod tests {
         );
         d.mode = Some(RemapMode::Disabled);
         assert!(d.binding(EvdevKey::BTN_SIDE).is_some());
+    }
+
+    /// Every interval the daemon accepts survives being shown untouched.
+    #[test]
+    fn interval_row_keeps_values_it_does_not_edit() {
+        let ctx = egui::Context::default();
+        for stored in [MIN_INTERVAL_MS, 50, 5000, MAX_INTERVAL_MS] {
+            let mut ms = stored;
+            for _ in 0..2 {
+                let _ = ctx.run(Default::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        assert!(!interval_row(ui, "Repeat every", &mut ms));
+                    });
+                });
+            }
+            assert_eq!(ms, stored);
+        }
+        let mut ms = 0;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                interval_row(ui, "Repeat every", &mut ms);
+            });
+        });
+        assert_eq!(ms, MIN_INTERVAL_MS);
     }
 }

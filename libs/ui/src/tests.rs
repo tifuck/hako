@@ -1060,12 +1060,103 @@ fn snapshot_audit_gallery() {
 #[test]
 fn dpi_snap_stays_inside_the_device_range() {
     use crate::controls::snap_dpi;
+    let snap = |v, min, max, step| {
+        snap_dpi(
+            &SettingMeta::slider(SettingKey::Dpi, "DPI", min, max, step),
+            v,
+        )
+    };
     // Top of a 100..25600 sensor no longer rounds to an out-of-range 26000.
-    assert_eq!(snap_dpi(25600.0, 100.0, 25600.0, 50.0), 25600.0);
+    assert_eq!(snap(25600.0, 100.0, 25600.0, 50.0), Some(25600.0));
     // A 45000 DPI sensor is reachable; a 50 DPI minimum is selectable.
-    assert_eq!(snap_dpi(45000.0, 100.0, 45000.0, 50.0), 45000.0);
-    assert_eq!(snap_dpi(50.0, 50.0, 18000.0, 50.0), 50.0);
-    assert_eq!(snap_dpi(1649.0, 100.0, 26000.0, 50.0), 1600.0);
+    assert_eq!(snap(45000.0, 100.0, 45000.0, 50.0), Some(45000.0));
+    assert_eq!(snap(50.0, 50.0, 18000.0, 50.0), Some(50.0));
+    assert_eq!(snap(1649.0, 100.0, 26000.0, 50.0), Some(1600.0));
+    // Magnitude steps stay on a coarser device grid (SteelSeries Sensei 90s).
+    assert_eq!(snap(1649.0, 90.0, 5670.0, 90.0), Some(1620.0));
+    assert_eq!(snap(12345.0, 100.0, 16000.0, 300.0), Some(12100.0));
+}
+
+/// The DPI readout never sends a value on its own: not for a reported DPI
+/// outside the range, not for a missing one, not while disabled.
+#[test]
+fn dpi_control_sends_nothing_without_input() {
+    use SettingKey::*;
+    let meta = SettingMeta::slider(Dpi, "DPI", 100.0, 1000.0, 50.0).unit("dpi");
+    for (dpi, blocked) in [(Some(5000), false), (None, false), (Some(5000), true)] {
+        let meta = if blocked {
+            meta.clone().blocked("test")
+        } else {
+            meta.clone()
+        };
+        let settings = dpi.map_or_else(SettingsMap::new, |v| map(&[(Dpi, SettingValue::Int(v))]));
+        let d = dev(DeviceKind::Mouse, vec![meta], settings);
+        let ctx = egui::Context::default();
+        let mut app = HakoAppUi {
+            state: Some(HubState {
+                devices: vec![d.clone()],
+                ..sample_state()
+            }),
+            selected: Some(d.id.clone()),
+            daemon_error: None,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+        }
+        assert!(out.is_empty(), "dpi {dpi:?} blocked {blocked}: {out:?}");
+    }
+}
+
+/// A fractional slider sends a value on its grid, not an f32 rounding of it.
+#[test]
+fn fractional_slider_commits_exact_grid_values() {
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(400.0, 60.0))
+        .build_ui_state(
+            |ui, out: &mut Vec<UiCommand>| {
+                let meta =
+                    SettingMeta::slider(SettingKey::LiftOffDistance, "Lift-off", 0.7, 2.0, 0.1);
+                let d = dev(
+                    DeviceKind::Mouse,
+                    vec![meta.clone()],
+                    map(&[(SettingKey::LiftOffDistance, SettingValue::Float(1.0))]),
+                );
+                controls::rows(ui, &d, &[&meta], out);
+            },
+            Vec::new(),
+        );
+    use egui_kittest::kittest::Queryable;
+    h.run_steps(2);
+    let slider = h
+        .get_by_role(egui::accesskit::Role::Slider)
+        .bounding_box()
+        .expect("a slider");
+    // A click at the left end of the track picks the minimum.
+    let at = egui::pos2(
+        slider.x0 as f32 + 1.0,
+        ((slider.y0 + slider.y1) / 2.0) as f32,
+    );
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    h.run_steps(2);
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        });
+        h.run_steps(2);
+    }
+    let sent = h.state();
+    assert!(
+        matches!(
+            sent.last(),
+            Some(UiCommand::Set { value: SettingValue::Float(v), .. }) if *v == 0.7
+        ),
+        "{sent:?}"
+    );
 }
 
 #[test]
@@ -1830,6 +1921,39 @@ fn double_clicking_a_mix_balance_resets_it() {
         }),
         "{ops:?}"
     );
+}
+
+/// An input takes at most `MAX_SOURCES` apps: past that, the add dialog's
+/// unticked apps can't be picked, so Create never sends a refused input.
+#[test]
+fn the_add_dialog_stops_at_the_source_limit() {
+    use egui_kittest::kittest::Queryable;
+    use hako_core::mixer::{InputKind, MAX_SOURCES};
+    let mut m = sample_mixer();
+    m.status.apps = (1..=MAX_SOURCES + 1).map(|n| format!("App {n}")).collect();
+    let mut app = mixer_app(Some(m));
+    app.mixer.open_add_dialog(false, true);
+    let mut h = drive(app);
+    for n in 1..=MAX_SOURCES + 1 {
+        click(&mut h, &format!("App {n}"));
+    }
+    assert!(h
+        .get_by_label(&format!("App {}", MAX_SOURCES + 1))
+        .is_disabled());
+    h.get_all_by_label("Add input")
+        .find(|n| n.role() == egui::accesskit::Role::Button)
+        .expect("Create button")
+        .click();
+    h.run_steps(4);
+    match sent_ops(&mut h).as_slice() {
+        [MixerOp::PutInput { input }] => {
+            let InputKind::Virtual { apps, .. } = &input.kind else {
+                panic!("{input:?}");
+            };
+            assert_eq!(apps.len(), MAX_SOURCES);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 /// The profile menu: update the current profile under its own name, and

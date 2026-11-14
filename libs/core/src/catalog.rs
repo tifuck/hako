@@ -211,6 +211,7 @@ pub struct SettingMeta {
     pub kind: ControlKind,
     pub min: Option<f64>,
     pub max: Option<f64>,
+    /// Slider grid: valid values are `min + k × step` up to `max`.
     pub step: Option<f64>,
     pub read_only: bool,
     /// Named choices for `Dropdown` controls (empty otherwise).
@@ -347,12 +348,9 @@ impl SettingMeta {
                 }
             }
             ControlKind::Slider | ControlKind::ColorChannel | ControlKind::ReadOnly => {
-                let whole = [self.min, self.max, self.step]
-                    .iter()
-                    .all(|v| v.is_none_or(|v| v.fract() == 0.0));
                 let n = match value {
                     SettingValue::Int(n) => *n as f64,
-                    SettingValue::Float(_) if whole => {
+                    SettingValue::Float(_) if self.whole() => {
                         return Err(format!("{key} expects a whole number"))
                     }
                     SettingValue::Float(f) if f.is_finite() => *f,
@@ -360,9 +358,14 @@ impl SettingMeta {
                 };
                 let (min, max) = (self.min.unwrap_or(f64::MIN), self.max.unwrap_or(f64::MAX));
                 if n < min || n > max {
-                    Err(format!("{key} out of range {min}..={max}"))
-                } else {
-                    Ok(())
+                    return Err(format!("{key} out of range {min}..={max}"));
+                }
+                match self.grid_step() {
+                    Some(step) if !on_grid((n - self.min.unwrap_or(0.0)) / step) => Err(format!(
+                        "{key} goes in steps of {step} from {}",
+                        self.min.unwrap_or(0.0)
+                    )),
+                    _ => Ok(()),
                 }
             }
         }
@@ -377,21 +380,55 @@ impl SettingMeta {
         {
             return None;
         }
-        let (min, max) = (self.min.unwrap_or(f64::MIN), self.max.unwrap_or(f64::MAX));
-        if min.is_nan() || max.is_nan() || min > max {
-            return None;
-        }
-        let n = value.as_float().filter(|f| f.is_finite())?.clamp(min, max);
-        let fixed = if [self.min, self.max, self.step]
-            .iter()
-            .all(|v| v.is_none_or(|v| v.fract() == 0.0))
-        {
+        let n = self.snap(value.as_float().filter(|f| f.is_finite())?)?;
+        let fixed = if self.whole() {
             SettingValue::Int(n.round() as i64)
         } else {
             SettingValue::Float(n)
         };
         self.validate(&fixed).is_ok().then_some(fixed)
     }
+
+    /// The value `validate` accepts that is closest to the number `n`: clamped
+    /// to the range and rounded onto the step grid (the last grid point when
+    /// `max` is off it). `None` for a NaN or empty range.
+    pub fn snap(&self, n: f64) -> Option<f64> {
+        let (min, max) = (self.min.unwrap_or(f64::MIN), self.max.unwrap_or(f64::MAX));
+        if min.is_nan() || max.is_nan() || min > max || n.is_nan() {
+            return None;
+        }
+        let n = n.clamp(min, max);
+        let Some(step) = self.grid_step() else {
+            return Some(n);
+        };
+        let base = self.min.unwrap_or(0.0);
+        let top = ((max - base) / step + GRID_TOLERANCE).floor();
+        let snapped = base + ((n - base) / step).round().min(top) * step;
+        // Drop the float noise of `k × step` (0.7 + 0.1 = 0.7999999999999999).
+        let snapped = if self.whole() {
+            snapped
+        } else {
+            (snapped * 1e9).round() / 1e9
+        };
+        Some(snapped.clamp(min, max))
+    }
+
+    fn whole(&self) -> bool {
+        [self.min, self.max, self.step]
+            .iter()
+            .all(|v| v.is_none_or(|v| v.fract() == 0.0))
+    }
+
+    fn grid_step(&self) -> Option<f64> {
+        self.step.filter(|s| *s > 0.0 && s.is_finite())
+    }
+}
+
+/// How far (in steps) a fractional slider value may sit from its grid point.
+const GRID_TOLERANCE: f64 = 1e-6;
+
+fn on_grid(steps: f64) -> bool {
+    (steps - steps.round()).abs() <= GRID_TOLERANCE
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -454,5 +491,35 @@ mod tests {
         let color = SettingMeta::color(SettingKey::ColorR, "Red").hidden(true);
         assert!(color.validate(&SettingValue::Int(255)).is_ok());
         assert!(color.validate(&SettingValue::Int(256)).is_err());
+    }
+
+    #[test]
+    fn sliders_accept_only_their_step_grid() {
+        let dpi = SettingMeta::slider(SettingKey::Dpi, "DPI", 100.0, 16000.0, 100.0);
+        assert!(dpi.validate(&SettingValue::Int(1200)).is_ok());
+        assert!(dpi.validate(&SettingValue::Int(1234)).is_err());
+        assert_eq!(
+            dpi.nearest_valid(&SettingValue::Int(1234)),
+            Some(SettingValue::Int(1200))
+        );
+        // The grid starts at `min`; an off-grid `max` is not reachable.
+        let odd = SettingMeta::slider(SettingKey::Dpi, "DPI", 125.0, 1000.0, 50.0);
+        assert!(odd.validate(&SettingValue::Int(175)).is_ok());
+        assert!(odd.validate(&SettingValue::Int(200)).is_err());
+        assert!(odd.validate(&SettingValue::Int(1000)).is_err());
+        assert_eq!(odd.snap(5000.0), Some(975.0));
+        assert_eq!(odd.snap(0.0), Some(125.0));
+
+        let lift = SettingMeta::slider(SettingKey::LiftOffDistance, "Lift", 0.7, 2.0, 0.1);
+        assert!(lift.validate(&SettingValue::Float(0.7)).is_ok());
+        assert!(lift.validate(&SettingValue::Float(0.7 + 0.1 * 3.0)).is_ok());
+        assert!(lift.validate(&SettingValue::Float(2.0)).is_ok());
+        assert!(lift.validate(&SettingValue::Float(1.25)).is_err());
+        assert_eq!(lift.snap(0.79999995_f32 as f64), Some(0.8));
+        assert_eq!(lift.snap(9.0), Some(2.0));
+        assert_eq!(
+            lift.nearest_valid(&SettingValue::Float(1.26)),
+            Some(SettingValue::Float(1.3))
+        );
     }
 }

@@ -46,8 +46,9 @@ type Present = Vec<HidDeviceInfo>;
 type Opened = Vec<(&'static Model, Box<dyn DeviceAdapter>)>;
 /// Every model tried: (yielded a device, open error).
 type Attempted = Vec<(&'static Model, bool, Option<String>)>;
-/// (consecutive failures, next attempt, open error last pushed).
-type Retry = (u32, Instant, Option<String>);
+/// (consecutive failures, next attempt, open error last pushed, sysfs paths
+/// of the model's nodes when it failed).
+type Retry = (u32, Instant, Option<String>, Vec<PathBuf>);
 
 pub struct DaemonHub {
     pub paths: ConfigPaths,
@@ -178,25 +179,15 @@ impl DaemonHub {
             .map(|h| h.model)
             .collect();
         let mut skip: Vec<&'static Model> = crashed;
+        skip.extend(rescan_skips(&connected, &mut lock(&self.rescanned), now));
         {
-            let mut rescanned = lock(&self.rescanned);
-            for (m, _) in &connected {
-                let due = m.multi
-                    && rescanned
-                        .get(&retry_key(m))
-                        .is_none_or(|&at| now >= at + drivers::RESCAN);
-                if due {
-                    rescanned.insert(retry_key(m), now);
-                } else if !skip.iter().any(|s| s.same(m)) {
-                    skip.push(m);
-                }
-            }
-            rescanned.retain(|k, _| connected.iter().any(|(m, _)| retry_key(m) == *k));
-            let retry = lock(&self.retry);
-            skip.extend(
-                all_models(&present)
-                    .filter(|m| retry.get(&retry_key(m)).is_some_and(|&(_, at, _)| now < at)),
-            );
+            let mut retry = lock(&self.retry);
+            forget_unplugged(&mut retry, &present);
+            skip.extend(all_models(&present).filter(|m| {
+                retry
+                    .get(&retry_key(m))
+                    .is_some_and(|&(_, at, ..)| now < at)
+            }));
         }
         let ctx = DriverCtx {
             paths: self.paths.clone(),
@@ -259,13 +250,29 @@ impl DaemonHub {
                     retry.remove(&retry_key(model));
                     continue;
                 }
-                let (n, at, reported) = retry.entry(retry_key(model)).or_insert((0, now, None));
+                let (n, at, reported, nodes) =
+                    retry
+                        .entry(retry_key(model))
+                        .or_insert((0, now, None, Vec::new()));
                 *n += 1;
                 *at = now + backoff(*n);
+                *nodes = model_nodes(model, &present);
                 if is_new_error(reported, error.as_deref()) {
                     self.push_error(format!("{}: {}", model.name, error.unwrap_or_default()));
                 }
             }
+        }
+
+        let (handles, replaced, dropped) = supersede(&mut lock(&self.devices), handles);
+        stop_all(&[replaced.as_slice(), &dropped].concat()).await;
+        for h in replaced {
+            let id = h.snapshot().id;
+            info!(
+                "{}: {} replaced by its specific driver",
+                id.key(),
+                h.model.name
+            );
+            let _ = self.events.send(AdapterEvent::Disconnected(id));
         }
 
         for h in &handles {
@@ -304,9 +311,38 @@ impl DaemonHub {
         lock(&self.devices).values().cloned().collect()
     }
 
-    /// The connection that started a capture went away: stop listening.
-    pub fn end_capture(&self, device_id: DeviceId) {
-        if let Ok(snap) = self.remap.cancel_capture(device_id, false) {
+    /// `StartCapture`, plus the session [`Self::end_capture`] stops should
+    /// the connection go away while it runs.
+    pub fn start_capture(&self, req: IpcRequest) -> (IpcResponse, Option<(DeviceId, u64)>) {
+        let id = req.id;
+        let p = match serde_json::from_value::<StartCaptureParams>(req.params) {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+                    None,
+                )
+            }
+        };
+        match self
+            .remap
+            .start_capture(p.device_id.clone(), p.role, p.source)
+        {
+            Ok((snap, session)) => {
+                let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
+                (IpcResponse::ok(id, snap), Some((p.device_id, session)))
+            }
+            Err(e) => (
+                IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+                None,
+            ),
+        }
+    }
+
+    /// The connection that started capture `session` went away: stop it,
+    /// unless it already ended.
+    pub fn end_capture(&self, (device_id, session): (DeviceId, u64)) {
+        if let Ok(Some(snap)) = self.remap.cancel_session(device_id, session) {
             let _ = self.events.send(AdapterEvent::RemapsUpdated(snap));
         }
     }
@@ -589,18 +625,7 @@ impl DaemonHub {
                 },
                 Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
-            Method::StartCapture => {
-                match serde_json::from_value::<StartCaptureParams>(req.params) {
-                    Ok(p) => match self.remap.start_capture(p.device_id, p.role, p.source) {
-                        Ok(snap) => {
-                            let _ = self.events.send(AdapterEvent::RemapsUpdated(snap.clone()));
-                            IpcResponse::ok(id, snap)
-                        }
-                        Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
-                    },
-                    Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
-                }
-            }
+            Method::StartCapture => self.start_capture(req).0,
             Method::CancelCapture => {
                 match serde_json::from_value::<CancelCaptureParams>(req.params) {
                     Ok(p) => match self.remap.cancel_capture(p.device_id, p.keep) {
@@ -727,7 +752,10 @@ impl DaemonHub {
             for (k, v) in settings_from_profile_device(dev_map) {
                 let result = match SettingKey::parse(&k) {
                     Some(key) if profile_skips(key, &controls) => continue,
-                    Some(key) => h.set(key, v).await.map(|_| ()),
+                    Some(key) => h
+                        .set(key, profile_value(key, v, &controls))
+                        .await
+                        .map(|_| ()),
                     None => Err(anyhow::anyhow!("unknown setting")),
                 };
                 if let Err(error) = result {
@@ -908,6 +936,17 @@ fn backoff(n: u32) -> Duration {
         .min(MAX_BACKOFF)
 }
 
+/// A saved slider value the device's control no longer accepts (e.g. off its
+/// step grid in an older profile) becomes the nearest one it does, as saved
+/// device settings are repaired.
+fn profile_value(key: SettingKey, value: SettingValue, controls: &[SettingMeta]) -> SettingValue {
+    controls
+        .iter()
+        .find(|m| m.key == key)
+        .and_then(|m| m.nearest_valid(&value))
+        .unwrap_or(value)
+}
+
 /// Profile keys never applied: onboard memory writes (profiles re-apply at
 /// every start: flash wear) and the opt-in that allows them, plus the old
 /// headset line-in keys older profiles hold (line-in is a mixer input now).
@@ -920,6 +959,72 @@ fn profile_skips(key: SettingKey, controls: &[SettingMeta]) -> bool {
 
 fn retry_key(m: &Model) -> (u16, u16) {
     (m.vendor_id, m.product_ids[0])
+}
+
+/// Connected models discovery leaves alone this pass: all but the `multi`
+/// ones (receivers) whose rescan is due, decided once per model (a receiver
+/// hosts several devices). Forgets the rescans of models no longer connected.
+fn rescan_skips(
+    connected: &[(&'static Model, DeviceId)],
+    rescanned: &mut HashMap<(u16, u16), Instant>,
+    now: Instant,
+) -> Vec<&'static Model> {
+    let mut models: Vec<&'static Model> = Vec::new();
+    for (m, _) in connected {
+        if !models.iter().any(|s| s.same(m)) {
+            models.push(m);
+        }
+    }
+    rescanned.retain(|k, _| models.iter().any(|m| retry_key(m) == *k));
+    models.retain(|m| {
+        let due = m.multi
+            && rescanned
+                .get(&retry_key(m))
+                .is_none_or(|&at| now >= at + drivers::RESCAN);
+        if due {
+            rescanned.insert(retry_key(m), now);
+        }
+        !due
+    });
+    models
+}
+
+/// A model unplugged (or replugged: new nodes) since it failed to open gets
+/// its next open at once, and its error pushed again.
+fn forget_unplugged(retry: &mut HashMap<(u16, u16), Retry>, present: &Present) {
+    retry.retain(|_, (.., nodes)| present.iter().any(|d| nodes.contains(&d.sys)));
+}
+
+/// A probed device first opened by the generic probe gets its specific model
+/// once that one's interface appears: a connected new handle takes the
+/// device's handles of another model out of `map`; one that is not (its open
+/// failed) is dropped instead, and they stay.
+/// Returns (handles to add, handles taken out, handles dropped).
+fn supersede(
+    map: &mut HashMap<String, DeviceHandle>,
+    handles: Vec<DeviceHandle>,
+) -> (Vec<DeviceHandle>, Vec<DeviceHandle>, Vec<DeviceHandle>) {
+    let (mut kept, mut replaced, mut dropped) = (Vec::new(), Vec::new(), Vec::new());
+    for h in handles {
+        let other = |old: &DeviceHandle| old.model.same_ids(h.model) && !old.model.same(h.model);
+        if h.snapshot().connected {
+            let keys: Vec<String> = map
+                .iter()
+                .filter(|(_, old)| other(old))
+                .map(|(k, _)| k.clone())
+                .collect();
+            replaced.extend(keys.iter().filter_map(|k| map.remove(k)));
+            kept.push(h);
+        } else if map
+            .values()
+            .any(|old| other(old) && old.snapshot().connected)
+        {
+            dropped.push(h);
+        } else {
+            kept.push(h);
+        }
+    }
+    (kept, replaced, dropped)
 }
 
 /// sysfs paths of `model`'s nodes in `present`.
@@ -1049,6 +1154,22 @@ mod tests {
         assert!(profile_skips(SettingKey::AuxEnabled, &controls));
         assert!(profile_skips(SettingKey::AuxCapturePercent, &controls));
         assert!(!profile_skips(SettingKey::Dpi, &controls));
+    }
+
+    #[test]
+    fn off_grid_profile_values_snap_to_the_control() {
+        let controls = [SettingMeta::slider(
+            SettingKey::Dpi,
+            "DPI",
+            100.0,
+            16000.0,
+            100.0,
+        )];
+        let dpi = |v| profile_value(SettingKey::Dpi, SettingValue::Int(v), &controls);
+        assert_eq!(dpi(1234), SettingValue::Int(1200));
+        assert_eq!(dpi(800), SettingValue::Int(800));
+        let other = profile_value(SettingKey::ReportRate, SettingValue::Int(7), &controls);
+        assert_eq!(other, SettingValue::Int(7));
     }
 
     /// Built by hand: `new` would touch the session's PipeWire graph.
@@ -1252,6 +1373,95 @@ mod tests {
             Ok(())
         }
         fn shutdown(&mut self) {}
+    }
+
+    #[test]
+    fn a_receiver_with_several_devices_is_rescanned() {
+        let receiver = drivers::models().find(|m| m.multi).unwrap();
+        let device = |instance: &str| DeviceId {
+            vendor_id: receiver.vendor_id,
+            product_id: receiver.product_ids[0],
+            instance: instance.into(),
+        };
+        let connected = [(receiver, device("1")), (receiver, device("2"))];
+        let mut rescanned = HashMap::new();
+        let t0 = Instant::now();
+        assert!(rescan_skips(&connected, &mut rescanned, t0).is_empty());
+        let skipped = rescan_skips(&connected, &mut rescanned, t0 + Duration::from_secs(1));
+        assert_eq!(skipped.len(), 1);
+        assert!(rescan_skips(&connected, &mut rescanned, t0 + drivers::RESCAN).is_empty());
+        rescan_skips(&[], &mut rescanned, t0);
+        assert!(rescanned.is_empty(), "no longer connected");
+    }
+
+    #[test]
+    fn a_failed_open_is_forgotten_once_its_nodes_go() {
+        let node = |sys: &str| HidDeviceInfo {
+            path: PathBuf::from("/dev/hidraw0"),
+            vendor_id: 0x1532,
+            product_id: 0x026b,
+            interface: Some(0),
+            uniq: String::new(),
+            bus: crate::hid::BUS_USB,
+            name: "Keyboard".into(),
+            sys: PathBuf::from(sys),
+        };
+        let failed = (
+            3,
+            Instant::now(),
+            Some("denied".into()),
+            vec!["/sys/a".into()],
+        );
+        let mut retry = HashMap::from([((0x1532, 0x026b), failed)]);
+        forget_unplugged(&mut retry, &vec![node("/sys/a")]);
+        assert_eq!(retry.len(), 1, "still plugged in");
+        // Replugged: new nodes.
+        forget_unplugged(&mut retry, &vec![node("/sys/b")]);
+        assert!(retry.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_probed_devices_specific_model_replaces_its_generic_one() {
+        let hub = hub("supersede");
+        let probed = |name| -> &'static Model {
+            Box::leak(Box::new(Model {
+                vendor_id: 0x1d50,
+                product_ids: &[0x6a6b],
+                kind: DeviceKind::Mouse,
+                name,
+                usbfs: false,
+                multi: false,
+                open: |_, _| Ok(Vec::new()),
+            }))
+        };
+        let (generic, lamp) = (probed("Generic"), probed("Lamp"));
+        let id = DeviceId {
+            vendor_id: 0x1d50,
+            product_id: 0x6a6b,
+            instance: "x".into(),
+        };
+        let spawn = |m, a: Box<dyn DeviceAdapter>| {
+            DeviceHandle::spawn(m, a, hub.events.clone(), Vec::new(), hub.paths.clone()).unwrap()
+        };
+        let mut map = HashMap::from([(id.key(), spawn(generic, Box::new(Plain(id.clone()))))]);
+
+        // The specific open failed: the generic one stays.
+        let error = anyhow::anyhow!("denied");
+        let failed =
+            PlaceholderAdapter::permission_denied(id.clone(), DeviceKind::Mouse, "L", &error);
+        let (kept, replaced, dropped) = supersede(&mut map, vec![spawn(lamp, Box::new(failed))]);
+        assert_eq!((kept.len(), replaced.len(), dropped.len()), (0, 0, 1));
+        assert!(map[&id.key()].model.same(generic));
+        let mut stop = dropped;
+
+        // It opened: it takes over.
+        let opened = spawn(lamp, Box::new(Plain(id.clone())));
+        let (kept, replaced, dropped) = supersede(&mut map, vec![opened]);
+        assert_eq!((kept.len(), replaced.len(), dropped.len()), (1, 1, 0));
+        assert!(map.is_empty() && replaced[0].model.same(generic));
+        stop.extend(kept.into_iter().chain(replaced));
+        stop_all(&stop).await;
+        close(hub);
     }
 
     #[tokio::test]

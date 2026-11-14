@@ -325,7 +325,7 @@ fn stage_editor(ui: &mut Ui, kind: &mut AuxEffectKind) -> bool {
                 "ms",
                 true,
             );
-            c |= param(ui, "Ignore below", "The gate ignores hum and rumble below this frequency when deciding to open. Your audio itself is not filtered. 0 = off.", detect_hpf_hz, 0.0..=500.0, "Hz", false);
+            c |= param(ui, "Ignore below", "The gate ignores hum and rumble below this frequency when deciding to open. Your audio itself is not filtered. 0 = off.", detect_hpf_hz, 0.0..=1000.0, "Hz", false);
         }
         AuxEffectKind::Compressor {
             threshold_db,
@@ -431,7 +431,7 @@ fn param(
         );
         widgets::knob(ui, &resp, widgets::fraction(*v, min, max, log));
         commit = resp.drag_stopped() || (resp.changed() && !resp.dragged());
-        let text = if unit == "Hz" && *v < 10.0 {
+        let text = if unit == "Hz" && *v == 0.0 {
             "Off".to_string()
         } else if unit == ":1" {
             format!("{v:.1}:1")
@@ -838,5 +838,29 @@ mod tests {
         let hi = compress(-20.0 + w / 2.0, -20.0, 4.0, -6.0);
         assert!((lo - (-26.0)).abs() < 1e-3);
         assert!((hi - (-20.0 + 6.0 / 4.0)).abs() < 1e-3);
+    }
+
+    /// Sliders cover the daemon's whole range: values at its limits are
+    /// shown as they are, not clamped into the next commit.
+    #[test]
+    fn gate_limits_survive_the_editor() {
+        let mut kind = AuxEffectKind::NoiseGate {
+            threshold_db: 0.0,
+            reduction_db: -72.0,
+            attack_ms: 200.0,
+            hold_ms: 1000.0,
+            release_ms: 2000.0,
+            detect_hpf_hz: 1000.0,
+        };
+        let before = kind.clone();
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let _ = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert!(!stage_editor(ui, &mut kind));
+                });
+            });
+        }
+        assert_eq!(kind, before);
     }
 }

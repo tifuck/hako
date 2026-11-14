@@ -71,9 +71,12 @@ struct DefaultState {
 
 impl DefaultState {
     /// An original a failed restore left is still the one to go back to.
+    /// hako's own sink never is (a crash leaves it the configured default,
+    /// so WirePlumber makes it the default again once it is back).
     fn claim(&mut self, owner: DefaultOwner, sink: String, session_default: Option<String>) {
         if self.claims.is_empty() && self.session_original.is_none() {
-            self.session_original = session_default;
+            self.session_original =
+                session_default.filter(|s| *s != sink && !mixer::is_hako_node(s));
         }
         self.claims.retain(|(held, _)| *held != owner);
         self.claims.push((owner, sink));
@@ -1377,25 +1380,31 @@ fn enum_items(sget: &str) -> Vec<String> {
 fn set_capture_percent(card: &str, percent: u8) -> Result<()> {
     let percent = percent.min(100);
     amixer(card, &["sset", "Capture", &format!("{percent}%")])?;
-    card_levels().insert(card.to_string(), percent);
+    for ((_, c), level) in card_levels().iter_mut() {
+        if c == card {
+            *level = percent;
+        }
+    }
     Ok(())
 }
 
-/// Capture level per card: read once, then followed through hako's own writes.
+/// Capture level per (node, card), like `CARD_CONTROLS` (card numbers are
+/// reused after an unplug): read once, then followed through hako's own writes.
 /// ponytail: a level changed in another mixer app shows stale until restart.
-static CARD_LEVELS: Mutex<BTreeMap<String, u8>> = Mutex::new(BTreeMap::new());
+static CARD_LEVELS: Mutex<BTreeMap<(String, String), u8>> = Mutex::new(BTreeMap::new());
 
-fn card_levels() -> MutexGuard<'static, BTreeMap<String, u8>> {
+fn card_levels() -> MutexGuard<'static, BTreeMap<(String, String), u8>> {
     CARD_LEVELS.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// The card's "Capture" level in percent, if it reports one.
-fn capture_level(card: &str) -> Option<u8> {
-    if let Some(level) = card_levels().get(card) {
+/// The "Capture" level in percent of `node`'s card, if it reports one.
+fn capture_level(node: &str, card: &str) -> Option<u8> {
+    let key = (node.to_string(), card.to_string());
+    if let Some(level) = card_levels().get(&key) {
         return Some(*level);
     }
     let level = parse_percent(&amixer(card, &["sget", "Capture"]).ok()?)?;
-    card_levels().insert(card.to_string(), level);
+    card_levels().insert(key, level);
     Some(level)
 }
 
@@ -1883,11 +1892,14 @@ mod tests {
         assert_eq!(parse_percent(INPUT_SOURCE), None);
         assert_eq!(parse_percent("  Mono: Capture 9 [300%] [on]"), None);
         // Card 6 is only this test's (the cache is per process).
-        assert_eq!(capture_level("6"), Some(48));
+        assert_eq!(capture_level("line-a", "6"), Some(48));
         set_capture_percent("6", 20).unwrap();
-        assert_eq!(capture_level("6"), Some(20));
-        assert_eq!(capture_level("9"), None, "no such card");
+        assert_eq!(capture_level("line-a", "6"), Some(20));
+        assert_eq!(capture_level("line-a", "9"), None, "no such card");
         amixer_calls();
+        // Another device under that card number (a replug) is read afresh.
+        assert_eq!(capture_level("line-b", "6"), Some(48));
+        assert_eq!(amixer_calls(), ["6 sget Capture"]);
     }
 
     #[test]
@@ -2010,6 +2022,18 @@ mod tests {
         defaults.claim(DefaultOwner::ChatMix, "game".into(), s("hdmi"));
         assert_eq!(defaults.restore(), s("hdmi"));
         assert_eq!(defaults.held(), None);
+    }
+
+    /// After a crash WirePlumber keeps `Hako_Game` as the configured default:
+    /// it is no original to go back to (the server picks a fallback).
+    #[test]
+    fn hakos_own_sink_is_never_the_original() {
+        let s = |n: &str| Some(n.to_string());
+        for original in ["game", CHATMIX_GAME, CHATMIX_CHAT, "hako_in_music"] {
+            let mut defaults = DefaultState::default();
+            defaults.claim(DefaultOwner::ChatMix, "game".into(), s(original));
+            assert_eq!(defaults.release(DefaultOwner::ChatMix), None, "{original}");
+        }
     }
 
     #[test]

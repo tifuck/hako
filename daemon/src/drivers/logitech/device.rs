@@ -192,7 +192,8 @@ pub struct HidppAdapter {
     feat: Features,
     battery: Option<BatteryState>,
     dpis: Vec<u16>,
-    lod: u8,
+    /// Raw 0x2202 lift-off byte last read back or written; DPI writes resend it.
+    lod: Option<u8>,
     /// 0x2202 reports a settable lift-off distance.
     lod_settable: bool,
     rates: Vec<u32>,
@@ -245,7 +246,7 @@ impl HidppAdapter {
             feat: Features::default(),
             battery: None,
             dpis: Vec::new(),
-            lod: 2,
+            lod: None,
             lod_settable: false,
             rates: Vec::new(),
             zones: Vec::new(),
@@ -308,6 +309,7 @@ impl HidppAdapter {
         self.online = true;
         self.host_mode = false;
         self.led_claimed = false;
+        self.lod = None;
         if !self.probed {
             self.last_probe = Instant::now();
             match self.probe() {
@@ -604,13 +606,13 @@ impl HidppAdapter {
                         SettingValue::Int(dpi.into()),
                     );
                 }
-                if ext && r[13] <= 2 {
-                    self.lod = r[13];
-                    if self.lod_settable {
+                if ext {
+                    self.lod = Some(r[13]);
+                    if self.lod_settable && r[13] <= 2 {
                         merge_setting(
                             &mut self.settings,
                             SettingKey::LiftOffDistance,
-                            SettingValue::Int(self.lod.into()),
+                            SettingValue::Int(r[13].into()),
                         );
                     }
                 }
@@ -687,7 +689,9 @@ impl HidppAdapter {
         let [hi, lo] = dpi.to_be_bytes();
         if ext {
             // fn 6: sensor, X BE, Y BE, LOD (kept).
-            self.call(idx, 0x06, &[0x00, hi, lo, hi, lo, self.lod])?;
+            let lod = hidpp::ext_dpi_lod(self.lod, || self.call(idx, 0x05, &[0x00]))?;
+            self.lod = Some(lod);
+            self.call(idx, 0x06, &[0x00, hi, lo, hi, lo, lod])?;
         } else {
             // fn 3: sensor, DPI BE.
             self.call(idx, 0x03, &[0x00, hi, lo])?;
@@ -705,7 +709,7 @@ impl HidppAdapter {
         let dpi = get_setting(&self.settings, SettingKey::Dpi)
             .and_then(|v| v.as_int())
             .context("current DPI unknown")? as u16;
-        let old = std::mem::replace(&mut self.lod, lod);
+        let old = self.lod.replace(lod);
         self.set_dpi(dpi).inspect_err(|_| self.lod = old)?;
         merge_setting(
             &mut self.settings,
