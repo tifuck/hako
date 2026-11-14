@@ -246,7 +246,7 @@ impl MixerService {
         live.normalize();
         live.validate().map_err(PatchError::Invalid)?;
         self.edit(false, |file| {
-            file.live = live;
+            file.live = live.clone();
             Ok(())
         })
     }
@@ -256,20 +256,39 @@ impl MixerService {
     fn edit(
         &self,
         later: bool,
-        change: impl FnOnce(&mut MixerFile) -> Result<(), String>,
+        change: impl Fn(&mut MixerFile) -> Result<(), String>,
     ) -> Result<MixerState, PatchError> {
+        // Turning an empty mixer on: the starter layout queries PipeWire
+        // and ALSA (seconds), so it is made before taking the lock.
+        let changed = |mut file: MixerFile| -> Result<(MixerFile, bool), PatchError> {
+            let was_on = file.enabled;
+            change(&mut file).map_err(PatchError::Invalid)?;
+            let fresh = file.enabled && !was_on && file.live == Scene::default();
+            Ok((file, fresh))
+        };
+        let mut made = None;
+        if !later && changed(self.shared.file().map_err(PatchError::Io)?)?.1 {
+            let line_in = legacy_line_in(&self.shared.paths);
+            made = Some(starter(&self.shared.paths, &self.audio, line_in));
+        }
         let (reply, done) = mpsc::channel();
         let file = {
             let mut cache = lock(&self.shared.cache);
-            let mut next = match (cache.dirty, &cache.file) {
+            let current = match (cache.dirty, &cache.file) {
                 (Some(_), Some(file)) => file.clone(),
                 _ => load_mixer(&self.shared.paths).map_err(PatchError::Io)?,
             };
-            let was_on = next.enabled;
-            change(&mut next).map_err(PatchError::Invalid)?;
-            if next.enabled && !was_on && next.live == Scene::default() {
-                let line_in = legacy_line_in(&self.shared.paths);
-                if let Some(live) = starter(&self.shared.paths, &self.audio, line_in) {
+            let (mut next, fresh) = changed(current)?;
+            if fresh {
+                // Another edit got in between: made under the lock after all.
+                let layout = made.unwrap_or_else(|| {
+                    starter(
+                        &self.shared.paths,
+                        &self.audio,
+                        legacy_line_in(&self.shared.paths),
+                    )
+                });
+                if let Some(live) = layout {
                     next.live = live;
                 }
             }
@@ -619,10 +638,7 @@ impl Actor {
                     self.sync();
                 }
                 Ok(Cmd::Reset(reply)) => {
-                    self.graph.teardown();
-                    self.suppressed = true;
-                    // The kill-switch drops the default-sink claim too.
-                    self.game = None;
+                    self.reset();
                     self.publish();
                     let _ = reply.send(());
                 }
@@ -638,6 +654,25 @@ impl Actor {
             }
             self.shared.flush(false);
             self.publish();
+        }
+    }
+
+    /// Kill-switch: the graph goes and stays down until the next `Apply`.
+    /// ChatMix is handed back, but stays down too (`reset_all`) until its
+    /// headset (re)connects.
+    fn reset(&mut self) {
+        self.graph.teardown();
+        self.suppressed = true;
+        // The kill-switch drops the default-sink claim too.
+        self.game = None;
+        if std::mem::take(&mut self.handed_over) {
+            // Suppressed first: handed back before, it would come up at once.
+            if let Err(e) = self.audio.reset_all() {
+                warn!("mixer reset: {e:#}");
+            }
+            if let Err(e) = self.audio.hand_over(false) {
+                warn!("mixer reset: {e:#}");
+            }
         }
     }
 
@@ -692,6 +727,8 @@ impl Actor {
             if let Err(e) = self.audio.hand_over(true) {
                 warn!("mixer on: {e:#}");
             }
+            // Dial moves while ChatMix was not ours were not forwarded.
+            self.dial = self.audio.chatmix_dial();
         }
         let live = &self.file.live;
         self.graph.reconcile(live, self.dial);

@@ -45,9 +45,9 @@ const BACKOFF_MAX: Duration = Duration::from_secs(5);
 const CONFIGURED_SINK: &str = "default.configured.audio.sink";
 /// Metadata key pavucontrol's "move" writes; WirePlumber links the stream
 /// to that node.
-/// ponytail: `target.object` only; session managers that read just
-/// `target.node` (pipewire-media-session) need that too.
 const TARGET: &str = "target.object";
+/// The older key (a node id): the only one WirePlumber 0.4.8 (Ubuntu 22.04) reads.
+const TARGET_NODE: &str = "target.node";
 /// Linux `EPIPE`: the core error a lost connection reports.
 const EPIPE: i32 = 32;
 
@@ -94,6 +94,9 @@ pub struct Graph {
     pub links: BTreeMap<u32, Link>,
     /// Node name in the `default` metadata's `default.audio.sink`.
     pub default_sink: Option<String>,
+    /// Node name in `default.configured.audio.sink`: the user's choice,
+    /// kept while that node is absent (`default_sink` is then a fallback).
+    pub configured_sink: Option<String>,
 }
 
 impl Graph {
@@ -234,6 +237,29 @@ pub fn format_default_name(name: &str) -> String {
     serde_json::json!({ "name": name }).to_string()
 }
 
+/// A core error that means the connection is gone. The server also reports
+/// harmless ones on the core ("unknown resource" when a proxy is destroyed
+/// after its object went, e.g. links of a node that exited).
+pub(crate) fn connection_lost(id: u32, res: i32) -> bool {
+    id == pw::core::PW_ID_CORE && res == -EPIPE
+}
+
+/// The `(key, type, value)` metadata properties that move a stream to
+/// `target` (`id`: its node id), or clear them (`None`).
+fn target_properties(
+    target: Option<&str>,
+    id: Option<u32>,
+) -> [(&'static str, Option<&'static str>, Option<String>); 2] {
+    [
+        (TARGET, None, target.map(str::to_string)),
+        (
+            TARGET_NODE,
+            Some("Spa:Id"),
+            target.and(id).map(|id| id.to_string()),
+        ),
+    ]
+}
+
 /// `Props` with `channelVolumes` set, every channel to `volume` (mute untouched).
 pub fn volume_pod(volume: f32, channels: usize) -> Result<Vec<u8>> {
     props_pod(vec![Property::new(
@@ -287,7 +313,7 @@ enum Request {
     },
     Unlink(u64),
     Destroy(u32, Reply),
-    SetDefaultSink(String, Reply),
+    SetDefaultSink(Option<String>, Reply),
     SetTarget(u32, Option<String>, Reply),
     SetProps(u32, Vec<u8>, Reply),
 }
@@ -431,9 +457,10 @@ impl Engine {
         self.request(|reply| Request::Destroy(id, reply)).map(drop)
     }
 
-    /// What `wpctl set-default` does: the configured default WirePlumber follows.
-    pub fn set_default_sink(&self, name: &str) -> Result<()> {
-        let name = name.to_string();
+    /// What `wpctl set-default` does: the configured default WirePlumber
+    /// follows. `None` unsets it (WirePlumber picks one itself).
+    pub fn set_default_sink(&self, name: Option<&str>) -> Result<()> {
+        let name = name.map(str::to_string);
         self.request(|reply| Request::SetDefaultSink(name, reply))
             .map(drop)
     }
@@ -451,6 +478,16 @@ impl Engine {
         self.request(|reply| Request::SetProps(node, pod, reply))
             .map(drop)
     }
+}
+
+/// Answer the reply waiting for the sync `seq`; false when none is (one of
+/// `connect`'s round trips).
+fn sync_done(syncs: &mut HashMap<i32, Reply>, seq: i32) -> bool {
+    let Some(reply) = syncs.remove(&seq) else {
+        return false;
+    };
+    let _ = reply.send(Ok(0));
+    true
 }
 
 /// A link hako created; dropping it destroys the link.
@@ -541,6 +578,7 @@ fn run(shared: Arc<Shared>, requests: pw::channel::Receiver<Request>) {
 /// go before the registry and core they belong to.
 struct Conn {
     bound: Rc<RefCell<Bound>>,
+    syncs: Rc<RefCell<HashMap<i32, Reply>>>,
     _core_listener: pw::core::Listener,
     _registry_listener: pw::registry::Listener,
     registry: pw::registry::RegistryRc,
@@ -637,13 +675,23 @@ impl Conn {
                             let listener = metadata
                                 .add_listener_local()
                                 .property(move |subject, key, _type, value| {
-                                    // `key: None` clears every property.
-                                    if subject == 0 && key.is_none_or(|k| k == "default.audio.sink")
-                                    {
-                                        let name = value
-                                            .filter(|_| key.is_some())
-                                            .and_then(parse_default_name);
-                                        shared.update(|graph| graph.default_sink = name);
+                                    if subject != 0 {
+                                        return 0;
+                                    }
+                                    let name = || value.and_then(parse_default_name);
+                                    match key {
+                                        // Clears every property.
+                                        None => shared.update(|graph| {
+                                            graph.default_sink = None;
+                                            graph.configured_sink = None;
+                                        }),
+                                        Some("default.audio.sink") => {
+                                            shared.update(|graph| graph.default_sink = name())
+                                        }
+                                        Some(CONFIGURED_SINK) => {
+                                            shared.update(|graph| graph.configured_sink = name())
+                                        }
+                                        Some(_) => {}
                                     }
                                     0
                                 })
@@ -667,7 +715,10 @@ impl Conn {
                         .is_some_and(|(meta, ..)| *meta == id)
                     {
                         bound.metadata = None;
-                        removed.update(|graph| graph.default_sink = None);
+                        removed.update(|graph| {
+                            graph.default_sink = None;
+                            graph.configured_sink = None;
+                        });
                     }
                 })
                 .register()
@@ -679,11 +730,16 @@ impl Conn {
         // the async bit that `sync` returns, newer versions keep it.
         let pending = Rc::new(Cell::new(Some(core.sync(0)?.seq())));
         let rounds = Rc::new(Cell::new(0));
+        let syncs: Rc<RefCell<HashMap<i32, Reply>>> = Rc::default();
         let core_listener = {
             let (weak, shared, dead) = (core.downgrade(), shared.clone(), dead.clone());
+            let syncs = syncs.clone();
             core.add_listener_local()
                 .done(move |id, seq| {
-                    if id != pw::core::PW_ID_CORE || pending.get() != Some(seq.seq()) {
+                    if id != pw::core::PW_ID_CORE
+                        || sync_done(&mut syncs.borrow_mut(), seq.seq())
+                        || pending.get() != Some(seq.seq())
+                    {
                         return;
                     }
                     rounds.set(rounds.get() + 1);
@@ -703,12 +759,9 @@ impl Conn {
                     }
                 })
                 .error(move |id, _seq, res, message| {
-                    // Errors of other objects reach their proxy's listener.
-                    // The server also reports harmless ones on the core
-                    // ("unknown resource" when a proxy is destroyed after
-                    // its object went, e.g. links of a node that exited);
+                    // Errors of other objects reach their proxy's listener;
                     // only a broken connection is fatal.
-                    if id == pw::core::PW_ID_CORE && res == -EPIPE {
+                    if connection_lost(id, res) {
                         warn!("PipeWire: {message} ({res})");
                         dead.set(true);
                     } else {
@@ -720,6 +773,7 @@ impl Conn {
 
         Ok(Self {
             bound,
+            syncs,
             _core_listener: core_listener,
             _registry_listener: registry_listener,
             registry,
@@ -747,23 +801,39 @@ impl Conn {
             Request::SetDefaultSink(name, reply) => {
                 let result = match &self.bound.borrow().metadata {
                     Some((_, _, metadata)) => {
-                        let value = format_default_name(&name);
-                        metadata.set_property(
-                            0,
-                            CONFIGURED_SINK,
-                            Some("Spa:String:JSON"),
-                            Some(&value),
-                        );
-                        Ok(0)
+                        let value = name.as_deref().map(format_default_name);
+                        let kind = value.as_ref().map(|_| "Spa:String:JSON");
+                        metadata.set_property(0, CONFIGURED_SINK, kind, value.as_deref());
+                        // What the server will echo: reads that follow see it.
+                        self.shared.update(|graph| graph.configured_sink = name);
+                        // Answered once a sync issued after the write is
+                        // done (the server handles requests in order): a
+                        // caller that exits next (shutdown) does not lose it.
+                        self.core
+                            .sync(0)
+                            .map(|seq| seq.seq())
+                            .map_err(|e| format!("sync default sink: {e}"))
                     }
                     None => Err("no default metadata (is WirePlumber running?)".to_string()),
                 };
-                let _ = reply.send(result);
+                match result {
+                    Ok(seq) => {
+                        self.syncs.borrow_mut().insert(seq, reply);
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
             }
             Request::SetTarget(stream, target, reply) => {
                 let result = match &self.bound.borrow().metadata {
                     Some((_, _, metadata)) => {
-                        metadata.set_property(stream, TARGET, None, target.as_deref());
+                        let id = target
+                            .as_deref()
+                            .and_then(|name| self.shared.lock().node_id(name));
+                        for (key, kind, value) in target_properties(target.as_deref(), id) {
+                            metadata.set_property(stream, key, kind, value.as_deref());
+                        }
                         Ok(0)
                     }
                     None => Err("no default metadata (is WirePlumber running?)".to_string()),
@@ -858,6 +928,18 @@ mod tests {
         assert_eq!(parse_default_name(r#"{ "name": "" }"#), None);
         assert_eq!(parse_default_name("not json"), None);
         assert_eq!(parse_default_name(r#"{ "other": 1 }"#), None);
+    }
+
+    #[test]
+    fn default_sink_reply_waits_for_its_sync() {
+        let mut syncs = HashMap::new();
+        let (reply, answer) = mpsc::channel();
+        syncs.insert(7, reply);
+        assert!(!sync_done(&mut syncs, 6), "another round trip's done");
+        assert!(answer.try_recv().is_err());
+        assert!(sync_done(&mut syncs, 7));
+        assert_eq!(answer.try_recv(), Ok(Ok(0)));
+        assert!(syncs.is_empty());
     }
 
     fn port(node: u32, name: &str, direction: Direction) -> Port {
@@ -983,6 +1065,30 @@ mod tests {
             let _ = std::fs::remove_file(format!("{}{suffix}", socket.display()));
         }
         assert!(back, "no reconnect after the server came back");
+    }
+
+    #[test]
+    fn a_stream_target_is_written_for_old_and_new_wireplumber() {
+        assert_eq!(
+            target_properties(Some("hako_game"), Some(42)),
+            [
+                (TARGET, None, Some("hako_game".into())),
+                (TARGET_NODE, Some("Spa:Id"), Some("42".into())),
+            ]
+        );
+        // Handing back clears both keys.
+        assert_eq!(
+            target_properties(None, Some(42)),
+            [(TARGET, None, None), (TARGET_NODE, Some("Spa:Id"), None)]
+        );
+    }
+
+    #[test]
+    fn only_a_broken_pipe_on_the_core_is_fatal() {
+        assert!(connection_lost(pw::core::PW_ID_CORE, -EPIPE));
+        // "unknown resource" (ENOENT) on the core, or any error of another object.
+        assert!(!connection_lost(pw::core::PW_ID_CORE, -2));
+        assert!(!connection_lost(7, -EPIPE));
     }
 
     #[test]

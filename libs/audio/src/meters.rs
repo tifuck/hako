@@ -369,7 +369,7 @@ fn connect(
         .error({
             let dead = dead.clone();
             move |id, _seq, res, message| {
-                if id == pw::core::PW_ID_CORE {
+                if crate::engine::connection_lost(id, res) {
                     debug!("meters: core error {res}: {message}");
                     dead.set(true);
                 }

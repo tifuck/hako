@@ -26,9 +26,11 @@ use hako_core::protocol::AdapterEvent;
 use hako_core::VERSION;
 use std::collections::{HashMap, HashSet};
 use std::io::{ErrorKind, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{
+    IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket,
+};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
@@ -36,13 +38,16 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use wire::{
     clean_name, expire, handshake, read_control, Beacon, Cipher, Control, Handshake, Identity,
-    Seen, MAX_AUDIO_PACKET, MAX_AUDIO_PLAIN, MAX_SAMPLES,
+    Seen, FIRST_MESSAGE, MAX_AUDIO_PACKET, MAX_AUDIO_PLAIN, MAX_SAMPLES,
 };
 
 const TICK: Duration = Duration::from_secs(1);
 /// Connect time limit, then the handshake and Hello's together; also every
 /// control write's.
 const HANDSHAKE: Duration = Duration::from_secs(5);
+/// An incoming connection's first handshake message must arrive this fast
+/// (an idle connection gives its slot back soon).
+const FIRST_MESSAGE_WAIT: Duration = Duration::from_secs(1);
 /// A session with nothing heard for this long is dead.
 const SILENCE: Duration = Duration::from_secs(5);
 /// A pairing request nobody answered is dropped after this.
@@ -50,8 +55,12 @@ const PENDING: Duration = Duration::from_secs(60);
 /// A denied key is refused for this long.
 const DENIED: Duration = Duration::from_secs(60);
 const MAX_PENDING: usize = 4;
-/// Incoming connections still in their handshake.
+/// Pairing requests waiting from one IP address.
+const MAX_PENDING_PER_IP: usize = 1;
+/// Incoming connections still in their handshake, in all and from one IP
+/// address.
 const MAX_HANDSHAKES: usize = 8;
+const MAX_HANDSHAKES_PER_IP: usize = 2;
 /// Machines kept from beacons (the one heard longest ago goes).
 const MAX_NEARBY: usize = 64;
 /// Ticks between beacons.
@@ -60,6 +69,9 @@ const BEACON_TICKS: u64 = 2;
 /// after each one up to `MAX_REDIAL` until it is connected again.
 const REDIAL: Duration = Duration::from_secs(3);
 const MAX_REDIAL: Duration = Duration::from_secs(300);
+/// The higher id dials too once a paired machine has been disconnected this
+/// long (the lower id may be unable to reach it), with the same backoff.
+const REDIAL_GRACE: Duration = Duration::from_secs(15);
 /// Blocking receives wake this often to see whether to stop.
 const RECV_WAIT: Duration = Duration::from_millis(200);
 
@@ -164,6 +176,9 @@ enum Stage {
     Outgoing {
         shown: bool,
     },
+    /// The user's pairing was accepted there: our user confirms the code
+    /// (Confirm / Cancel) before anything is pinned here.
+    Confirm,
     Live,
 }
 
@@ -554,7 +569,7 @@ impl Shared {
     }
 
     fn accept(self: &Arc<Self>, listener: &TcpListener, stop: &Arc<AtomicBool>) {
-        let handshakes = Arc::new(AtomicUsize::new(0));
+        let handshakes = Slots::default();
         for conn in listener.incoming() {
             if stop.load(Ordering::Relaxed) {
                 return;
@@ -568,12 +583,13 @@ impl Shared {
                 }
             };
             // One thread per connection; past `MAX_HANDSHAKES` still in
-            // their handshake, new ones are dropped.
-            let Some(slot) = Slot::take(&handshakes) else {
-                debug!(
-                    "net: incoming {:?}: too many handshakes",
-                    stream.peer_addr()
-                );
+            // their handshake (`MAX_HANDSHAKES_PER_IP` from its address),
+            // new ones are dropped.
+            let Ok(from) = stream.peer_addr() else {
+                continue;
+            };
+            let Some(slot) = Slot::take(&handshakes, from.ip()) else {
+                debug!("net: incoming {from}: too many handshakes");
                 continue;
             };
             let (me, stop) = (self.clone(), stop.clone());
@@ -607,9 +623,9 @@ impl Shared {
             )
         };
         prepare(&stream)?;
-        let mut timed = Deadline::new(&stream);
+        let mut timed = Deadline::new(&stream).first(FIRST_MESSAGE, FIRST_MESSAGE_WAIT);
         let hs = handshake(&mut timed, &private, false)?;
-        let mut last = 0;
+        let mut last = hs.last;
         let Control::Hello {
             name, port, pair, ..
         } = read_control(&mut timed, &hs.cipher, &mut last)?
@@ -619,26 +635,44 @@ impl Shared {
         let s = Arc::new(Session::new(&stream, hs, &name, port)?);
         let (admitted, old) = {
             let mut inner = lock(&self.inner);
+            let waiting = |from: Option<IpAddr>| {
+                inner
+                    .sessions
+                    .values()
+                    .filter(|e| e.stage == Stage::Incoming)
+                    .filter(|e| from.is_none_or(|ip| e.session.addr.ip() == ip))
+                    .count()
+            };
+            // Refused: the reply and why.
             let stage = if s.key == own {
-                Err("this machine's own key".to_string())
+                Err((Control::Denied, "this machine's own key"))
             } else if inner.denied.contains_key(&s.key) {
-                Err("denied a moment ago".into())
+                Err((Control::Denied, "denied a moment ago"))
             } else if inner.file.peers.iter().any(|p| p.key == s.key) {
                 Ok(Stage::Live)
             } else if !pair {
-                Err("not paired".into())
+                Err((Control::Denied, "not paired"))
+            } else if waiting(None) >= MAX_PENDING
+                || waiting(Some(s.addr.ip())) >= MAX_PENDING_PER_IP
+            {
+                Err((Control::Busy, "too many pairing requests"))
             } else {
                 Ok(Stage::Incoming)
             };
             // A paired machine dialling again lost its old session (it
-            // restarted without Bye): the new one replaces it. Only the
-            // lower id redials, so two sessions never keep replacing each
-            // other.
+            // restarted without Bye): the new one replaces it. The higher
+            // id redials only after `REDIAL_GRACE`, so two sessions do not
+            // keep replacing each other.
             let old = matches!(stage, Ok(Stage::Live))
                 .then(|| inner.sessions.remove(&s.key))
                 .flatten();
-            let admitted =
-                stage.and_then(|stage| register(&mut inner, &s, stage, stop).map(|()| stage));
+            let admitted = stage
+                .map_err(|(reply, e)| (reply, e.to_string()))
+                .and_then(|stage| {
+                    register(&mut inner, &s, stage, stop)
+                        .map(|()| stage)
+                        .map_err(|e| (Control::Denied, e))
+                });
             (admitted, old)
         };
         if let Some(old) = old {
@@ -646,8 +680,8 @@ impl Shared {
         }
         let stage = match admitted {
             Ok(stage) => stage,
-            Err(e) => {
-                let _ = s.send(&Control::Denied);
+            Err((reply, e)) => {
+                let _ = s.send(&reply);
                 bail!("{}: {e}", s.name);
             }
         };
@@ -713,7 +747,7 @@ impl Shared {
                 )));
             }
         }
-        let mut last = 0;
+        let mut last = hs.last;
         let reply = hs
             .cipher
             .seal_control(&hello)
@@ -723,6 +757,11 @@ impl Shared {
         let (name, port) = match reply {
             Control::Hello { name, port, .. } => (name, port),
             Control::Denied => return Err(Declined(format!("{addr} declined"))),
+            Control::Busy => {
+                return Err(Failed(format!(
+                    "{addr} is busy with other pairing requests: try again in a minute"
+                )))
+            }
             _ => return Err(Failed(format!("{addr} closed the connection"))),
         };
         let s = Arc::new(Session::new(&stream, hs, &name, port).map_err(failed)?);
@@ -745,7 +784,8 @@ impl Shared {
         Ok(())
     }
 
-    /// Answer a pending request by peer id.
+    /// Answer a pending request by peer id: an incoming one, or our own
+    /// once the other side accepted it (the user confirms the code).
     fn respond(self: &Arc<Self>, id: &str, accept: bool) -> Result<(), PatchError> {
         let found = lock(&self.inner)
             .sessions
@@ -775,6 +815,13 @@ impl Shared {
                     .insert(s.key.clone(), Instant::now());
                 self.close(&s, Some(&Control::Denied));
             }
+            (Stage::Confirm, true) => {
+                if let Err(e) = self.go_live(&s, true) {
+                    self.undo(&s);
+                    return Err(e);
+                }
+            }
+            (Stage::Confirm, false) => self.undo(&s),
             (_, false) => self.close(&s, Some(&Control::Bye)),
             (_, true) => {
                 return Err(PatchError::Invalid(format!(
@@ -900,6 +947,14 @@ impl Shared {
         }))
     }
 
+    /// A session the other side accepted does not go live here: `Denied`
+    /// makes it unpin what it pinned for it, then the session closes.
+    fn undo(&self, s: &Arc<Session>) {
+        // `try_send` would skip it during a ping.
+        let _ = s.send(&Control::Denied);
+        self.close(s, None);
+    }
+
     /// Undo the pin `s`'s pairing made: the other side did not complete it.
     fn unpin(&self, s: &Session) {
         let removed = self.edit(|f| {
@@ -929,28 +984,30 @@ impl Shared {
                     *lock(&s.rtt_ms) = s.clock().saturating_sub(t) as f32 / 1000.0;
                 }
                 Control::Accepted => {
-                    let shown = lock(&self.inner)
+                    let mut inner = lock(&self.inner);
+                    let entry = inner
                         .sessions
-                        .get(&s.key)
-                        .filter(|e| Arc::ptr_eq(&e.session, s))
-                        .and_then(|e| match e.stage {
-                            Stage::Outgoing { shown } => Some(shown),
-                            _ => None,
-                        });
-                    if let Some(shown) = shown {
-                        if let Err(e) = self.go_live(s, shown) {
-                            let e = message(e);
-                            warn!("net: {}: {e}", s.name);
-                            if shown {
-                                lock(&self.inner).problem =
-                                    Some(format!("pairing with {}: {e}", s.name));
-                            }
-                            // The other side unpins what it just pinned
-                            // (`try_send` would skip it during a ping).
-                            let _ = s.send(&Control::Denied);
-                            self.close(s, None);
-                            return;
+                        .get_mut(&s.key)
+                        .filter(|e| Arc::ptr_eq(&e.session, s));
+                    match entry {
+                        // The user's pairing: pinned only once our user
+                        // confirms the code too (`respond`).
+                        Some(e) if e.stage == (Stage::Outgoing { shown: true }) => {
+                            e.stage = Stage::Confirm;
+                            e.since = Instant::now();
+                            drop(inner);
+                            self.publish();
                         }
+                        // A reconnect: only a key still pinned goes live.
+                        Some(e) if e.stage == (Stage::Outgoing { shown: false }) => {
+                            drop(inner);
+                            if let Err(e) = self.go_live(s, false) {
+                                warn!("net: {}: {}", s.name, message(e));
+                                self.undo(s);
+                                return;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Control::Denied => {
@@ -965,7 +1022,7 @@ impl Shared {
                     break;
                 }
                 Control::Bye => break,
-                Control::Hello { .. } => {}
+                Control::Hello { .. } | Control::Busy => {}
             }
         }
         self.close(s, Some(&Control::Bye));
@@ -1035,14 +1092,9 @@ impl Shared {
         {
             return;
         }
-        let changed = inner
-            .nearby
-            .get(&beacon.key)
-            .is_none_or(|s| s.beacon != beacon || s.addr != addr);
-        if changed {
-            // Back, or moved: a paired machine is dialled again at once.
-            inner.redial.remove(&beacon.key);
-        }
+        // A beacon is unauthenticated: it changes where a paired machine's
+        // next reconnect goes first (`reconnects`), never when, so forged
+        // ones cannot make this machine dial at their pace.
         if inner.nearby.len() >= MAX_NEARBY && !inner.nearby.contains_key(&beacon.key) {
             let oldest = inner
                 .nearby
@@ -1087,7 +1139,14 @@ impl Shared {
                     now.duration_since(*lock(&e.session.heard)) > SILENCE
                         || (e.stage != Stage::Live && now.duration_since(e.since) > PENDING)
                 })
-                .map(|e| e.session.clone())
+                .map(|e| {
+                    // Not confirmed in time: the other side unpins.
+                    let bye = match e.stage {
+                        Stage::Confirm => Control::Denied,
+                        _ => Control::Bye,
+                    };
+                    (e.session.clone(), bye)
+                })
                 .collect();
             inner
                 .denied
@@ -1131,8 +1190,12 @@ impl Shared {
             };
             (stale, sessions, dials, beacon)
         };
-        for s in &stale {
-            self.close(s, Some(&Control::Bye));
+        for (s, bye) in &stale {
+            match bye {
+                // The other side must hear it to unpin: never skipped.
+                Control::Denied => self.undo(s),
+                _ => self.close(s, Some(bye)),
+            }
         }
         for s in sessions {
             s.try_send(&Control::Ping { t: s.clock() });
@@ -1252,9 +1315,10 @@ impl Shared {
             .sessions
             .values()
             .filter_map(|e| {
-                let incoming = match e.stage {
-                    Stage::Incoming => true,
-                    Stage::Outgoing { shown: true } => false,
+                let (incoming, accepted) = match e.stage {
+                    Stage::Incoming => (true, false),
+                    Stage::Outgoing { shown: true } => (false, false),
+                    Stage::Confirm => (false, true),
                     _ => return None,
                 };
                 Some(PairRequest {
@@ -1263,6 +1327,7 @@ impl Shared {
                     address: e.session.addr.to_string(),
                     code: e.session.code.clone(),
                     incoming,
+                    accepted,
                 })
             })
             .collect();
@@ -1295,8 +1360,8 @@ impl Shared {
     }
 }
 
-/// Add `s` unless Network went off meanwhile (`stop` is not the live one),
-/// its key has a session already, or too many requests wait.
+/// Add `s` unless Network went off meanwhile (`stop` is not the live one)
+/// or its key has a session already.
 fn register(
     inner: &mut Inner,
     s: &Arc<Session>,
@@ -1313,14 +1378,6 @@ fn register(
     if inner.sessions.contains_key(&s.key) {
         return Err(format!("already connected to {}", s.name));
     }
-    let waiting = inner
-        .sessions
-        .values()
-        .filter(|e| e.stage == Stage::Incoming)
-        .count();
-    if stage == Stage::Incoming && waiting >= MAX_PENDING {
-        return Err("too many pairing requests".into());
-    }
     inner.sessions.insert(
         s.key.clone(),
         Entry {
@@ -1334,21 +1391,29 @@ fn register(
 }
 
 /// Paired machines to dial now: not connected or being dialled, due (see
-/// `REDIAL`), with a known address, and a higher id than this machine (the
-/// lower id dials). Addresses in order: the beacon's (it may have moved),
-/// then where it last connected this run, then the one saved in `net.toml`
-/// (a beacon proves nothing).
+/// `REDIAL`) and with a known address. The lower id dials at once, the
+/// higher one only after `REDIAL_GRACE`. Addresses in order: the beacon's
+/// (it may have moved), then where it last connected this run, then the
+/// one saved in `net.toml` (a beacon proves nothing).
 fn reconnects(inner: &mut Inner, now: Instant) -> Vec<(String, Vec<SocketAddr>)> {
     let Some(own) = inner.identity.as_ref().map(|i| peer_id(&i.public)) else {
         return Vec::new();
     };
+    for p in &inner.file.peers {
+        if own > p.id && !inner.sessions.contains_key(&p.key) {
+            inner.redial.entry(p.key.clone()).or_insert(Redial {
+                attempts: 0,
+                next: now + REDIAL_GRACE,
+                problem: None,
+            });
+        }
+    }
     let dials: Vec<_> = inner
         .file
         .peers
         .iter()
         .filter(|p| {
-            own < p.id
-                && !inner.sessions.contains_key(&p.key)
+            !inner.sessions.contains_key(&p.key)
                 && !inner.dialing.contains(&p.key)
                 && inner.redial.get(&p.key).is_none_or(|r| now >= r.next)
         })
@@ -1504,6 +1569,8 @@ fn prepare(stream: &TcpStream) -> std::io::Result<()> {
 struct Deadline<'a> {
     stream: &'a TcpStream,
     until: Instant,
+    /// An earlier limit for the bytes still to come of the first ones.
+    first: Option<(Instant, usize)>,
 }
 
 impl<'a> Deadline<'a> {
@@ -1511,13 +1578,23 @@ impl<'a> Deadline<'a> {
         Self {
             stream,
             until: Instant::now() + HANDSHAKE,
+            first: None,
+        }
+    }
+
+    /// The first `bytes` must also arrive within `wait`.
+    fn first(self, bytes: usize, wait: Duration) -> Self {
+        Self {
+            first: Some((Instant::now() + wait, bytes)),
+            ..self
         }
     }
 }
 
 impl Read for Deadline<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let left = self.until.saturating_duration_since(Instant::now());
+        let until = self.first.map_or(self.until, |(at, _)| at.min(self.until));
+        let left = until.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err(std::io::Error::new(
                 ErrorKind::TimedOut,
@@ -1526,7 +1603,11 @@ impl Read for Deadline<'_> {
         }
         self.stream.set_read_timeout(Some(left))?;
         let mut stream = self.stream;
-        stream.read(buf)
+        let n = stream.read(buf)?;
+        self.first = self
+            .first
+            .and_then(|(at, bytes)| (bytes > n).then(|| (at, bytes - n)));
+        Ok(n)
     }
 }
 
@@ -1542,24 +1623,34 @@ impl Write for Deadline<'_> {
     }
 }
 
-/// One of `MAX_HANDSHAKES` incoming connections in their handshake; given
-/// back when dropped.
-struct Slot(Arc<AtomicUsize>);
+/// Incoming connections in their handshake, by source address.
+type Slots = Arc<Mutex<HashMap<IpAddr, usize>>>;
+
+/// One of `MAX_HANDSHAKES` (`MAX_HANDSHAKES_PER_IP` from one address)
+/// incoming connections in their handshake; given back when dropped.
+struct Slot(Slots, IpAddr);
 
 impl Slot {
-    fn take(count: &Arc<AtomicUsize>) -> Option<Self> {
-        count
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < MAX_HANDSHAKES).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| Self(count.clone()))
+    fn take(slots: &Slots, ip: IpAddr) -> Option<Self> {
+        let mut taken = lock(slots);
+        let from = taken.get(&ip).copied().unwrap_or(0);
+        if from >= MAX_HANDSHAKES_PER_IP || taken.values().sum::<usize>() >= MAX_HANDSHAKES {
+            return None;
+        }
+        taken.insert(ip, from + 1);
+        Some(Self(slots.clone(), ip))
     }
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        let mut taken = lock(&self.0);
+        if let Some(n) = taken.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                taken.remove(&self.1);
+            }
+        }
     }
 }
 
@@ -1661,12 +1752,7 @@ mod tests {
             key: None,
         }])
         .unwrap();
-        b.patch(&[NetOp::Respond {
-            id: a_id.clone(),
-            accept: true,
-        }])
-        .unwrap();
-        wait("connected", || connected(&a, &b_id) && connected(&b, &a_id));
+        accept_both(&a, &b, &a_id, &b_id);
         std::thread::sleep(Duration::from_secs(1));
 
         let pw_cat = |mode: &str, target: &str| {
@@ -1741,6 +1827,30 @@ mod tests {
         net.state().peers.iter().any(|p| p.id == id && p.connected)
     }
 
+    /// Alpha's request to bravo was accepted there: Confirm / Cancel.
+    fn accepted(a: &NetService, b_id: &str) -> bool {
+        a.state()
+            .requests
+            .iter()
+            .any(|r| r.id == b_id && !r.incoming && r.accepted)
+    }
+
+    /// Bravo accepts alpha's request, alpha's user confirms the code.
+    fn accept_both(a: &NetService, b: &NetService, a_id: &str, b_id: &str) {
+        b.patch(&[NetOp::Respond {
+            id: a_id.into(),
+            accept: true,
+        }])
+        .unwrap();
+        wait("accepted", || accepted(a, b_id));
+        a.patch(&[NetOp::Respond {
+            id: b_id.into(),
+            accept: true,
+        }])
+        .unwrap();
+        wait("connected", || connected(a, b_id) && connected(b, a_id));
+    }
+
     fn trusts(paths: &ConfigPaths, id: &str) -> bool {
         load_net(paths).unwrap().peers.iter().any(|p| p.id == id)
     }
@@ -1785,12 +1895,23 @@ mod tests {
             (a_id.as_str(), "alpha")
         );
         assert_eq!(theirs[0].code, out.code);
+        // Confirming before bravo accepted is refused.
+        let confirm = [NetOp::Respond {
+            id: b_id.clone(),
+            accept: true,
+        }];
+        assert!(a.patch(&confirm).is_err());
 
         b.patch(&[NetOp::Respond {
             id: a_id.clone(),
             accept: true,
         }])
         .unwrap();
+        // Bravo's Accept pins nothing on alpha until its user confirms.
+        wait("accepted", || accepted(&a, &b_id));
+        assert!(!trusts(&a_paths, &b_id) && !connected(&a, &b_id));
+        assert_eq!(a.state().requests[0].code, out.code);
+        a.patch(&confirm).unwrap();
         wait("connected", || connected(&a, &b_id) && connected(&b, &a_id));
         assert!(a.state().requests.is_empty() && b.state().requests.is_empty());
         assert!(trusts(&a_paths, &b_id) && trusts(&b_paths, &a_id));
@@ -2031,13 +2152,19 @@ mod tests {
         }
         let (a, a_paths, _) = machine("half-a");
         let (b, b_paths, b_port) = machine("half-b");
-        let a_id = turn_on(&a);
-        turn_on(&b);
+        let (a_id, b_id) = (turn_on(&a), turn_on(&b));
         a.patch(&[NetOp::Pair {
             address: format!("127.0.0.1:{b_port}"),
             key: None,
         }])
         .unwrap();
+        b.patch(&[NetOp::Respond {
+            id: a_id.clone(),
+            accept: true,
+        }])
+        .unwrap();
+        wait("accepted", || accepted(&a, &b_id));
+        assert!(trusts(&b_paths, &a_id));
         let mode = |m| std::fs::Permissions::from_mode(m);
         std::fs::set_permissions(&a_paths.root, mode(0o500)).unwrap();
         // A ping holding alpha's writer must not cost the Denied.
@@ -2049,22 +2176,76 @@ mod tests {
             .session
             .clone();
         let writing = lock(&s.writer);
+        std::thread::scope(|scope| {
+            let confirm = scope.spawn(|| {
+                a.patch(&[NetOp::Respond {
+                    id: b_id.clone(),
+                    accept: true,
+                }])
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            drop(writing);
+            assert!(matches!(confirm.join().unwrap(), Err(PatchError::Io(_))));
+        });
+        wait("bravo unpinned alpha", || {
+            !trusts(&b_paths, &a_id) && b.state().peers.is_empty()
+        });
+        std::fs::set_permissions(&a_paths.root, mode(0o700)).unwrap();
+        assert!(load_net(&a_paths).unwrap().peers.is_empty());
+        assert!(a.state().requests.is_empty());
+        done([(a, a_paths), (b, b_paths)]);
+    }
+
+    #[test]
+    fn cancelling_an_accepted_request_unpins_the_other_side() {
+        let (a, a_paths, _) = machine("cancel-a");
+        let (b, b_paths, b_port) = machine("cancel-b");
+        let (a_id, b_id) = (turn_on(&a), turn_on(&b));
+        a.patch(&[NetOp::Pair {
+            address: format!("127.0.0.1:{b_port}"),
+            key: None,
+        }])
+        .unwrap();
         b.patch(&[NetOp::Respond {
             id: a_id.clone(),
             accept: true,
         }])
         .unwrap();
-        let until = Instant::now() + Duration::from_secs(3);
-        while a.state().problem.is_none() && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        drop(writing);
+        wait("accepted", || accepted(&a, &b_id));
+        a.patch(&[NetOp::Respond {
+            id: b_id.clone(),
+            accept: false,
+        }])
+        .unwrap();
         wait("bravo unpinned alpha", || {
             !trusts(&b_paths, &a_id) && b.state().peers.is_empty()
         });
-        wait("alpha shows why", || a.state().problem.is_some());
-        std::fs::set_permissions(&a_paths.root, mode(0o700)).unwrap();
-        assert!(load_net(&a_paths).unwrap().peers.is_empty());
+        assert!(a.state().requests.is_empty() && a.state().peers.is_empty());
+        assert!(!trusts(&a_paths, &b_id));
+        done([(a, a_paths), (b, b_paths)]);
+    }
+
+    #[test]
+    fn one_address_gets_one_pending_request_and_then_busy() {
+        let (a, a_paths, _) = machine("busy-a");
+        let (b, b_paths, b_port) = machine("busy-b");
+        let (c, c_paths, _) = machine("busy-c");
+        turn_on(&a);
+        turn_on(&b);
+        turn_on(&c);
+        let pair = [NetOp::Pair {
+            address: format!("127.0.0.1:{b_port}"),
+            key: None,
+        }];
+        a.patch(&pair).unwrap();
+        // Charlie dials from the same address while alpha's request waits.
+        match c.patch(&pair) {
+            Err(PatchError::Invalid(e)) => assert!(e.contains("busy"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(b.state().requests.len(), 1);
+        c.shutdown();
+        let _ = std::fs::remove_dir_all(&c_paths.root);
         done([(a, a_paths), (b, b_paths)]);
     }
 
@@ -2079,12 +2260,7 @@ mod tests {
             key: None,
         }])
         .unwrap();
-        b.patch(&[NetOp::Respond {
-            id: a_id.clone(),
-            accept: true,
-        }])
-        .unwrap();
-        wait("connected", || connected(&a, &b_id) && connected(&b, &a_id));
+        accept_both(&a, &b, &a_id, &b_id);
         ([(a, a_paths), (b, b_paths)], a_id, b_id, b_port)
     }
 
@@ -2146,12 +2322,7 @@ mod tests {
             key: None,
         }])
         .unwrap();
-        b.patch(&[NetOp::Respond {
-            id: a_id.clone(),
-            accept: true,
-        }])
-        .unwrap();
-        wait("connected", || connected(&a, &b_id) && connected(&b, &a_id));
+        accept_both(&a, &b, &a_id, &b_id);
         // The higher id forgets the lower one, which then redials.
         let (low, high, low_id, high_id) = if a_id < b_id {
             (&a, &b, &a_id, &b_id)
@@ -2221,6 +2392,104 @@ mod tests {
             at = next;
         }
         assert_eq!(gaps, [3, 6, 12, 24, 48, 96, 192, 300, 300, 300]);
+
+        // A beacon from a new address changes where the next attempt goes,
+        // not when.
+        let (net, paths, _) = machine("beacon-backoff");
+        *lock(&net.shared.inner) = inner;
+        let before = lock(&net.shared.inner).redial[&key].next;
+        for port in 1..=5 {
+            let beacon = Beacon {
+                id: peer_id(&key),
+                name: "Peer".into(),
+                key: key.clone(),
+                port,
+            };
+            net.shared
+                .heard(&beacon.encode(), "10.0.0.66:47820".parse().unwrap());
+        }
+        let mut inner = lock(&net.shared.inner);
+        assert_eq!(inner.redial[&key].next, before);
+        assert_eq!(inner.redial[&key].attempts, 11);
+        inner.dialing.clear();
+        assert_eq!(
+            reconnects(&mut inner, before),
+            [(
+                key.clone(),
+                vec!["10.0.0.66:5".parse().unwrap(), verified, saved]
+            )]
+        );
+        drop(inner);
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn the_higher_id_redials_after_a_grace_period() {
+        let key = "00".repeat(32);
+        let mut inner = Inner {
+            identity: Some(Identity {
+                private: Vec::new(),
+                public: "ff".repeat(32),
+            }),
+            ..Inner::default()
+        };
+        inner.file.peers.push(Peer {
+            id: peer_id(&key),
+            name: "Peer".into(),
+            key: key.clone(),
+            jitter_ms: DEFAULT_JITTER_MS,
+            address: Some("10.0.0.3:47821".parse().unwrap()),
+        });
+        let now = Instant::now();
+        assert!(reconnects(&mut inner, now).is_empty(), "the lower id dials");
+        let due = now + REDIAL_GRACE;
+        assert!(reconnects(&mut inner, due - Duration::from_millis(1)).is_empty());
+        assert_eq!(reconnects(&mut inner, due).len(), 1);
+        inner.dialing.clear();
+        assert!(reconnects(&mut inner, due + Duration::from_secs(2)).is_empty());
+        assert_eq!(reconnects(&mut inner, due + REDIAL).len(), 1, "backoff");
+    }
+
+    #[test]
+    fn one_address_holds_at_most_two_handshake_slots() {
+        let slots = Slots::default();
+        let (a, b): (IpAddr, IpAddr) = ("10.0.0.2".parse().unwrap(), "10.0.0.3".parse().unwrap());
+        let held: Vec<_> = (0..2).map(|_| Slot::take(&slots, a).unwrap()).collect();
+        assert!(Slot::take(&slots, a).is_none());
+        let others: Vec<_> = (0..2).map(|_| Slot::take(&slots, b).unwrap()).collect();
+        drop(held);
+        assert!(Slot::take(&slots, a).is_some());
+        drop(others);
+        assert!(lock(&slots).is_empty());
+    }
+
+    #[test]
+    fn the_first_handshake_message_has_a_shorter_time_limit() {
+        // The peer sends `sent` bytes, waits 600 ms, then one more.
+        let read = |sent: usize| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let (mut peer, _) = listener.accept().unwrap();
+                peer.write_all(&vec![0; sent]).unwrap();
+                std::thread::sleep(Duration::from_millis(600));
+                let _ = peer.write_all(&[0]);
+            });
+            let stream = TcpStream::connect(addr).unwrap();
+            let start = Instant::now();
+            let mut timed = Deadline::new(&stream).first(FIRST_MESSAGE, Duration::from_millis(300));
+            let read = timed.read_exact(&mut [0u8; FIRST_MESSAGE + 1]);
+            let took = start.elapsed();
+            drop(stream);
+            peer.join().unwrap();
+            (read.is_ok(), took)
+        };
+        // Most of the first message, then a stall: dropped at 300 ms.
+        let (ok, took) = read(10);
+        assert!(!ok && took < Duration::from_millis(550), "{took:?}");
+        // All of it at once: the rest only has the whole handshake's limit.
+        let (ok, took) = read(FIRST_MESSAGE);
+        assert!(ok && took >= Duration::from_millis(550), "{took:?}");
     }
 
     #[test]
@@ -2263,6 +2532,7 @@ mod tests {
         let mut timed = Deadline {
             stream: &stream,
             until: start + Duration::from_millis(300),
+            first: None,
         };
         let read = timed.read_exact(&mut [0u8; 1000]);
         let kind = read.unwrap_err().kind();

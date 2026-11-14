@@ -56,7 +56,8 @@ fn instance(info: &HidDeviceInfo) -> String {
 }
 
 /// Write `req`, then return the first input report `accept` takes within
-/// `timeout`. `Ok(None)` = no answer (e.g. a wireless device that is off).
+/// `timeout`, however many other reports keep arriving. `Ok(None)` = no
+/// answer (e.g. a wireless device that is off).
 fn request(
     dev: &mut HidrawDevice,
     req: &[u8],
@@ -67,13 +68,19 @@ fn request(
     dev.write(req)?;
     let deadline = Instant::now() + timeout;
     let mut buf = [0u8; 64];
-    while let Ok(n) = dev.read_timeout(&mut buf, deadline.saturating_duration_since(Instant::now()))
-    {
+    loop {
+        // `read_timeout` reads before it looks at the time left.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        let Ok(n) = dev.read_timeout(&mut buf, left) else {
+            return Ok(None);
+        };
         if accept(&buf[..n]) {
             return Ok(Some(buf[..n].to_vec()));
         }
     }
-    Ok(None)
 }
 
 /// `get_setting` as an integer.
@@ -82,4 +89,19 @@ fn int(
     key: hako_core::catalog::SettingKey,
 ) -> Option<i64> {
     hako_core::config::get_setting(settings, key).and_then(|v| v.as_int())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_ends_at_its_deadline_under_a_report_flood() {
+        // Endless input reports (mouse movement), none of them the reply.
+        let mut dev = HidrawDevice::open(std::path::Path::new("/dev/zero")).unwrap();
+        let start = Instant::now();
+        let got = request(&mut dev, &[0x90], |_| false, Duration::from_millis(50)).unwrap();
+        assert_eq!(got, None);
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
 }

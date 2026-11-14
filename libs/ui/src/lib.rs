@@ -271,6 +271,7 @@ impl HakoAppUi {
     fn profile_menu(&mut self, ui: &mut egui::Ui, out: &mut Vec<UiCommand>) {
         let st = self.state.clone().filter(|_| self.daemon_error.is_none());
         let current = st.as_ref().and_then(|s| s.last_profile.clone());
+        let label = profile_label(st.as_ref());
         let profiles = st.as_ref().map(|s| s.profiles.clone()).unwrap_or_default();
         let draft = &mut self.profile_draft;
         let delete = &mut self.profile_delete;
@@ -278,12 +279,7 @@ impl HakoAppUi {
         let open = ui.memory(|m| m.is_popup_open(popup_id));
         let resp = ui
             .add_enabled_ui(st.is_some(), |ui| {
-                widgets::dropdown_button(
-                    ui,
-                    current.as_deref().unwrap_or("No profile"),
-                    PROFILE_MENU_W,
-                    open,
-                )
+                widgets::dropdown_button(ui, &label, PROFILE_MENU_W, open)
             })
             .inner;
         if resp.clicked() {
@@ -608,6 +604,20 @@ fn valid_profile_name(name: &str) -> bool {
         && n.len() <= 48
         && n.chars()
             .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+}
+
+/// The profile picker's text: the last applied or saved profile, marked once
+/// a setting changed since.
+fn profile_label(st: Option<&HubState>) -> String {
+    match st.and_then(|s| {
+        s.last_profile
+            .as_ref()
+            .map(|p| (p, s.last_profile_modified))
+    }) {
+        Some((p, true)) => format!("{p} (modified)"),
+        Some((p, false)) => p.clone(),
+        None => "No profile".into(),
+    }
 }
 
 // ── Device page ──────────────────────────────────────────────────

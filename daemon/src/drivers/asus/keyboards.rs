@@ -322,8 +322,7 @@ impl KeyboardAdapter {
     }
 
     fn saving(&self) -> bool {
-        get_setting(&self.settings, SettingKey::SaveToDevice).and_then(|v| v.as_bool())
-            == Some(true)
+        save_mode(self.spec, &self.settings)
     }
 
     fn store(&mut self) -> Result<()> {
@@ -440,6 +439,13 @@ fn store_lighting(t: &mut impl Exchange) -> Result<()> {
         .map(drop)
 }
 
+/// Save mode is on, and offered: a stale `true` in the file of a board whose
+/// save is blocked (`sanitize_saved` leaves blocked controls alone) never saves.
+fn save_mode(spec: &KeyboardSpec, settings: &SettingsMap) -> bool {
+    spec.save_blocked.is_none()
+        && get_setting(settings, SettingKey::SaveToDevice).and_then(|v| v.as_bool()) == Some(true)
+}
+
 fn controls(spec: &KeyboardSpec, settings: &SettingsMap) -> Vec<SettingMeta> {
     // OpenRGB: four brightness levels, sent as level * 25.
     let mut c = lighting_controls(effect_of(settings), 25.0, true);
@@ -487,6 +493,11 @@ mod tests {
         let claymore = save(0x196b);
         assert!(claymore.persistent && claymore.blocked.is_some());
         assert!(claymore.validate(&SettingValue::Bool(true)).is_err());
+
+        let mut on = SettingsMap::new();
+        merge_setting(&mut on, SettingKey::SaveToDevice, SettingValue::Bool(true));
+        assert!(save_mode(find(0x1951).unwrap(), &on));
+        assert!(!save_mode(find(0x196b).unwrap(), &on));
     }
 
     #[test]

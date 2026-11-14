@@ -1,4 +1,5 @@
-# CI and release builds use this exact toolchain (dtolnay/rust-toolchain@<same>
+# CI and release builds use this exact toolchain (dtolnay/rust-toolchain pinned
+# to the commit of its <same> branch, `# <same>` after it)
 # in .github/workflows); scripts/publish.sh refuses to run if they differ.
 # Bump all three together.
 [toolchain]

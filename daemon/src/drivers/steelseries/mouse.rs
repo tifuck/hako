@@ -763,7 +763,9 @@ impl MouseAdapter {
     ) -> Result<Self> {
         let info = find_hidraw(VID, pid, Some(spec.interface))?;
         let dev = HidrawDevice::open(&info.path)?;
-        let settings = hako_core::config::load_device_settings(&paths, VID, pid)?;
+        let mut settings = hako_core::config::load_device_settings(&paths, VID, pid)?;
+        let offered = controls(spec, &settings);
+        crate::drivers::sanitize_saved(&mut settings, &offered);
         let mut a = Self {
             id: DeviceId {
                 vendor_id: VID,

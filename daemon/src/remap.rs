@@ -38,6 +38,8 @@ const HELD_REPORT_AFTER: u32 = 20;
 const OPEN_RETRY: Duration = Duration::from_secs(2);
 /// A capture / record session that nobody ends is dropped after this.
 const SESSION_LIMIT: Duration = Duration::from_secs(120);
+/// How often a session checks it may still read its nodes.
+const ACCESS_CHECK: Duration = Duration::from_millis(250);
 
 /// Commands carry an index into `EngineInner::devices` (append-only), which the
 /// worker mirrors in its own slot list.
@@ -63,12 +65,28 @@ enum Cmd {
     Shutdown,
 }
 
+/// PIDs the engine treats as one device (from `Model::remap_pids`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemapPids {
+    /// The device's own PIDs first (`pids[0]` names its remap file), then
+    /// its receiver's, whose input nodes may carry its events.
+    pub pids: Vec<u16>,
+    /// How many leading `pids` are the device's own: only those identify it
+    /// (reconnects, remap files); a receiver's PID may be another device's.
+    pub own: usize,
+}
+
+impl RemapPids {
+    fn own(&self) -> &[u16] {
+        &self.pids[..self.own.min(self.pids.len())]
+    }
+}
+
 struct DevState {
     id: DeviceId,
     /// Product name, for error messages.
     name: String,
-    /// Every PID the driver model enumerates as; `pids[0]` names the config file.
-    pids: Vec<u16>,
+    pids: RemapPids,
     bindings: HashMap<u16, RemapBinding>,
     capturing: Option<CaptureRole>,
     capture_source: Option<EvdevKey>,
@@ -123,7 +141,7 @@ impl EngineInner {
             .or_else(|| {
                 self.devices
                     .iter()
-                    .position(|d| claims(d.id.vendor_id, &d.pids, id))
+                    .position(|d| claims(d.id.vendor_id, d.pids.own(), id))
             })
             .ok_or_else(|| anyhow::anyhow!("no remappable device {}", id.key()))
     }
@@ -175,14 +193,10 @@ impl RemapEngine {
 
     /// Register a mouse or keyboard (idempotent; a reconnect keeps its bindings).
     /// `pids` are the driver model's PIDs, so any enumeration path is one device.
-    pub fn attach(&self, id: DeviceId, kind: DeviceKind, pids: Vec<u16>, name: &str) {
+    pub fn attach(&self, id: DeviceId, kind: DeviceKind, pids: RemapPids, name: &str) {
         let mut guard = lock(&self.inner);
         let g = &mut *guard;
-        let idx = match g
-            .devices
-            .iter()
-            .position(|d| claims(d.id.vendor_id, &d.pids, &id))
-        {
+        let idx = match g.find(&id).ok() {
             Some(i) => {
                 let d = &mut g.devices[i];
                 d.id = id.clone();
@@ -193,7 +207,7 @@ impl RemapEngine {
             }
             None => {
                 let (bindings, invalid, load_error) =
-                    match load_bindings(&g.paths, id.vendor_id, &pids) {
+                    match load_bindings(&g.paths, id.vendor_id, pids.own()) {
                         Ok((b, invalid)) => (b, invalid, None),
                         Err(e) => {
                             warn!("{e}");
@@ -221,7 +235,7 @@ impl RemapEngine {
             }
         };
         let bindings = g.devices[idx].bindings.clone();
-        let pids = g.devices[idx].pids.clone();
+        let pids = g.devices[idx].pids.pids.clone();
         // Sent under the lock so command order matches index order.
         if let Err(e) = self.send(Cmd::Attach {
             idx,
@@ -285,7 +299,14 @@ impl RemapEngine {
             let mut next = d.bindings.clone();
             edit(&mut next);
             let list = saved_list(d, &next)?;
-            (idx, next, list, g.paths.clone(), d.id.vendor_id, d.pids[0])
+            (
+                idx,
+                next,
+                list,
+                g.paths.clone(),
+                d.id.vendor_id,
+                d.pids.pids[0],
+            )
         };
         save_remap_bindings(&paths, vid, pid, &list)?;
         let mut guard = lock(&self.inner);
@@ -321,7 +342,7 @@ impl RemapEngine {
         let idx = g.find(&device_id)?;
         // Listening to a device whose input nodes are all unreadable would
         // only ever time out.
-        let nodes = event_nodes(g.devices[idx].id.vendor_id, &g.devices[idx].pids);
+        let nodes = event_nodes(g.devices[idx].id.vendor_id, &g.devices[idx].pids.pids);
         let blocked: Vec<PathBuf> = nodes.iter().filter(|p| !readable(p)).cloned().collect();
         if blocked.len() == nodes.len() {
             if let Some(msg) = unreadable_message(&blocked) {
@@ -418,7 +439,9 @@ type Loaded = (HashMap<u16, RemapBinding>, Vec<RemapBinding>);
 
 /// (valid bindings, rejected ones). First existing file wins, canonical PID
 /// first (an emptied canonical file must not resurrect bindings from an older
-/// sibling file). An unreadable file is an error, never "no bindings".
+/// sibling file). `pids` must be the device's own ([`RemapPids::own`]): a
+/// receiver's PID may name another device's file. An unreadable file is an
+/// error, never "no bindings".
 fn load_bindings(paths: &ConfigPaths, vid: u16, pids: &[u16]) -> Result<Loaded, String> {
     for &pid in pids {
         let path = remap_config_path(paths, vid, pid);
@@ -450,7 +473,7 @@ fn load_bindings(paths: &ConfigPaths, vid: u16, pids: &[u16]) -> Result<Loaded, 
 /// Read a remap file that failed to load again (on reconnect); true when it
 /// loaded, which makes the device's remaps editable again.
 fn retry_load(paths: &ConfigPaths, d: &mut DevState) -> bool {
-    let Ok((bindings, invalid)) = load_bindings(paths, d.id.vendor_id, &d.pids) else {
+    let Ok((bindings, invalid)) = load_bindings(paths, d.id.vendor_id, d.pids.own()) else {
         return false;
     };
     info!("remap file of {} is readable again", d.id.key());
@@ -465,7 +488,12 @@ fn retry_load(paths: &ConfigPaths, d: &mut DevState) -> bool {
 
 /// Write `bindings` plus the rejected ones they don't replace.
 fn persist(paths: &ConfigPaths, d: &DevState, bindings: &HashMap<u16, RemapBinding>) -> Result<()> {
-    save_remap_bindings(paths, d.id.vendor_id, d.pids[0], &saved_list(d, bindings)?)
+    save_remap_bindings(
+        paths,
+        d.id.vendor_id,
+        d.pids.pids[0],
+        &saved_list(d, bindings)?,
+    )
 }
 
 /// What [`persist`] writes; an error while the file could not be read.
@@ -515,18 +543,20 @@ impl Slot {
 /// duration so no edge is lost between reads.
 struct Session {
     idx: usize,
-    /// (node, belongs to the session's own device)
-    nodes: Vec<(Device, bool)>,
+    /// (path, node, belongs to the session's own device)
+    nodes: Vec<(PathBuf, Device, bool)>,
     rec: Recorder,
     started: Instant,
+    /// Last [`drop_unreadable`] pass.
+    checked: Instant,
 }
 
 impl Session {
     /// An error when none of the device's own nodes could be opened because
     /// this user cannot read them.
     fn open(idx: usize, slot: &Slot) -> Result<Self, String> {
-        let nodes: Vec<(Device, bool)> = evdev::enumerate()
-            .filter_map(|(_, dev)| {
+        let nodes: Vec<(PathBuf, Device, bool)> = evdev::enumerate()
+            .filter_map(|(path, dev)| {
                 if dev.name() == Some(VIRTUAL_NAME) {
                     return None;
                 }
@@ -538,10 +568,10 @@ impl Session {
                     return None;
                 }
                 let _ = dev.set_nonblocking(true);
-                Some((dev, own))
+                Some((path, dev, own))
             })
             .collect();
-        if !nodes.iter().any(|(_, own)| *own) {
+        if !nodes.iter().any(|(_, _, own)| *own) {
             if let Some(msg) = unreadable_message(&unreadable_nodes(slot.id.vendor_id, &slot.pids))
             {
                 return Err(msg);
@@ -552,6 +582,7 @@ impl Session {
             nodes,
             rec: Recorder::default(),
             started: Instant::now(),
+            checked: Instant::now(),
         })
     }
 }
@@ -691,15 +722,21 @@ impl Worker {
         if sess.started.elapsed() < SESSION_LIMIT {
             return;
         }
-        let idx = sess.idx;
-        self.session = None;
-        self.update(idx, |d| {
+        self.end_session("Listening timed out");
+    }
+
+    /// Stop the running session, dropping its take, and say why.
+    fn end_session(&mut self, why: &str) {
+        let Some(sess) = self.session.take() else {
+            return;
+        };
+        self.update(sess.idx, |d| {
             if let Some(role) = d.capturing.take() {
                 d.capture_source = None;
                 if role == CaptureRole::Record {
                     d.recorded.clear();
                 }
-                d.last_error = Some("Listening timed out".into());
+                d.last_error = Some(why.into());
             }
         });
     }
@@ -729,9 +766,14 @@ impl Worker {
 
     fn try_grab(&mut self, idx: usize, now: Instant) {
         let mut excluded = 0;
-        let nodes: Vec<(PathBuf, Device)> = evdev::enumerate()
+        // Only this device's nodes (sysfs): opening any evdev node that has
+        // no other reader resumes an autosuspended USB device.
+        let slot = &self.slots[idx];
+        let nodes: Vec<(PathBuf, Device)> = event_nodes(slot.id.vendor_id, &slot.pids)
+            .into_iter()
+            .filter_map(|path| Device::open(&path).ok().map(|dev| (path, dev)))
             .filter(|(_, dev)| {
-                let own = own_node(&self.slots[idx], dev);
+                let own = own_node(slot, dev);
                 let ok = own && forwards_all(dev);
                 excluded += usize::from(own && !ok);
                 ok
@@ -771,8 +813,9 @@ impl Worker {
         let mut grabbed = Vec::new();
         let mut err = None;
         for (path, mut dev) in nodes {
+            let at = SystemTime::now();
             match dev.grab() {
-                Ok(()) => grabbed.push((path, dev)),
+                Ok(()) => grabbed.push((path, dev, at)),
                 Err(e) => {
                     warn!("grab {} ({}): {e}", slot.id.key(), path.display());
                     err = Some(format!("grab {}: {e}", path.display()));
@@ -783,9 +826,9 @@ impl Worker {
         // device that counts as grabbed is never retried. A key pressed
         // while the virtual device was built reached the compositor as down:
         // its release must too.
-        let held = held_key(grabbed.iter().map(|(_, d)| d));
+        let held = held_key(grabbed.iter().map(|(_, d, _)| d));
         if err.is_some() || held.is_some() {
-            for (_, dev) in &mut grabbed {
+            for (_, dev, _) in &mut grabbed {
                 let _ = dev.ungrab();
             }
             match (err, held) {
@@ -795,13 +838,22 @@ impl Worker {
             }
             return;
         }
-        for (path, mut dev) in grabbed {
+        for (path, mut dev, at) in grabbed {
             let _ = dev.set_nonblocking(true);
-            // Queued since the node was opened, so the compositor saw it.
+            // Queued since the node was opened: what came before the grab
+            // reached the compositor, the rest is ours.
+            let mut fresh = Vec::new();
             for _ in 0..64 {
-                if !dev.fetch_events().is_ok_and(|evs| evs.count() > 0) {
+                let Ok(evs) = dev.fetch_events() else { break };
+                let mut any = false;
+                fresh.extend(evs.inspect(|_| any = true).filter(|ev| after_grab(ev, at)));
+                // Events come in time order: the rest is read as usual.
+                if !any || !fresh.is_empty() {
                     break;
                 }
+            }
+            for ev in fresh {
+                self.mapper.event(idx, &slot.bindings, ev, now);
             }
             slot.nodes.push(dev);
             slot.paths.push(path);
@@ -879,17 +931,20 @@ impl Worker {
         }
     }
 
-    /// Release everything the virtual device holds, then let go of the device.
+    /// Release everything the device holds through the virtual device, then
+    /// let go of it.
     fn ungrab(&mut self, idx: usize) {
         if self.slots[idx].nodes.is_empty() {
             return;
         }
-        // ponytail: releases keys held via other grabbed devices too; track
-        // per-device ownership if that glitch ever matters.
-        self.mapper.release_all();
+        self.mapper.release_device(idx);
         self.flush();
         self.drop_nodes(idx);
         if self.slots.iter().all(|s| s.nodes.is_empty()) {
+            // Nothing is grabbed: no count may outlive the device (e.g. after
+            // a panic mid-update).
+            self.mapper.release_all();
+            self.flush();
             self.virt = None;
             self.axes = Axes::default();
         }
@@ -937,7 +992,7 @@ impl Worker {
             .chain(
                 self.session
                     .iter()
-                    .flat_map(|s| s.nodes.iter().map(|(d, _)| d)),
+                    .flat_map(|s| s.nodes.iter().map(|(_, d, _)| d)),
             )
             .map(|d| libc::pollfd {
                 fd: d.as_raw_fd(),
@@ -964,14 +1019,7 @@ impl Worker {
                 match dev.fetch_events() {
                     Ok(iter) => {
                         for ev in iter {
-                            let bind = match ev.destructure() {
-                                EventSummary::Key(_, code, _) => slot.bindings.get(&code.code()),
-                                _ => None,
-                            };
-                            match bind {
-                                Some(b) => self.mapper.key(idx, b, ev.value(), now),
-                                None => self.mapper.forward(idx, ev),
-                            }
+                            self.mapper.event(idx, &slot.bindings, ev, now);
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -993,9 +1041,20 @@ impl Worker {
         let Some(sess) = self.session.as_mut() else {
             return;
         };
+        // Like grabs (`sync_grabs`): after a user switch the open fds would
+        // keep reading someone else's keys.
+        let now = Instant::now();
+        if now >= sess.checked + ACCESS_CHECK {
+            sess.checked = now;
+            if drop_unreadable(&mut sess.nodes, readable) {
+                info!("lost access to the listened device; stopping");
+                self.end_session("Listening stopped: lost access to the device");
+                return;
+            }
+        }
         let mut edges = Vec::new();
         sess.nodes
-            .retain_mut(|(dev, own)| match dev.fetch_events() {
+            .retain_mut(|(_, dev, own)| match dev.fetch_events() {
                 Ok(iter) => {
                     for ev in iter {
                         if let EventSummary::Key(_, code, value @ (0 | 1)) = ev.destructure() {
@@ -1168,7 +1227,12 @@ fn unreadable_message(blocked: &[PathBuf]) -> Option<String> {
 
 /// `/dev/input/event*` nodes of `vendor` + one of `pids` (sysfs).
 fn event_nodes(vendor: u16, pids: &[u16]) -> Vec<PathBuf> {
-    let Ok(dir) = std::fs::read_dir("/sys/class/input") else {
+    event_nodes_in(Path::new("/sys/class/input"), vendor, pids)
+}
+
+/// [`event_nodes`] under the sysfs input class directory `class`.
+fn event_nodes_in(class: &Path, vendor: u16, pids: &[u16]) -> Vec<PathBuf> {
+    let Ok(dir) = std::fs::read_dir(class) else {
         return Vec::new();
     };
     let id = |p: &Path, f: &str| {
@@ -1186,12 +1250,28 @@ fn event_nodes(vendor: u16, pids: &[u16]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Drop session nodes `readable` refuses now (the seat ACL went to another
+/// user); true when that took the last of the device's own nodes.
+fn drop_unreadable<D>(
+    nodes: &mut Vec<(PathBuf, D, bool)>,
+    readable: impl Fn(&Path) -> bool,
+) -> bool {
+    let had_own = nodes.iter().any(|n| n.2);
+    nodes.retain(|n| readable(&n.0));
+    had_own && !nodes.iter().any(|n| n.2)
+}
+
 /// The calling user may still open `path` (seat ACL / group).
 fn readable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes())
         // SAFETY: valid NUL-terminated path; access() only reads it.
         .is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::R_OK) } == 0)
+}
+
+/// `ev` was queued after a grab taken at `grab` (only this process saw it).
+fn after_grab(ev: &InputEvent, grab: SystemTime) -> bool {
+    ev.timestamp() >= grab
 }
 
 /// A key or button `nodes` report held down.
@@ -1325,21 +1405,23 @@ struct Runner {
 }
 
 impl Runner {
-    fn new(steps: Vec<MacroStep>, looping: bool, gap_ms: u32, now: Instant) -> Option<Self> {
+    fn new(steps: Vec<MacroStep>, looping: bool, gap: Duration, now: Instant) -> Option<Self> {
         let first = steps.first()?.delay_ms;
         Some(Self {
             steps,
             looping,
-            gap: ms(clamp_interval(gap_ms)),
+            gap,
             pos: 0,
             next: now + ms(first),
             held: BTreeSet::new(),
         })
     }
 
-    /// Turbo / toggle: down, wait interval, up, wait interval, repeat.
+    /// Turbo / toggle: down, up half an interval later, down again one
+    /// interval after the last down (`interval_ms` is the period).
     fn pulse(b: &RemapBinding, now: Instant) -> Option<Self> {
         let interval = clamp_interval(b.interval_ms);
+        let hold = interval / 2;
         let steps = vec![
             MacroStep {
                 key: b.target,
@@ -1349,10 +1431,10 @@ impl Runner {
             MacroStep {
                 key: b.target,
                 down: false,
-                delay_ms: interval,
+                delay_ms: hold,
             },
         ];
-        Self::new(steps, true, interval, now)
+        Self::new(steps, true, ms(interval - hold), now)
     }
 }
 
@@ -1406,6 +1488,24 @@ fn push_key(out: &mut Vec<InputEvent>, held: &mut BTreeMap<u16, u32>, code: u16,
 }
 
 impl Mapper {
+    /// An event of grabbed slot `dev`: to its binding, or forwarded.
+    fn event(
+        &mut self,
+        dev: usize,
+        bindings: &HashMap<u16, RemapBinding>,
+        ev: InputEvent,
+        now: Instant,
+    ) {
+        let bind = match ev.destructure() {
+            EventSummary::Key(_, code, _) => bindings.get(&code.code()),
+            _ => None,
+        };
+        match bind {
+            Some(b) => self.key(dev, b, ev.value(), now),
+            None => self.forward(dev, ev),
+        }
+    }
+
     /// Pass an unbound event of slot `dev` through unchanged.
     fn forward(&mut self, dev: usize, ev: InputEvent) {
         if ev.event_type() == EventType::KEY {
@@ -1456,15 +1556,16 @@ impl Mapper {
             (RemapMode::Turbo, _) => self.stop(id),
             (RemapMode::Toggle, 1) if running => self.stop(id),
             (RemapMode::Toggle, 1) => self.start(id, Runner::pulse(b, now), now),
+            // A second press stops a running Once macro too: it may last
+            // minutes and hold a modifier meanwhile.
             (RemapMode::Macro, 1) => match b.repeat {
-                MacroRepeat::Toggle if running => self.stop(id),
-                MacroRepeat::Once if running => {}
+                MacroRepeat::Toggle | MacroRepeat::Once if running => self.stop(id),
                 repeat => self.start(
                     id,
                     Runner::new(
                         b.steps.clone(),
                         repeat != MacroRepeat::Once,
-                        b.interval_ms,
+                        ms(clamp_interval(b.interval_ms)),
                         now,
                     ),
                     now,
@@ -1506,6 +1607,13 @@ impl Mapper {
         for id in taps {
             self.tap(id, 0, 0);
         }
+    }
+
+    /// Release every key slot `dev` holds down (runners, taps, forwarded
+    /// keys); keys other slots hold stay down.
+    fn release_device(&mut self, dev: usize) {
+        self.stop_device(dev);
+        self.release_forwarded(dev, |_| true);
     }
 
     /// Stop every runner and release every key the virtual device holds.
@@ -1758,10 +1866,10 @@ mod tests {
         m.key(0, &b, 1, t0);
         m.key(0, &b, 0, at(t0, 5));
         assert_eq!(keys(&mut m), vec![(30, 1)]);
+        m.tick(at(t0, 25));
         m.tick(at(t0, 50));
-        m.tick(at(t0, 100));
         assert_eq!(keys(&mut m), vec![(30, 0), (30, 1)]);
-        m.key(0, &b, 1, at(t0, 120));
+        m.key(0, &b, 1, at(t0, 60));
         assert_eq!(keys(&mut m), vec![(30, 0)]);
         assert_eq!(m.next_deadline(), None);
         m.key(0, &b, 0, at(t0, 125));
@@ -1778,11 +1886,41 @@ mod tests {
         let t0 = Instant::now();
         let mut m = Mapper::default();
         m.key(0, &b, 1, t0);
+        assert_eq!(m.next_deadline(), Some(at(t0, 10)));
+        m.tick(at(t0, 10));
+        // `interval_ms` is the whole period: the next press 20 ms after the first.
+        assert_eq!(m.next_deadline(), Some(at(t0, 20)));
         m.tick(at(t0, 20));
-        m.tick(at(t0, 40));
-        m.key(0, &b, 0, at(t0, 45));
+        m.key(0, &b, 0, at(t0, 25));
         assert_eq!(keys(&mut m), vec![(30, 1), (30, 0), (30, 1), (30, 0)]);
         assert_eq!(m.next_deadline(), None);
+    }
+
+    #[test]
+    fn second_press_stops_a_running_once_macro() {
+        let ctrl = EvdevKey(29);
+        let b = macro_binding(
+            vec![
+                step(ctrl, true, 0),
+                step(A, true, 10),
+                step(ctrl, false, 10_000),
+            ],
+            MacroRepeat::Once,
+            50,
+        );
+        let t0 = Instant::now();
+        let mut m = Mapper::default();
+        m.key(0, &b, 1, t0);
+        m.key(0, &b, 0, at(t0, 5));
+        m.tick(at(t0, 10));
+        assert_eq!(keys(&mut m), vec![(29, 1), (30, 1)]);
+        m.key(0, &b, 1, at(t0, 20));
+        assert_eq!(keys(&mut m), vec![(29, 0), (30, 0)]);
+        assert!(m.held.is_empty() && m.next_deadline().is_none());
+        m.key(0, &b, 0, at(t0, 25));
+        // The press after that plays it again.
+        m.key(0, &b, 1, at(t0, 30));
+        assert_eq!(keys(&mut m), vec![(29, 1)]);
     }
 
     #[test]
@@ -1845,6 +1983,34 @@ mod tests {
     }
 
     #[test]
+    fn releasing_a_device_keeps_other_devices_keys_down() {
+        let t0 = Instant::now();
+        let mut m = Mapper::default();
+        let down = |k: EvdevKey| InputEvent::new(EventType::KEY.0, k.0, 1);
+        m.forward(0, down(A));
+        m.forward(1, down(B));
+        m.forward(1, down(A));
+        m.key(1, &RemapBinding::tap(EvdevKey::BTN_SIDE, C), 1, t0);
+        m.take();
+        m.release_device(1);
+        // A stays down: slot 0 still holds it.
+        assert_eq!(keys(&mut m), vec![(46, 0), (48, 0)]);
+        assert_eq!(m.held.keys().copied().collect::<Vec<_>>(), vec![30]);
+        m.forward(0, InputEvent::new(EventType::KEY.0, A.0, 0));
+        assert_eq!(keys(&mut m), vec![(30, 0)]);
+        assert!(m.held.is_empty());
+    }
+
+    #[test]
+    fn only_events_queued_after_the_grab_are_ours() {
+        let grab = SystemTime::now() - Duration::from_millis(1);
+        let seen = InputEvent::new(EventType::KEY.0, A.0, 1); // 1970
+        let fresh = InputEvent::new_now(EventType::KEY.0, A.0, 1);
+        assert!(!after_grab(&seen, grab));
+        assert!(after_grab(&fresh, grab));
+    }
+
+    #[test]
     fn binding_a_held_key_releases_it() {
         let t0 = Instant::now();
         let mut m = Mapper::default();
@@ -1873,7 +2039,10 @@ mod tests {
                 instance: "x".into(),
             },
             name: "Mouse".into(),
-            pids: vec![0x40a8],
+            pids: RemapPids {
+                pids: vec![0x40a8],
+                own: 1,
+            },
             bindings: HashMap::new(),
             capturing: None,
             capture_source: None,
@@ -2018,6 +2187,35 @@ mod tests {
     }
 
     #[test]
+    fn event_nodes_come_from_sysfs_ids_only() {
+        let class = std::env::temp_dir().join(format!("hako-remap-sysfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&class);
+        let node = |name: &str, vendor: &str, product: &str| {
+            let id = class.join(name).join("device/id");
+            std::fs::create_dir_all(&id).unwrap();
+            std::fs::write(id.join("vendor"), format!("{vendor}\n")).unwrap();
+            std::fs::write(id.join("product"), format!("{product}\n")).unwrap();
+        };
+        node("event3", "046d", "40a8");
+        node("event7", "046d", "c543");
+        node("event4", "046d", "c077");
+        node("event5", "1532", "40a8");
+        node("input9", "046d", "40a8");
+        std::fs::create_dir_all(class.join("event6")).unwrap();
+
+        let mut got = event_nodes_in(&class, 0x046d, &[0x40a8, 0xc543]);
+        got.sort();
+        let _ = std::fs::remove_dir_all(&class);
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("/dev/input/event3"),
+                PathBuf::from("/dev/input/event7")
+            ]
+        );
+    }
+
+    #[test]
     fn unreadable_or_rejected_remaps_are_never_overwritten() {
         let root = std::env::temp_dir().join(format!("hako-remap-{}", std::process::id()));
         let paths = ConfigPaths {
@@ -2039,7 +2237,10 @@ mod tests {
                 instance: "x".into(),
             },
             name: "Mouse".into(),
-            pids: vec![0x40a8],
+            pids: RemapPids {
+                pids: vec![0x40a8],
+                own: 1,
+            },
             bindings: HashMap::new(),
             capturing: None,
             capture_source: None,
@@ -2097,8 +2298,118 @@ mod tests {
             product_id: 0x5678,
             instance: "x".into(),
         };
-        engine.attach(id.clone(), DeviceKind::Keyboard, vec![0x5678], "Keyboard");
+        let pids = RemapPids {
+            pids: vec![0x5678],
+            own: 1,
+        };
+        engine.attach(id.clone(), DeviceKind::Keyboard, pids, "Keyboard");
         (engine, paths, id)
+    }
+
+    #[test]
+    fn a_device_on_another_devices_receiver_stays_apart() {
+        // PRO 2 style: a mouse (0001) whose receiver (00c5) hosts a second
+        // device (0002). IDs no real device has, so nothing is grabbed.
+        let (engine, paths, _) = engine("receiver");
+        let dev = |pid, slot: &str| DeviceId {
+            vendor_id: 0x1234,
+            product_id: pid,
+            instance: slot.into(),
+        };
+        let pids = |pids: &[u16], own| RemapPids {
+            pids: pids.to_vec(),
+            own,
+        };
+        // The mouse's file from when it enumerated as the receiver.
+        let list = [RemapBinding::tap(EvdevKey(276), A)];
+        save_remap_bindings(&paths, 0x1234, 0x00c5, &list).unwrap();
+        let other = dev(0x0002, "hidpp:2");
+        engine.attach(
+            other.clone(),
+            DeviceKind::Mouse,
+            pids(&[0x0002, 0x00c5], 1),
+            "Other",
+        );
+        assert!(engine.snapshot(&other).unwrap().bindings.is_empty());
+        // The mouse attached through the receiver node is not the other device.
+        let mouse = dev(0x00c5, "hidpp:1");
+        engine.attach(
+            mouse.clone(),
+            DeviceKind::Mouse,
+            pids(&[0x0001, 0x00c5], 2),
+            "Mouse",
+        );
+        assert_eq!(engine.snapshots().len(), 3);
+        assert_eq!(engine.snapshot(&mouse).unwrap().bindings.len(), 1);
+        assert_eq!(
+            engine.snapshot(&other).unwrap().device_id,
+            Some(other.clone())
+        );
+        // Its own other PID is still the same device.
+        let wired = dev(0x0001, "usb");
+        engine.attach(
+            wired.clone(),
+            DeviceKind::Mouse,
+            pids(&[0x0001, 0x00c5], 2),
+            "Mouse",
+        );
+        assert_eq!(engine.snapshots().len(), 3);
+        assert_eq!(engine.snapshot(&wired).unwrap().bindings.len(), 1);
+        engine.shutdown();
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    #[test]
+    fn a_paired_device_never_gets_the_models_own_device_pid() {
+        let model = |pid| {
+            crate::drivers::models()
+                .find(|m| m.vendor_id == 0x046d && m.product_ids.contains(&pid))
+                .unwrap()
+        };
+        let dev = |pid| DeviceId {
+            vendor_id: 0x046d,
+            product_id: pid,
+            instance: "hidpp:2".into(),
+        };
+        let pro2 = model(0x40a8);
+        let paired = pro2.remap_pids(&dev(0x4099));
+        assert_eq!(
+            (paired.pids.as_slice(), paired.own()),
+            (&[0x4099, 0xc543][..], &[0x4099][..])
+        );
+        for pid in [0x40a8, 0xc543] {
+            let own = pro2.remap_pids(&dev(pid));
+            assert_eq!(
+                (own.pids.as_slice(), own.own()),
+                (&[0x40a8, 0xc543][..], &[0x40a8, 0xc543][..])
+            );
+        }
+        // A plain receiver: the device plus the receiver.
+        let bolt = model(0xc548).remap_pids(&dev(0xb034));
+        assert_eq!(
+            (bolt.pids.as_slice(), bolt.own()),
+            (&[0xb034, 0xc548][..], &[0xb034][..])
+        );
+    }
+
+    #[test]
+    fn a_session_lets_go_of_nodes_it_may_no_longer_read() {
+        let node = |p: &str, own| (PathBuf::from(p), (), own);
+        let mut nodes = vec![
+            node("/dev/input/event1", true),
+            node("/dev/input/event2", false),
+        ];
+        assert!(!drop_unreadable(&mut nodes, |_| true));
+        assert_eq!(nodes.len(), 2);
+        // Another user's keyboard left; the device's own node stays.
+        assert!(!drop_unreadable(&mut nodes, |p| p.ends_with("event1")));
+        assert_eq!(nodes.len(), 1);
+        // The seat went to another user: the session must end.
+        assert!(drop_unreadable(&mut nodes, |_| false));
+        assert!(nodes.is_empty());
+        // A session that never had its own node keeps going on keyboards.
+        let mut keyboards = vec![node("/dev/input/event2", false)];
+        assert!(!drop_unreadable(&mut keyboards, |_| false));
     }
 
     #[test]

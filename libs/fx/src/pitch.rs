@@ -116,6 +116,11 @@ impl Biquad {
         self.s2 = self.b2 * x - self.a2 * y;
         y
     }
+
+    pub(crate) fn reset(&mut self) {
+        self.s1 = 0.0;
+        self.s2 = 0.0;
+    }
 }
 
 /// YIN pitch detector for the voice range on a decimated copy of the input.
@@ -187,6 +192,18 @@ impl PitchDetector {
         self.since = 0;
         self.hz = self.analyse();
         true
+    }
+
+    /// Forgets the input heard so far.
+    pub(crate) fn reset(&mut self) {
+        for lowpass in &mut self.lowpass {
+            lowpass.reset();
+        }
+        self.phase = 0;
+        self.ring.fill(0.0);
+        self.pos = 0;
+        self.since = 0;
+        self.hz = None;
     }
 
     /// The last estimate in Hz, `None` when unvoiced or silent.
@@ -269,7 +286,7 @@ impl Shifter {
             buf: vec![0.0; len],
             mask: len - 1,
             pos: 0,
-            delay: (min + span / 2.0).round(),
+            delay: Self::start(min, span),
             old: 0.0,
             fade: (0..fade_len)
                 .map(|i| 0.5 - 0.5 * (PI * (i + 1) as f32 / (fade_len + 1) as f32).cos())
@@ -279,6 +296,20 @@ impl Shifter {
             span,
             max_read: (len - 4) as f64,
         }
+    }
+
+    /// The read tap's delay at the start: the middle of its window.
+    fn start(min: f64, span: f64) -> f64 {
+        (min + span / 2.0).round()
+    }
+
+    /// Forgets the input heard so far.
+    pub(crate) fn reset(&mut self) {
+        self.buf.fill(0.0);
+        self.pos = 0;
+        self.delay = Self::start(self.min, self.span);
+        self.old = 0.0;
+        self.fading = 0;
     }
 
     /// One sample in, one out shifted by `ratio` (0.5..=2). `period`: the
@@ -336,6 +367,10 @@ impl Mix {
         }
     }
 
+    pub(crate) fn reset(&mut self) {
+        self.value = 1.0;
+    }
+
     /// Mix for the next sample towards `mix_pct`.
     pub(crate) fn next(&mut self, target: f32) -> f32 {
         self.value += self.coef * (target - self.value);
@@ -387,6 +422,12 @@ impl Effect for PitchShift {
             *r += (wet - *r) * m;
         }
         self.mix.settle(target);
+    }
+
+    fn reset(&mut self) {
+        self.detector.reset();
+        self.shifter.reset();
+        self.mix.reset();
     }
 }
 
@@ -501,6 +542,15 @@ impl Effect for AutoTune {
             self.shift = self.target;
         }
         self.mix.settle(target);
+    }
+
+    fn reset(&mut self) {
+        self.detector.reset();
+        self.shifter.reset();
+        self.mix.reset();
+        self.shift = 0.0;
+        self.target = 0.0;
+        self.note = None;
     }
 }
 

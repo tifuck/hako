@@ -92,6 +92,9 @@ pub struct DaemonHealth {
 pub struct HubState {
     pub health: DaemonHealth,
     pub last_profile: Option<String>,
+    /// A device setting changed since `last_profile` was applied or saved.
+    #[serde(default)]
+    pub last_profile_modified: bool,
     pub profiles: Vec<String>,
     pub audio: AudioSummary,
     pub devices: Vec<DeviceSnapshot>,

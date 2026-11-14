@@ -533,11 +533,17 @@ impl Peripheral {
 
     /// Push lighting, and the saved DPI / tuning when `with_dpi`, in host
     /// mode; "onboard" hands everything back to the firmware instead.
-    /// Headset lights are only sent once the user picked a state.
+    /// Headset lights and sidetone are only sent once the user picked them.
     fn apply(&mut self, with_dpi: bool) -> Result<()> {
         if self.caps.lights {
             if let Some(state) = get_setting(&self.settings, SettingKey::Effect) {
                 self.backend.lights(state.as_str() != Some("off"))?;
+            }
+        }
+        // Void sidetone is volatile (docs/onboard-writes/corsair.md).
+        if self.caps.sidetone {
+            if let Some(level) = int(&self.settings, SettingKey::MicSideTone) {
+                self.backend.sidetone(level as u8)?;
             }
         }
         if !self.caps.lighting {
@@ -924,6 +930,10 @@ mod tests {
             self.0.lock().unwrap().push(format!("lights {on}"));
             Ok(())
         }
+        fn sidetone(&mut self, level: u8) -> Result<()> {
+            self.0.lock().unwrap().push(format!("sidetone {level}"));
+            Ok(())
+        }
         fn report_rate(&mut self) -> Option<u32> {
             Some(1000)
         }
@@ -967,13 +977,14 @@ mod tests {
             .unwrap_or_else(|| panic!("no {key:?} control"))
     }
 
-    fn mouse(log: Arc<Mutex<Vec<String>>>) -> Peripheral {
+    /// `tag`: the test's own config dir (tests run in parallel).
+    fn mouse(log: Arc<Mutex<Vec<String>>>, tag: &str) -> Peripheral {
         let caps = Caps {
             lighting: true,
             dpi: Some((100, 18000)),
             ..Caps::default()
         };
-        peripheral(log, caps, "mouse")
+        peripheral(log, caps, tag)
     }
 
     fn peripheral(log: Arc<Mutex<Vec<String>>>, caps: Caps, tag: &str) -> Peripheral {
@@ -1016,7 +1027,7 @@ mod tests {
     #[test]
     fn onboard_hands_back_and_shutdown_restores() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut p = mouse(log.clone());
+        let mut p = mouse(log.clone(), "onboard");
         assert_eq!(*log.lock().unwrap(), ["sw true", "color [0, 120, 255]"]);
         log.lock().unwrap().clear();
 
@@ -1165,6 +1176,21 @@ mod tests {
             *log.lock().unwrap(),
             ["lights false", "lights true", "lights true"]
         );
+        let _ = std::fs::remove_dir_all(&p2.paths.root);
+    }
+
+    #[test]
+    fn void_sidetone_is_reapplied_on_connect() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let caps = Caps::of(models::spec(0x1b27).unwrap().family);
+        assert!(caps.sidetone);
+        let mut p = peripheral(log.clone(), caps, "sidetone");
+        // Nothing is sent before the user picks a level.
+        assert!(log.lock().unwrap().is_empty());
+        p.set(SettingKey::MicSideTone, SettingValue::Int(30))
+            .unwrap();
+        let p2 = peripheral(log.clone(), caps, "sidetone");
+        assert_eq!(*log.lock().unwrap(), ["sidetone 30", "sidetone 30"]);
         let _ = std::fs::remove_dir_all(&p2.paths.root);
     }
 
@@ -1332,7 +1358,7 @@ mod tests {
     #[test]
     fn hung_wired_device_is_dropped() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut p = mouse(log);
+        let mut p = mouse(log, "hung");
         let long_ago = Instant::now() - Duration::from_secs(60);
         for _ in 0..MAX_FAILURES {
             assert!(p.snapshot().connected);

@@ -6,8 +6,9 @@ use anyhow::{bail, Context, Result};
 use hako_audio::net::{NET_CHANNELS, NET_MAX_FRAMES};
 use hako_core::net::{peer_id, validate_key, MAX_NAME};
 use serde_json::{json, Value};
+use snow::params::HashChoice;
 use snow::resolvers::{CryptoResolver, DefaultResolver};
-use snow::StatelessTransportState;
+use snow::{HandshakeState, StatelessTransportState};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -15,6 +16,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub const NOISE: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
+/// The network protocol: beacons carry it and both handshake payloads
+/// start with it. 2: commit / reveal pairing codes.
+pub const PROTOCOL: u8 = 2;
+/// A pairing nonce (and its commitment).
+const NONCE: usize = 32;
+/// Handshake message 1 on the wire: length + the initiator's ephemeral
+/// key, no payload.
+pub const FIRST_MESSAGE: usize = 2 + 32;
 /// A Poly1305 tag.
 const TAG: usize = 16;
 /// First byte of an audio packet.
@@ -93,9 +102,30 @@ impl Identity {
     }
 }
 
-/// Six digits from the handshake hash, as both screens show them.
-pub fn pairing_code(hash: &[u8]) -> String {
-    let n = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) % 1_000_000;
+/// BLAKE2s of `parts` in order.
+fn blake2s(parts: &[&[u8]]) -> [u8; 32] {
+    let mut hash = DefaultResolver
+        .resolve_hash(&HashChoice::Blake2s)
+        .expect("BLAKE2s is built in");
+    for part in parts {
+        hash.input(part);
+    }
+    let mut out = [0u8; 32];
+    hash.result(&mut out);
+    out
+}
+
+/// What both screens' code comes from: the handshake hash and both
+/// pairing nonces. The responder committed to its nonce before seeing the
+/// initiator's, and revealed it only after, so neither side (nor a man in
+/// the middle, who is one side of each handshake) can steer the code.
+pub fn code_digest(hash: &[u8], initiator: &[u8], responder: &[u8]) -> [u8; 32] {
+    blake2s(&[hash, initiator, responder])
+}
+
+/// Six digits from `code_digest`, as both screens show them.
+pub fn pairing_code(digest: &[u8]) -> String {
+    let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
     format!("{:03} {:03}", n / 1000, n % 1000)
 }
 
@@ -105,42 +135,98 @@ pub struct Handshake {
     /// The peer's static key (hex).
     pub key: String,
     pub code: String,
+    /// The newest control nonce read so far (the responder's reveal).
+    pub last: u64,
 }
 
-/// Noise XX over `stream`: `u16 BE length` + message each way.
+/// Noise XX over `stream`: `u16 BE length` + message each way. Payloads:
+/// none in message 1; `PROTOCOL` + the responder's commitment (BLAKE2s of
+/// its nonce) in 2; `PROTOCOL` + the initiator's nonce in 3. Then the
+/// responder reveals its nonce (the first control frame, raw) and the
+/// initiator checks it against the commitment.
 pub fn handshake(
     stream: &mut (impl Read + Write),
     private: &[u8],
     initiator: bool,
 ) -> Result<Handshake> {
     let builder = snow::Builder::new(NOISE.parse()?).local_private_key(private)?;
-    let mut hs = if initiator {
-        builder.build_initiator()?
+    let mut ours = [0u8; NONCE];
+    DefaultResolver
+        .resolve_rng()
+        .context("no random number generator")?
+        .try_fill_bytes(&mut ours)?;
+    let versioned = |nonce: &[u8]| [&[PROTOCOL][..], nonce].concat();
+    // The initiator gets the commitment, the responder the nonce.
+    let (hs, theirs) = if initiator {
+        let mut hs = builder.build_initiator()?;
+        send_message(stream, &mut hs, &[])?;
+        let commitment = protocol_payload(&recv_message(stream, &mut hs)?)?;
+        send_message(stream, &mut hs, &versioned(&ours))?;
+        (hs, commitment)
     } else {
-        builder.build_responder()?
-    };
-    let mut msg = vec![0u8; u16::MAX as usize];
-    let mut payload = vec![0u8; u16::MAX as usize];
-    while !hs.is_handshake_finished() {
-        if hs.is_my_turn() {
-            let n = hs.write_message(&[], &mut msg)?;
-            stream.write_all(&(n as u16).to_be_bytes())?;
-            stream.write_all(&msg[..n])?;
-        } else {
-            let mut len = [0u8; 2];
-            stream.read_exact(&mut len)?;
-            let n = u16::from_be_bytes(len) as usize;
-            stream.read_exact(&mut msg[..n])?;
-            hs.read_message(&msg[..n], &mut payload)?;
+        let mut hs = builder.build_responder()?;
+        if !recv_message(stream, &mut hs)?.is_empty() {
+            bail!("unexpected handshake payload");
         }
-    }
+        send_message(stream, &mut hs, &versioned(&blake2s(&[&ours])))?;
+        let nonce = protocol_payload(&recv_message(stream, &mut hs)?)?;
+        (hs, nonce)
+    };
     let key = hex(hs.get_remote_static().context("no remote key")?);
-    let code = pairing_code(hs.get_handshake_hash());
+    let hash = hs.get_handshake_hash().to_vec();
+    let cipher = Cipher::new(hs.into_stateless_transport_mode()?);
+    let mut last = 0;
+    let digest = if initiator {
+        let revealed = cipher
+            .open(&read_frame(stream)?, &mut last)
+            .context("unreadable pairing nonce")?;
+        if blake2s(&[&revealed]) != theirs {
+            bail!("the pairing nonce does not match its commitment");
+        }
+        code_digest(&hash, &ours, &revealed)
+    } else {
+        stream.write_all(&cipher.seal(&ours)?)?;
+        code_digest(&hash, &theirs, &ours)
+    };
     Ok(Handshake {
-        cipher: Cipher::new(hs.into_stateless_transport_mode()?),
+        cipher,
         key,
-        code,
+        code: pairing_code(&digest),
+        last,
     })
+}
+
+fn send_message(stream: &mut impl Write, hs: &mut HandshakeState, payload: &[u8]) -> Result<()> {
+    let mut msg = vec![0u8; u16::MAX as usize];
+    let n = hs.write_message(payload, &mut msg)?;
+    stream.write_all(&(n as u16).to_be_bytes())?;
+    stream.write_all(&msg[..n])?;
+    Ok(())
+}
+
+/// One handshake message; its payload.
+fn recv_message(stream: &mut impl Read, hs: &mut HandshakeState) -> Result<Vec<u8>> {
+    let msg = read_frame(stream)?;
+    let mut payload = vec![0u8; msg.len()];
+    let n = hs.read_message(&msg, &mut payload)?;
+    payload.truncate(n);
+    Ok(payload)
+}
+
+/// A message 2 / 3 payload (`PROTOCOL` + nonce or commitment): the nonce
+/// or commitment. Another protocol is refused by name, so mismatched
+/// versions fail clearly instead of pairing with a wrong code.
+fn protocol_payload(payload: &[u8]) -> Result<[u8; NONCE]> {
+    match payload {
+        [] => bail!("the other computer runs an older hako: update both computers"),
+        [version, ..] if *version != PROTOCOL => bail!(
+            "the other computer speaks hako network protocol {version}, this one {PROTOCOL}: update both computers"
+        ),
+        [_, nonce @ ..] => nonce
+            .try_into()
+            .ok()
+            .context("unexpected handshake payload"),
+    }
 }
 
 /// A control message (TCP, after the handshake).
@@ -157,6 +243,8 @@ pub enum Control {
     },
     Accepted,
     Denied,
+    /// Too many pairing requests wait: try again later.
+    Busy,
     /// `t`: sender's clock (ms), echoed by `Pong` for the round trip.
     Ping {
         t: u64,
@@ -180,6 +268,7 @@ impl Control {
             }
             Self::Accepted => json!({"type": "accepted"}),
             Self::Denied => json!({"type": "denied"}),
+            Self::Busy => json!({"type": "busy"}),
             Self::Ping { t } => json!({"type": "ping", "t": t}),
             Self::Pong { t } => json!({"type": "pong", "t": t}),
             Self::Bye => json!({"type": "bye"}),
@@ -201,6 +290,7 @@ impl Control {
             },
             "accepted" => Self::Accepted,
             "denied" => Self::Denied,
+            "busy" => Self::Busy,
             "ping" => Self::Ping { t: t()? },
             "pong" => Self::Pong { t: t()? },
             "bye" => Self::Bye,
@@ -235,17 +325,26 @@ impl Cipher {
     /// A whole control frame: `u16 BE length` + `u64 BE nonce` + ciphertext.
     /// Write frames in the order they are sealed (nonces must increase).
     pub fn seal_control(&self, msg: &Control) -> Result<Vec<u8>> {
-        let body = msg.encode();
+        self.seal(&msg.encode())
+    }
+
+    /// A control frame carrying `body` as it is.
+    fn seal(&self, body: &[u8]) -> Result<Vec<u8>> {
         let mut frame = vec![0u8; 2 + 8 + body.len() + TAG];
         let nonce = self.nonce();
         frame[2..10].copy_from_slice(&nonce.to_be_bytes());
-        let n = self.noise.write_message(nonce, &body, &mut frame[10..])?;
+        let n = self.noise.write_message(nonce, body, &mut frame[10..])?;
         frame[..2].copy_from_slice(&u16::try_from(8 + n)?.to_be_bytes());
         Ok(frame)
     }
 
     /// A frame without its length; `last`: the newest nonce read so far.
     pub fn open_control(&self, frame: &[u8], last: &mut u64) -> Option<Control> {
+        Control::parse(&self.open(frame, last)?)
+    }
+
+    /// `seal`'s body back.
+    fn open(&self, frame: &[u8], last: &mut u64) -> Option<Vec<u8>> {
         if frame.len() < 8 + TAG {
             return None;
         }
@@ -259,7 +358,8 @@ impl Cipher {
             .read_message(nonce, &frame[8..], &mut plain)
             .ok()?;
         *last = nonce;
-        Control::parse(&plain[..n])
+        plain.truncate(n);
+        Some(plain)
     }
 
     /// Seal one audio block into `packet` (`plain`: scratch of
@@ -323,13 +423,18 @@ impl Cipher {
 
 /// Read one control frame (`u16 BE length` + frame).
 pub fn read_control(stream: &mut impl Read, cipher: &Cipher, last: &mut u64) -> Result<Control> {
+    cipher
+        .open_control(&read_frame(stream)?, last)
+        .context("unreadable control frame")
+}
+
+/// `u16 BE length` + that many bytes: the bytes.
+fn read_frame(stream: &mut impl Read) -> Result<Vec<u8>> {
     let mut len = [0u8; 2];
     stream.read_exact(&mut len)?;
     let mut frame = vec![0u8; u16::from_be_bytes(len) as usize];
     stream.read_exact(&mut frame)?;
-    cipher
-        .open_control(&frame, last)
-        .context("unreadable control frame")
+    Ok(frame)
 }
 
 /// A name from the network: no control or invisible format characters
@@ -374,14 +479,14 @@ pub struct Beacon {
 
 impl Beacon {
     pub fn encode(&self) -> Vec<u8> {
-        json!({"hako": 1, "id": self.id, "name": self.name, "key": self.key, "port": self.port})
+        json!({"hako": PROTOCOL, "id": self.id, "name": self.name, "key": self.key, "port": self.port})
             .to_string()
             .into_bytes()
     }
 
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         let v: Value = serde_json::from_slice(bytes).ok()?;
-        if v["hako"].as_u64()? != 1 {
+        if v["hako"].as_u64()? != u64::from(PROTOCOL) {
             return None;
         }
         let key = v["key"].as_str()?;
@@ -496,6 +601,88 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_code_depends_on_both_nonces() {
+        let hash = [7u8; 32];
+        let (a, b) = ([1u8; NONCE], [2u8; NONCE]);
+        let code = code_digest(&hash, &a, &b);
+        assert_ne!(code, code_digest(&hash, &[3u8; NONCE], &b), "initiator's");
+        assert_ne!(code, code_digest(&hash, &a, &[3u8; NONCE]), "responder's");
+        assert_ne!(code, code_digest(&[8u8; 32], &a, &b), "handshake's");
+    }
+
+    /// `handshake` as initiator against a hand-driven responder that sends
+    /// `payload` in message 2 and then reveals `reveal`.
+    fn against_responder(payload: Vec<u8>, reveal: [u8; NONCE]) -> Result<Handshake> {
+        let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut hs = snow::Builder::new(NOISE.parse().unwrap())
+                .local_private_key(&b.private)
+                .unwrap()
+                .build_responder()
+                .unwrap();
+            let steps = recv_message(&mut stream, &mut hs)
+                .and_then(|_| send_message(&mut stream, &mut hs, &payload))
+                .and_then(|()| recv_message(&mut stream, &mut hs));
+            if steps.is_ok() {
+                let cipher = Cipher::new(hs.into_stateless_transport_mode().unwrap());
+                let _ = stream.write_all(&cipher.seal(&reveal).unwrap());
+            }
+        });
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let got = handshake(&mut stream, &a.private, true);
+        drop(stream);
+        responder.join().unwrap();
+        got
+    }
+
+    #[test]
+    fn a_reveal_must_match_its_commitment() {
+        let nonce = [5u8; NONCE];
+        let commit = |n: &[u8]| [&[PROTOCOL][..], &blake2s(&[n])].concat();
+        assert!(against_responder(commit(&nonce), nonce).is_ok());
+        let e = against_responder(commit(&nonce), [6u8; NONCE])
+            .err()
+            .unwrap();
+        assert!(format!("{e:#}").contains("commitment"), "{e:#}");
+    }
+
+    #[test]
+    fn other_protocols_and_unexpected_payloads_are_refused() {
+        let nonce = [5u8; NONCE];
+        let older = against_responder(Vec::new(), nonce).err().unwrap();
+        assert!(format!("{older:#}").contains("older hako"), "{older:#}");
+        let mut newer = vec![PROTOCOL + 1];
+        newer.extend_from_slice(&blake2s(&[&nonce]));
+        let newer = against_responder(newer, nonce).err().unwrap();
+        assert!(format!("{newer:#}").contains("protocol"), "{newer:#}");
+        let short = against_responder(vec![PROTOCOL, 1, 2], nonce)
+            .err()
+            .unwrap();
+        assert!(format!("{short:#}").contains("payload"), "{short:#}");
+
+        // A responder refuses anything in message 1.
+        let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handshake(&mut stream, &b.private, false)
+        });
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let mut hs = snow::Builder::new(NOISE.parse().unwrap())
+            .local_private_key(&a.private)
+            .unwrap()
+            .build_initiator()
+            .unwrap();
+        send_message(&mut stream, &mut hs, b"grind me").unwrap();
+        let e = responder.join().unwrap().err().unwrap();
+        assert!(format!("{e:#}").contains("payload"), "{e:#}");
+    }
+
+    #[test]
     fn audio_packets_round_trip_and_reject_tampering_and_replays() {
         let (a, b, _, _) = pair();
         let mut plain = [0u8; MAX_AUDIO_PLAIN];
@@ -552,9 +739,9 @@ pub(super) mod tests {
         assert_eq!(Beacon::parse(&beacon.encode()), Some(beacon.clone()));
         let other = |v: Value| Beacon::parse(v.to_string().as_bytes());
         let mut v: Value = serde_json::from_slice(&beacon.encode()).unwrap();
-        v["hako"] = json!(2);
-        assert_eq!(other(v.clone()), None, "other protocol");
         v["hako"] = json!(1);
+        assert_eq!(other(v.clone()), None, "older protocol");
+        v["hako"] = json!(PROTOCOL);
         v["id"] = json!("ffffffffffffffff");
         assert_eq!(other(v.clone()), None, "id not from key");
         v["id"] = json!(beacon.id);

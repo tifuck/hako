@@ -362,12 +362,16 @@ impl KeyboardAdapter {
             KbProto::PerKey { gen, .. } => gen,
             _ => Gen::One,
         };
-        let settings = hako_core::config::load_device_settings(&paths, VID, pid)?;
+        let mut settings = hako_core::config::load_device_settings(&paths, VID, pid)?;
         let actuation = spec
             .actuation
             .then(|| actuation_node(pid))
             .flatten()
             .and_then(|n| HidrawDevice::open(&n.path).ok());
+        crate::drivers::sanitize_saved(
+            &mut settings,
+            &controls(actuation.is_some(), save_blocked(spec)),
+        );
         let mut a = Self {
             id: DeviceId {
                 vendor_id: VID,

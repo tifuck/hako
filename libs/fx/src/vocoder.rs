@@ -17,6 +17,8 @@ const RELEASE_MS: f32 = 30.0;
 /// Loudness followers for the automatic gain.
 const LEVEL_MS: f32 = 100.0;
 const MAX_GAIN: f32 = 30.0;
+/// Seed of the noise carrier.
+const NOISE_SEED: u32 = 0x9E37_79B9;
 
 /// PolyBLEP residual for a step at phase 0 of a phase in `0..1` moving `dt`
 /// per sample.
@@ -62,7 +64,7 @@ impl Vocoder {
             attack: one_pole(ATTACK_MS, rate),
             release: one_pole(RELEASE_MS, rate),
             phase: 0.0,
-            noise: 0x9E37_79B9,
+            noise: NOISE_SEED,
             detector: PitchDetector::new(rate),
             followed: None,
             level_coef: one_pole(LEVEL_MS, rate),
@@ -154,6 +156,20 @@ impl Effect for Vocoder {
             *r += (wet - *r) * m;
         }
         self.mix.settle(target);
+    }
+
+    fn reset(&mut self) {
+        for band in self.voice.iter_mut().chain(&mut self.synth) {
+            band.reset();
+        }
+        self.env = [0.0; MAX_BANDS];
+        self.phase = 0.0;
+        self.noise = NOISE_SEED;
+        self.detector.reset();
+        self.followed = None;
+        self.in_level = 0.0;
+        self.out_level = 0.0;
+        self.mix.reset();
     }
 }
 

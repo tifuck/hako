@@ -1,8 +1,8 @@
 # Repackages the release tarball for Arch (AUR name: hako-bin).
-# On a new release: bump pkgver, then `updpkgsums` (or paste the tarball's line
-# from the release's SHA256SUMS).
+# scripts/publish.sh sets pkgver and the checksum from each release's signed
+# SHA256SUMS; copy the file to the AUR repo after a release.
 pkgname=hako-bin
-pkgver=0.2.10
+pkgver=0.2.13
 pkgrel=1
 pkgdesc='Control panel for gaming keyboards, mice and headsets'
 arch=('x86_64')
@@ -19,7 +19,7 @@ conflicts=('hako')
 install=hako.install
 _dir="hako-${pkgver}-x86_64-linux"
 source=("${url}/releases/download/v${pkgver}/${_dir}.tar.gz")
-sha256sums=('c46290741f0c8fc2acae02909bf27072c66b4c10db9a3c71a77af52e83a8f56f')
+sha256sums=('4ebdb848c16788096db2d72ca4e50268f6a0b5cd7068b850a5d92599c428656e')
 
 package() {
   cd "$_dir"

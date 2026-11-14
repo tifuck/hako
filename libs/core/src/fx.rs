@@ -72,7 +72,7 @@ const DENOISE_REDUCTION: FxParam = param(
 const DENOISE_MODEL: FxChoice = FxChoice {
     name: "model",
     label: "Model",
-    help: "DeepFilterNet 3 removes the most noise (keyboards, fans, voices in the room) and adds about 40 ms delay. RNNoise is lighter on the CPU and adds about 20 ms, but leaves more noise. Both run on the processor, no GPU needed.",
+    help: "DeepFilterNet 3 removes the most noise (keyboards, fans, voices in the room). RNNoise is much lighter on the CPU but leaves more noise. Both add about 40 ms delay and run on the processor, no GPU needed.",
     options: &["DeepFilterNet 3 (best)", "RNNoise (light)"],
     default: 0,
 };

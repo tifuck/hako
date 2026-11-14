@@ -352,6 +352,24 @@ fn protocol(desc: &[u8]) -> Option<Protocol> {
     })
 }
 
+/// ERE for the udev rule, over `od -An -tx1` output (" xx" per byte): a
+/// LampArray application collection as [`layout`] finds one. Usage Page 0x59
+/// then Usage 0x01 (or one 4-byte usage 0x00590001), any global / local items
+/// between, then Collection (Application); every item in any data size.
+pub fn udev_pattern() -> String {
+    let byte = " [0-9a-f]{2}";
+    // Non-main short items: type bits (2-3) global or local, by data size.
+    let item = format!(
+        "( [0-9a-f][48]| [0-9a-f][59]{byte}| [0-9a-f][6a]{}| [0-9a-f][7b]{})",
+        byte.repeat(2),
+        byte.repeat(4)
+    );
+    let page = "( 05 59| 06 59 00| 07 59 00 00 00)";
+    let usage = "( 09 01| 0a 01 00| 0b 01 00 00 00)";
+    let collection = "( a1 01| a2 01 00| a3 01 00 00 00)";
+    format!("({page}{item}*{usage}| 0b 01 00 59 00){item}*{collection}")
+}
+
 /// A lamp's level counts (Red, Green, Blue, Intensity), HUTRR84 3.2.4.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Lamp {
@@ -893,6 +911,71 @@ mod tests {
         // A boot keyboard.
         assert!(protocol(&[0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0xc0]).is_none());
         assert!(protocol(&[]).is_none());
+    }
+
+    /// The generated udev rule grants access to the descriptors the probe
+    /// claims, whatever item sizes they use.
+    #[test]
+    fn udev_rule_matches_what_the_probe_claims() {
+        let rules = crate::drivers::udev_rules();
+        let line = rules
+            .lines()
+            .skip_while(|l| !l.starts_with("# HID LampArray"))
+            .find(|l| l.contains("PROGRAM="))
+            .unwrap();
+        let program = line.split("PROGRAM=\"").nth(1).unwrap();
+        let program = program
+            .split("\", MODE")
+            .next()
+            .unwrap()
+            .replace("\\\"", "\"");
+        let path = std::env::temp_dir().join(format!("hako-lamp-desc-{}", std::process::id()));
+        let program = program.replace("/sys%p/device/report_descriptor", path.to_str().unwrap());
+        let rule = |desc: &[u8]| {
+            std::fs::write(&path, desc).unwrap();
+            std::process::Command::new("/bin/sh")
+                .args(["-c", &program])
+                .status()
+                .unwrap()
+                .success()
+        };
+        let body = &SPEC[6..];
+        let cases: [(&str, Vec<u8>); 6] = [
+            ("spec", SPEC.to_vec()),
+            // 2-byte page item.
+            (
+                "page16",
+                [&[0x06, 0x59, 0x00, 0x09, 0x01, 0xa1, 0x01][..], body].concat(),
+            ),
+            // 2-byte usage (holds 0x0a, a newline to grep) after a global item.
+            (
+                "usage16",
+                [
+                    &[0x05, 0x59, 0x15, 0x00, 0x0a, 0x01, 0x00, 0xa1, 0x01][..],
+                    body,
+                ]
+                .concat(),
+            ),
+            // Extended usage, the page item after it.
+            (
+                "extended",
+                [
+                    &[0x0b, 0x01, 0x00, 0x59, 0x00, 0x05, 0x59, 0xa1, 0x01][..],
+                    body,
+                ]
+                .concat(),
+            ),
+            (
+                "other usage",
+                [&[0x05, 0x59, 0x09, 0x02, 0xa1, 0x01][..], body].concat(),
+            ),
+            ("keyboard", vec![0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0xc0]),
+        ];
+        for (name, desc) in cases {
+            assert_eq!(rule(&desc), protocol(&desc).is_some(), "{name}");
+        }
+        assert!(rule(SPEC));
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Razer Huntsman V2 TKL (1532:026b) interface 4, read from sysfs: no

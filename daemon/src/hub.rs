@@ -64,6 +64,9 @@ pub struct DaemonHub {
     events: EventTx,
     started: Instant,
     last_profile_applied: Mutex<bool>,
+    /// One profile apply or save at a time (the startup apply included), so
+    /// their values and `last_profile` never interleave.
+    profiles: Mutex<()>,
     remap: RemapEngine,
     /// Models whose last open failed, keyed by (vid, first pid).
     retry: std::sync::Mutex<HashMap<(u16, u16), Retry>>,
@@ -117,6 +120,7 @@ impl DaemonHub {
             events,
             started: Instant::now(),
             last_profile_applied: Mutex::new(false),
+            profiles: Mutex::new(()),
             remap,
             retry: std::sync::Mutex::new(HashMap::new()),
             rescanned: std::sync::Mutex::new(HashMap::new()),
@@ -411,7 +415,9 @@ impl DaemonHub {
             }
         };
         if let Some(name) = cfg.last_profile {
-            if let Err(error) = self.apply_profile(&name, true).await {
+            if cfg.last_profile_modified {
+                info!("startup profile {name} skipped: settings were changed since it was applied");
+            } else if let Err(error) = self.apply_profile(&name, true).await {
                 warn!("apply last profile {name}: {error:#}");
                 self.push_error(format!("Startup profile {name}: {error:#}"));
             }
@@ -443,6 +449,7 @@ impl DaemonHub {
                 last_error: config_error.or(profiles_error),
             },
             last_profile: cfg.last_profile,
+            last_profile_modified: cfg.last_profile_modified,
             profiles,
             audio,
             remaps: self.remap.snapshots(),
@@ -499,6 +506,7 @@ impl DaemonHub {
             Method::Set => match serde_json::from_value::<SetParams>(req.params) {
                 Ok(p) => match self.set(p.device_id, p.key, p.value).await {
                     Ok(snap) => {
+                        self.mark_profile_modified(&[p.key], &snap.controls).await;
                         let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
                         IpcResponse::ok(id, snap)
                     }
@@ -507,13 +515,17 @@ impl DaemonHub {
                 Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::SetMany => match serde_json::from_value::<SetManyParams>(req.params) {
-                Ok(p) => match self.set_many(p.device_id, p.values).await {
-                    Ok(snap) => {
-                        let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
-                        IpcResponse::ok(id, snap)
+                Ok(p) => {
+                    let keys: Vec<SettingKey> = p.values.iter().map(|(k, _)| *k).collect();
+                    match self.set_many(p.device_id, p.values).await {
+                        Ok(snap) => {
+                            self.mark_profile_modified(&keys, &snap.controls).await;
+                            let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
+                            IpcResponse::ok(id, snap)
+                        }
+                        Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
                     }
-                    Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
-                },
+                }
                 Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::ListProfiles => {
@@ -581,18 +593,24 @@ impl DaemonHub {
                 Ok(cfg) => IpcResponse::ok(id, self.app_settings(&cfg)),
                 Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
             },
-            Method::SetConfig => match serde_json::from_value::<AppSettings>(req.params) {
-                Ok(s) => {
-                    if let Err(e) = validate_settings(&s) {
-                        return IpcResponse::err(id, "invalid_value", e);
+            Method::SetConfig => {
+                let current = match load_app_config(&self.paths) {
+                    Ok(cfg) => self.app_settings(&cfg),
+                    Err(e) => return IpcResponse::err(id, "io", format!("{e:#}")),
+                };
+                match serde_json::from_value::<AppSettings>(overlay(&current, req.params)) {
+                    Ok(s) => {
+                        if let Err(e) = validate_settings(&s) {
+                            return IpcResponse::err(id, "invalid_value", e);
+                        }
+                        match tokio::task::block_in_place(|| self.set_config(s)) {
+                            Ok(saved) => IpcResponse::ok(id, saved),
+                            Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
+                        }
                     }
-                    match tokio::task::block_in_place(|| self.set_config(s)) {
-                        Ok(saved) => IpcResponse::ok(id, saved),
-                        Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
-                    }
+                    Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
                 }
-                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
-            },
+            }
             Method::GetRemaps => {
                 match serde_json::from_value::<SnapshotParams>(req.params)
                     .ok()
@@ -697,6 +715,28 @@ impl DaemonHub {
             .await
     }
 
+    /// A user's change to a setting profiles apply: the live state is no
+    /// longer `last_profile`'s, so the next start does not re-apply it.
+    /// Written once, not at every slider commit.
+    async fn mark_profile_modified(&self, keys: &[SettingKey], controls: &[SettingMeta]) {
+        if keys.iter().all(|&key| profile_skips(key, controls)) {
+            return;
+        }
+        // After an apply or save in progress (they clear the flag).
+        let _one_at_a_time = self.profiles.lock().await;
+        let unmarked = load_app_config(&self.paths)
+            .is_ok_and(|cfg| cfg.last_profile.is_some() && !cfg.last_profile_modified);
+        if !unmarked {
+            return;
+        }
+        if let Err(e) = update_app_config(&self.paths, |cfg| {
+            cfg.last_profile_modified = cfg.last_profile.is_some();
+            Ok(())
+        }) {
+            warn!("the profile could not be marked modified: {e:#}");
+        }
+    }
+
     async fn set_many(
         &self,
         device_id: DeviceId,
@@ -714,6 +754,7 @@ impl DaemonHub {
     /// re-applying would write onboard memory at every boot) and the mixer
     /// layout (`mixer.toml` has the live one).
     async fn apply_profile(&self, name: &str, startup: bool) -> Result<()> {
+        let _one_at_a_time = self.profiles.lock().await;
         let profile = load_profile(&self.paths, name)?;
         let mut failures = Vec::new();
         for h in self.handles() {
@@ -797,6 +838,7 @@ impl DaemonHub {
         update_app_config(&self.paths, |cfg| {
             if cfg.last_profile.as_deref() == Some(name) {
                 cfg.last_profile = None;
+                cfg.last_profile_modified = false;
             }
             Ok(())
         })
@@ -806,9 +848,42 @@ impl DaemonHub {
         })
     }
 
+    /// Re-saving keeps what the live state does not have: the stored layout
+    /// while the mixer is off, and the sections of devices not connected.
     async fn save_profile(&self, name: &str) -> Result<()> {
-        let mut devices = std::collections::BTreeMap::new();
-        for h in self.handles() {
+        let _one_at_a_time = self.profiles.lock().await;
+        let old = match load_profile(&self.paths, name) {
+            Ok(old) => Some(old),
+            Err(e)
+                if e.root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                None
+            }
+            Err(e) => return Err(e.context("the saved profile could not be read, so it is kept")),
+        };
+        let handles = self.handles();
+        let (mut devices, old_mixer) = match old {
+            Some(old) => {
+                // A connected device owns every stem of its model (as applied).
+                let live = |stem: &String| {
+                    handles.iter().any(|h| {
+                        let snap = h.snapshot();
+                        snap.connected
+                            && (*stem == snap.id.config_stem()
+                                || h.model.product_ids.iter().any(|pid| {
+                                    *stem == format!("{:04x}_{pid:04x}", h.model.vendor_id)
+                                }))
+                    })
+                };
+                let mut devices = old.devices;
+                devices.retain(|stem, _| !live(stem));
+                (devices, old.mixer)
+            }
+            None => Default::default(),
+        };
+        for h in &handles {
             let snap = h.snapshot();
             // Only what ApplyProfile can write back (no read-only or stale keys).
             let m: std::collections::BTreeMap<_, _> = snap
@@ -825,8 +900,13 @@ impl DaemonHub {
                 })
                 .map(|(k, v)| (k.clone(), TomlSetting::from(v)))
                 .collect();
+            // An offline handle's last state never replaces a saved section.
             if !m.is_empty() {
-                devices.insert(snap.id.config_stem(), m);
+                if snap.connected {
+                    devices.insert(snap.id.config_stem(), m);
+                } else {
+                    devices.entry(snap.id.config_stem()).or_insert(m);
+                }
             }
         }
         // The file in memory: a fader drag not yet written counts. Unreadable,
@@ -840,7 +920,7 @@ impl DaemonHub {
             version: 1,
             name: name.to_string(),
             devices,
-            mixer: profile_layout(&state.file),
+            mixer: profile_layout(&state.file).or(old_mixer),
         };
         save_profile(&self.paths, &profile)?;
         set_last_profile(&self.paths, name)
@@ -887,6 +967,7 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn set_last_profile(paths: &ConfigPaths, name: &str) -> Result<()> {
     update_app_config(paths, |cfg| {
         cfg.last_profile = Some(name.to_string());
+        cfg.last_profile_modified = false;
         Ok(())
     })
     .map(drop)
@@ -900,6 +981,18 @@ fn profile_layout(file: &MixerFile) -> Option<Scene> {
         input.solo = false;
     }
     Some(live)
+}
+
+/// `request`'s fields over `current`: a field an older UI does not send keeps
+/// its value instead of taking the serde default.
+fn overlay(current: &AppSettings, request: serde_json::Value) -> serde_json::Value {
+    match (serde_json::to_value(current), request) {
+        (Ok(serde_json::Value::Object(mut merged)), serde_json::Value::Object(fields)) => {
+            merged.extend(fields);
+            serde_json::Value::Object(merged)
+        }
+        (_, request) => request,
+    }
 }
 
 /// Settings checks that are the caller's fault (`invalid_value`).
@@ -1202,6 +1295,7 @@ mod tests {
             events,
             started: Instant::now(),
             last_profile_applied: Mutex::new(false),
+            profiles: Mutex::new(()),
             retry: Default::default(),
             rescanned: Default::default(),
             paths,
@@ -1358,7 +1452,7 @@ mod tests {
                 name: "Plain".into(),
                 connected: true,
                 batteries: vec![],
-                settings: Default::default(),
+                settings: [("dpi".into(), SettingValue::Int(400))].into(),
                 controls: vec![
                     SettingMeta::slider(SettingKey::Dpi, "DPI", 100.0, 1000.0, 1.0),
                     SettingMeta::slider(SettingKey::Brightness, "B", 0.0, 100.0, 1.0),
@@ -1373,6 +1467,71 @@ mod tests {
             Ok(())
         }
         fn shutdown(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn resaving_a_profile_keeps_what_the_live_state_lacks() {
+        let hub = hub("profile-resave");
+        let paths = hub.paths.clone();
+        let model = drivers::models().next().unwrap();
+        let id = DeviceId {
+            vendor_id: model.vendor_id,
+            product_id: model.product_ids[0],
+            instance: "x".into(),
+        };
+        let dpi = |v| [("dpi".to_string(), TomlSetting::Int(v))].into();
+        let profile = ProfileFile {
+            version: 1,
+            name: "p".into(),
+            devices: [(id.config_stem(), dpi(800)), ("dead_beef".into(), dpi(900))].into(),
+            mixer: Some(layout("B2")),
+        };
+        save_profile(&paths, &profile).unwrap();
+        let h = DeviceHandle::spawn(
+            model,
+            Box::new(Plain(id.clone())),
+            hub.events.clone(),
+            Vec::new(),
+            paths.clone(),
+        )
+        .unwrap();
+        lock(&hub.devices).insert(id.key(), h.clone());
+
+        // Mixer off, one device unplugged: both stay; the connected one is live.
+        hub.save_profile("p").await.unwrap();
+        let saved = load_profile(&paths, "p").unwrap();
+        assert_eq!(saved.mixer, Some(layout("B2")));
+        let dpi_of = |stem: &str| match saved.devices[stem]["dpi"] {
+            TomlSetting::Int(v) => v,
+            ref other => panic!("{other:?}"),
+        };
+        assert_eq!((dpi_of(&id.config_stem()), dpi_of("dead_beef")), (400, 900));
+
+        // An unreadable profile is never replaced.
+        let file = paths.profiles_dir.join("p.toml");
+        std::fs::write(&file, "devices = [").unwrap();
+        let e = hub.save_profile("p").await.unwrap_err();
+        assert!(format!("{e:#}").contains("could not be read"), "{e:#}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "devices = [");
+        stop_all(&[h]).await;
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn profile_applies_and_saves_wait_for_each_other() {
+        let hub = hub("profile-lock");
+        hub.save_profile("p").await.unwrap();
+        let busy = hub.profiles.lock().await;
+        let wait = Duration::from_millis(100);
+        assert!(tokio::time::timeout(wait, hub.apply_profile("p", false))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(wait, hub.save_profile("p"))
+            .await
+            .is_err());
+        drop(busy);
+        hub.apply_profile("p", true).await.unwrap();
+        close(hub);
     }
 
     #[test]
@@ -1565,6 +1724,121 @@ mod tests {
             load_app_config(&paths).unwrap().last_profile.as_deref(),
             Some("p")
         );
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn a_setting_changed_after_a_profile_keeps_the_start_from_reapplying_it() {
+        let hub = hub("profile-modified");
+        let model = drivers::models().next().unwrap();
+        let id = DeviceId {
+            vendor_id: model.vendor_id,
+            product_id: model.product_ids[0],
+            instance: "x".into(),
+        };
+        let h = DeviceHandle::spawn(
+            model,
+            Box::new(Plain(id.clone())),
+            hub.events.clone(),
+            Vec::new(),
+            hub.paths.clone(),
+        )
+        .unwrap();
+        lock(&hub.devices).insert(id.key(), h.clone());
+        let modified = || load_app_config(&hub.paths).unwrap().last_profile_modified;
+        let set = |dpi: i64| IpcRequest {
+            id: serde_json::json!(1),
+            method: Method::Set,
+            params: serde_json::to_value(SetParams {
+                device_id: id.clone(),
+                key: SettingKey::Dpi,
+                value: SettingValue::Int(dpi),
+            })
+            .unwrap(),
+        };
+
+        // No profile applied: nothing to mark.
+        assert!(hub.handle(set(500)).await.error.is_none());
+        assert!(!modified());
+
+        hub.save_profile("p").await.unwrap();
+        // A profile's own writes are not the user's (this one fails part-way,
+        // so nothing clears the flag after its DPI write).
+        let settings = [
+            ("dpi".to_string(), TomlSetting::Int(800)),
+            ("bogus".to_string(), TomlSetting::Int(1)),
+        ];
+        let bad = ProfileFile {
+            version: 1,
+            name: "bad".into(),
+            devices: [(id.config_stem(), settings.into())].into(),
+            mixer: None,
+        };
+        save_profile(&hub.paths, &bad).unwrap();
+        assert!(hub.apply_profile("bad", false).await.is_err());
+        assert!(!modified());
+        // Neither is the onboard-writes opt-in.
+        hub.mark_profile_modified(&[SettingKey::OnboardWrites], &[])
+            .await;
+        assert!(!modified());
+
+        assert!(hub.handle(set(600)).await.error.is_none());
+        assert!(modified());
+        assert!(hub.hub_state().await.last_profile_modified);
+
+        // The start leaves the live settings alone.
+        let mut events = hub.subscribe();
+        hub.maybe_apply_last_profile().await;
+        assert!(modified());
+        while let Ok(ev) = events.try_recv() {
+            assert!(!matches!(ev, AdapterEvent::Updated(_)), "applied: {ev:?}");
+        }
+
+        hub.save_profile("p").await.unwrap();
+        assert!(!modified(), "saved");
+        let colour = IpcRequest {
+            id: serde_json::json!(1),
+            method: Method::SetMany,
+            params: serde_json::to_value(SetManyParams {
+                device_id: id.clone(),
+                values: vec![(SettingKey::Brightness, SettingValue::Int(10))],
+            })
+            .unwrap(),
+        };
+        assert!(hub.handle(colour).await.error.is_none());
+        assert!(modified(), "SetMany");
+        hub.apply_profile("p", false).await.unwrap();
+        assert!(!modified(), "applied");
+        assert!(hub.handle(set(700)).await.error.is_none());
+        hub.delete_profile("p").unwrap();
+        assert!(!modified(), "forgotten");
+        stop_all(&[h]).await;
+        close(hub);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_an_older_ui_does_not_send_keep_their_values() {
+        let hub = hub("set-config");
+        update_app_config(&hub.paths, |cfg| {
+            cfg.audio_latency = "low".into();
+            cfg.check_updates = false;
+            Ok(())
+        })
+        .unwrap();
+        // A UI from before both fields existed.
+        let got = hub
+            .handle(IpcRequest {
+                id: serde_json::json!(1),
+                method: Method::SetConfig,
+                params: serde_json::json!({"log_level": "debug", "chatmix_set_default_sink": false}),
+            })
+            .await;
+        assert!(got.error.is_none(), "{:?}", got.error);
+        let cfg = load_app_config(&hub.paths).unwrap();
+        assert_eq!(cfg.log_level, "debug");
+        assert!(!cfg.chatmix_set_default_sink);
+        assert_eq!(cfg.audio_latency, "low");
+        assert!(!cfg.check_updates);
         close(hub);
     }
 }

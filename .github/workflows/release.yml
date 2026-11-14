@@ -19,7 +19,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          # Build scripts must not read the job token from .git/config.
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@9522411a9bce8484da960823fc2f46e52f981f71 # 1.100.0
       # No build cache here: a release must not restore state other runs wrote.
       - name: System deps (egui/winit, PipeWire bindings)
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang pkg-config pipewire-bin libpipewire-0.3-modules
@@ -37,6 +40,12 @@ jobs:
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$RUNNER_TEMP/xdg}"
           mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
           cargo test --release --locked -p hako-audio live_engine_reconnects -- --ignored --exact engine::tests::live_engine_reconnects
+      - name: ChatMix pw-loopback against PipeWire 0.3.48
+        # hako's exact pw-loopback arguments must parse there (no `-n` before 0.3.52).
+        run: |
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$RUNNER_TEMP/xdg}"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          timeout 600 cargo test --release --locked -p hako-audio live_loopback_stays_up -- --ignored --exact tests::live_loopback_stays_up
       - name: Build
         # Embeds owner/repo so installed builds know where to look for updates.
         env:

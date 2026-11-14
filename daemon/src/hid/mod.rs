@@ -478,7 +478,9 @@ impl UsbDevice {
         Ok(())
     }
 
-    /// HID GET_REPORT (Feature, report id 0) on interface `w_index`.
+    /// HID GET_REPORT (Feature, report id 0) on interface `w_index`. A reply
+    /// shorter than `data` is an error (OpenRazer `razer_get_usb_response`
+    /// rejects any length but the full report too).
     pub fn hid_get_feature(&self, interface: u16, data: &mut [u8]) -> Result<()> {
         let mut ctrl = UsbdevfsCtrltransfer {
             b_request_type: 0xa1, // CLASS | INTERFACE | IN
@@ -500,6 +502,12 @@ impl UsbDevice {
             bail!(
                 "USB GET_REPORT iface={interface}: {}",
                 std::io::Error::last_os_error()
+            );
+        }
+        if (ret as usize) < data.len() {
+            bail!(
+                "USB GET_REPORT iface={interface}: short reply ({ret} of {} bytes)",
+                data.len()
             );
         }
         Ok(())

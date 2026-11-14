@@ -154,6 +154,7 @@ impl LogitechMouseAdapter {
         if settings.is_empty() {
             settings = hako_core::config::load_device_settings(&paths, RX_VID, MOUSE_PID)?;
         }
+        sanitize(&mut settings);
         defaults(&mut settings);
         let mut a = Self {
             id,
@@ -638,24 +639,18 @@ fn open_hidpp_path() -> Result<(HidDeviceInfo, HidrawDevice, Option<u8>)> {
         }
     }
 
-    // 2) Receiver interfaces that look like HID++ (prefer those with report id 0x10)
-    let mut rx: Vec<_> = list
-        .into_iter()
-        .filter(|d| d.vendor_id == RX_VID && d.product_id == RX_PID)
-        .collect();
-    // Prefer higher interface numbers (HID++ is often the third interface)
-    rx.sort_by_key(|d| std::cmp::Reverse(d.interface.unwrap_or(0)));
-
+    // 2) The receiver's HID++ interfaces (report 0x11): its mouse and
+    // keyboard interfaces never answer HID++ and would only cost timeouts.
     let mut last_err = None;
-    for info in &rx {
+    for (info, short) in &super::hidpp_nodes(RX_PID)? {
         match HidrawDevice::open(&info.path) {
             Ok(mut dev) => {
-                let short = crate::hid::report_ids(&info.report_descriptor()).contains(&0x10);
                 // The pairing registers name the PRO 2's slot (asleep or
                 // not); a receiver that does not answer them is pinged.
-                let found = match pairing_slot(&mut dev, short) {
+                let found = match pairing_slot(&mut dev, *short) {
                     Some(Some(slot)) => Ok(slot),
-                    Some(None) => Err(anyhow::anyhow!("no PRO 2 paired to this receiver")),
+                    // The receiver answered for every slot: no node will differ.
+                    Some(None) => bail!("no PRO 2 paired to the receiver"),
                     None => discover_index(&mut dev),
                 };
                 match found {
@@ -813,6 +808,17 @@ fn defaults(s: &mut SettingsMap) {
     ] {
         s.entry(k.as_str().into()).or_insert(v);
     }
+}
+
+/// [`crate::drivers::sanitize_saved`] before the probe: the effect is left
+/// alone, as the mouse's effect list is not known yet (`apply_lighting` skips
+/// an effect it lacks); a dropped value gets its default.
+fn sanitize(s: &mut SettingsMap) {
+    let offered: Vec<_> = controls(true, MouseEffectKind::Static, &Default::default(), &[])
+        .into_iter()
+        .filter(|m| m.key != SettingKey::Effect)
+        .collect();
+    crate::drivers::sanitize_saved(s, &offered);
 }
 
 fn controls(
@@ -1030,6 +1036,20 @@ mod effect_tests {
             Some(&SettingValue::Text("pulse".into()))
         );
         assert!(!existing.contains_key("mouse_rgb_enabled"));
+    }
+
+    #[test]
+    fn saved_values_are_sanitized_before_the_probe() {
+        let mut s = SettingsMap::new();
+        s.insert("color_r".into(), SettingValue::Int(300));
+        s.insert("speed".into(), SettingValue::Text("warp".into()));
+        s.insert("effect".into(), SettingValue::Text("pulse".into()));
+        sanitize(&mut s);
+        defaults(&mut s);
+        // 300 would go out as 44 (`as u8`).
+        assert_eq!(s.get("color_r"), Some(&SettingValue::Int(255)));
+        assert_eq!(s.get("speed"), Some(&SettingValue::Text("medium".into())));
+        assert_eq!(s.get("effect"), Some(&SettingValue::Text("pulse".into())));
     }
 
     #[test]

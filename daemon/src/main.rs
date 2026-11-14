@@ -21,6 +21,7 @@ use hub::{DaemonHub, DISCOVERY_PERIOD, LOG_LEVELS};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -133,7 +134,9 @@ async fn main() -> Result<()> {
 
     // Bind IPC first so the UI can always connect even if HID discovery is
     // slow/stuck, and so a second daemon exits before touching any device.
-    let (listener, _lock) = ipc_server::bind(&socket)?;
+    // One lock per user, whatever `--socket` says.
+    let lock = default_socket_path().with_extension("lock");
+    let (listener, _lock) = ipc_server::bind(&socket, &lock)?;
 
     let hub = Arc::new(DaemonHub::new(paths));
 
@@ -206,19 +209,18 @@ async fn latency_test_cli(preset: &str, seconds: u32, path: LatencyPath) -> Resu
     Ok(())
 }
 
+/// Longest the kill-switch waits for a running daemon before resetting itself.
+const RESET_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn reset_audio_cli(socket: &std::path::Path, paths: &ConfigPaths) -> Result<()> {
-    if socket.exists() {
-        if let Ok(mut stream) = StdUnixStream::connect(socket) {
-            let req = IpcRequest {
-                id: serde_json::json!(1),
-                method: hako_core::ipc::Method::ResetAudio,
-                params: serde_json::Value::Null,
-            };
-            write_json_frame_sync(&mut stream, &req)?;
-            let v = read_json_frame_sync(&mut stream)?;
+    match reset_via_daemon(socket, RESET_TIMEOUT) {
+        Ok(Some(v)) => {
             println!("{v}");
             return Ok(());
         }
+        Ok(None) => {}
+        // A wedged or failing daemon must not leave the kill-switch stuck.
+        Err(e) => warn!("daemon reset failed ({e:#}); resetting here"),
     }
     // No daemon: also remove line-in links an older version left behind.
     let audio = AudioService::new();
@@ -229,4 +231,66 @@ fn reset_audio_cli(socket: &std::path::Path, paths: &ConfigPaths) -> Result<()> 
     audio.reset_all()?;
     println!("{{\"ok\":true,\"local\":true}}");
     Ok(())
+}
+
+/// The daemon's `ResetAudio` reply; `None` when no daemon listens on `socket`.
+/// An error when it does not answer within `timeout` or reports a failure.
+fn reset_via_daemon(
+    socket: &std::path::Path,
+    timeout: Duration,
+) -> Result<Option<serde_json::Value>> {
+    let Ok(mut stream) = StdUnixStream::connect(socket) else {
+        return Ok(None);
+    };
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let req = IpcRequest {
+        id: serde_json::json!(1),
+        method: hako_core::ipc::Method::ResetAudio,
+        params: serde_json::Value::Null,
+    };
+    write_json_frame_sync(&mut stream, &req)?;
+    let v = read_json_frame_sync(&mut stream)?;
+    anyhow::ensure!(v["ok"] == true, "{v}");
+    Ok(Some(v))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn the_kill_switch_gives_up_on_a_daemon_that_hangs_or_fails() {
+        let dir = std::env::temp_dir().join(format!("hako-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("d.sock");
+        let timeout = Duration::from_millis(200);
+        assert!(
+            reset_via_daemon(&sock, timeout).unwrap().is_none(),
+            "no daemon"
+        );
+
+        let listener = UnixListener::bind(&sock).unwrap();
+        // Accepted (backlog), never answered.
+        assert!(reset_via_daemon(&sock, timeout).is_err());
+
+        let daemon = std::thread::spawn(move || {
+            drop(listener.accept().unwrap());
+            for answer in [false, true] {
+                let (mut s, _) = listener.accept().unwrap();
+                let _: serde_json::Value = read_json_frame_sync(&mut s).unwrap();
+                let reply = serde_json::json!({"id": 1, "ok": answer});
+                write_json_frame_sync(&mut s, &reply).unwrap();
+            }
+        });
+        let failed = reset_via_daemon(&sock, Duration::from_secs(5)).unwrap_err();
+        assert!(format!("{failed:#}").contains("false"), "{failed:#}");
+        assert!(reset_via_daemon(&sock, Duration::from_secs(5))
+            .unwrap()
+            .is_some());
+        daemon.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

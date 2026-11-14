@@ -4,3 +4,10 @@ set -e
 if [ "$1" = remove ] || [ "$1" = purge ]; then
     udevadm control --reload-rules 2>/dev/null || true
 fi
+# prerm disabled the service: a later reinstall enables it again (postinst).
+if [ "$1" = remove ]; then
+    mkdir -p /var/lib/hako && touch /var/lib/hako/reinstall
+fi
+if [ "$1" = purge ]; then
+    rm -rf /var/lib/hako
+fi

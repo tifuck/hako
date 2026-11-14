@@ -55,6 +55,13 @@ impl Effect for Distortion {
             }
         }
     }
+
+    fn reset(&mut self) {
+        self.tone.reset();
+        self.drive.reset();
+        self.makeup.reset();
+        self.mix.reset();
+    }
 }
 
 /// Ring modulator: the voice times a sine at `freq_hz`.
@@ -90,6 +97,11 @@ impl Effect for Robot {
                 *s = *s * (1.0 - m) + *s * carrier * m;
             }
         }
+    }
+
+    fn reset(&mut self) {
+        self.phase = 0.0;
+        self.mix.reset();
     }
 }
 
@@ -134,6 +146,12 @@ impl Effect for Bitcrusher {
                 *s = *s * (1.0 - m) + held * m;
             }
         }
+    }
+
+    fn reset(&mut self) {
+        self.held = [0.0; 2];
+        self.count = 0;
+        self.mix.reset();
     }
 }
 

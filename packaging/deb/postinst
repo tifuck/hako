@@ -10,10 +10,18 @@ for_users() {
 
 if [ "$1" = configure ]; then
     udevadm control --reload-rules 2>/dev/null || true
-    udevadm trigger 2>/dev/null || true
-    systemctl --global enable hakod.service >/dev/null 2>&1 || true
-    # Start (or, on upgrade, restart) the daemon for everyone logged in now;
-    # other users get it at their next login.
+    udevadm trigger --subsystem-match=hidraw --subsystem-match=usb \
+        --subsystem-match=input --subsystem-match=misc 2>/dev/null || true
     for_users daemon-reload
-    for_users restart hakod.service
+    if [ -z "$2" ] || [ -e /var/lib/hako/reinstall ]; then
+        # First install (or back after a remove, which disabled it): enable
+        # for everyone and start it for those logged in now; other users get
+        # it at their next login.
+        rm -rf /var/lib/hako
+        systemctl --global enable hakod.service >/dev/null 2>&1 || true
+        for_users start hakod.service
+    else
+        # Upgrade: keep an admin's disable and a user's stop.
+        for_users try-restart hakod.service
+    fi
 fi

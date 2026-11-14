@@ -11,5 +11,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 regex = "1"
 pipewire = { workspace = true }
+# Already in the tree via hakod and pipewire: PR_SET_PDEATHSIG for owned children.
+libc = "0.2"
 # Already in the tree via hako-core: the default-sink metadata is JSON.
 serde_json = { workspace = true }

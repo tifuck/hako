@@ -2,6 +2,7 @@
 # Installs hako for the current user. Works from a source checkout (builds
 # first) and from an extracted release tarball (uses its prebuilt bin/ and lib/).
 # HAKO_SKIP_UDEV=1 skips the sudo step (the in-app updater sets it).
+# Exit 3: installed, but the daemon did not restart.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -18,32 +19,38 @@ ICONDIR="$HOME/.local/share/icons/hicolor/256x256/apps"
 LIBDIR="$HOME/.local/lib/hako"
 mkdir -p "$HOME/.local/bin" "$LIBDIR" "$HOME/.config/systemd/user" "$HOME/.local/share/applications" "$ICONDIR"
 
-# Both binaries are staged next to their targets, then renamed into place: a
-# failure never leaves a half-written file or a new hakod with an old hako.
+# hakod's effects library (it looks in ../lib/hako) and both binaries are
+# staged next to their targets, then renamed into place, the library first:
+# running mixer strips keep the old file mapped, and no new hakod runs without
+# it. A failed rename puts the earlier files back, so a failure never leaves a
+# half-written file, a new hakod with an old hako, or an old hakod with the
+# new library.
 DEST="$HOME/.local/bin"
-trap 'rm -f "$DEST"/.hakod.new "$DEST"/.hako.new "$DEST"/.hakod.old "$DEST"/.hako.old "$LIBDIR"/.libhako_fx.so.new' EXIT
-# hakod's effects library (it looks in ../lib/hako), renamed into place first:
-# running mixer strips keep the old file mapped, and no new hakod runs without it.
-install -m 644 "$FX" "$LIBDIR/.libhako_fx.so.new"
-mv -f "$LIBDIR/.libhako_fx.so.new" "$LIBDIR/libhako_fx.so"
+FILES=("$LIBDIR/libhako_fx.so" "$DEST/hakod" "$DEST/hako")
+staged() { echo "$(dirname "$1")/.$(basename "$1").$2"; }
+trap 'for f in "${FILES[@]}"; do rm -f "$(staged "$f" new)" "$(staged "$f" old)"; done' EXIT
+install -m 644 "$FX" "$(staged "$LIBDIR/libhako_fx.so" new)"
 for b in hakod hako; do
-  install -m 755 "$BIN/$b" "$DEST/.$b.new"
-  if [ -e "$DEST/$b" ] || [ -L "$DEST/$b" ]; then cp -a "$DEST/$b" "$DEST/.$b.old"; fi
+  install -m 755 "$BIN/$b" "$(staged "$DEST/$b" new)"
+done
+for f in "${FILES[@]}"; do
+  if [ -e "$f" ] || [ -L "$f" ]; then cp -a "$f" "$(staged "$f" old)"; fi
 done
 replaced=()
-for b in hakod hako; do
-  if ! mv -f "$DEST/.$b.new" "$DEST/$b"; then
+for f in "${FILES[@]}"; do
+  if ! mv -f "$(staged "$f" new)" "$f"; then
     for r in "${replaced[@]}"; do
-      if [ -e "$DEST/.$r.old" ] || [ -L "$DEST/.$r.old" ]; then
-        mv -f "$DEST/.$r.old" "$DEST/$r"
+      old="$(staged "$r" old)"
+      if [ -e "$old" ] || [ -L "$old" ]; then
+        mv -f "$old" "$r"
       else
-        rm -f "$DEST/$r"
+        rm -f "$r"
       fi
     done
-    echo "Could not install $b; the previous binaries were kept." >&2
+    echo "Could not install $(basename "$f"); the previous files were kept." >&2
     exit 1
   fi
-  replaced+=("$b")
+  replaced+=("$f")
 done
 install -m 644 "$ROOT/packaging/systemd/hakod.service" "$HOME/.config/systemd/user/hakod.service"
 install -m 644 "$ROOT/packaging/hako.desktop" "$HOME/.local/share/applications/hako.desktop"
@@ -61,8 +68,13 @@ if [ -z "${HAKO_SKIP_UDEV:-}" ]; then
   fi
 fi
 
-systemctl --user daemon-reload
-systemctl --user enable hakod.service
+# The files are in place: a failed restart is a warning with its own exit
+# code (the in-app updater reports it), not a failed install.
 # restart (not just start) so an upgrade replaces a running daemon
-systemctl --user restart hakod.service
+if ! { systemctl --user daemon-reload &&
+  systemctl --user enable hakod.service &&
+  systemctl --user restart hakod.service; }; then
+  echo "Installed, but restarting the daemon failed: run systemctl --user restart hakod" >&2
+  exit 3
+fi
 echo "Done. Launch UI with: hako"

@@ -341,13 +341,23 @@ pub fn choice(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec
     }
     let current = d.settings.get(meta.key.as_str());
     let selected = meta.options.iter().position(|o| current == Some(&o.value));
+    let pending = egui::Id::new(("hako_confirm", d.id.key(), meta.key.as_str()));
+    // A choice with a warning needs an explicit confirmation, like a toggle.
+    let mut pick = |ui: &mut Ui, i: usize| {
+        if meta.warning.is_some() {
+            ui.ctx().data_mut(|m| m.insert_temp(pending, i));
+        } else {
+            set(out, d, meta.key, meta.options[i].value.clone());
+        }
+    };
     let total_chars: usize = meta.options.iter().map(|o| o.label.len()).sum();
     if meta.options.len() <= 7 && total_chars <= 48 {
         let labels: Vec<&str> = meta.options.iter().map(|o| o.label.as_str()).collect();
         let id = egui::Id::new(("seg", d.id.key(), meta.key.as_str()));
         if let Some(i) = widgets::segmented(ui, id, &labels, selected) {
-            set(out, d, meta.key, meta.options[i].value.clone());
+            pick(ui, i);
         }
+        confirm_choice(ui, d, meta, pending, out);
         return;
     }
     let text = selected
@@ -365,10 +375,42 @@ pub fn choice(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec
                 .clicked()
                 && selected != Some(i)
             {
-                set(out, d, meta.key, opt.value.clone());
+                pick(ui, i);
             }
         }
     });
+    confirm_choice(ui, d, meta, pending, out);
+}
+
+/// The confirmation a picked option with a warning waits for.
+fn confirm_choice(
+    ui: &mut Ui,
+    d: &DeviceSnapshot,
+    meta: &SettingMeta,
+    pending: egui::Id,
+    out: &mut Vec<UiCommand>,
+) {
+    let (Some(warning), Some(i)) = (
+        &meta.warning,
+        ui.ctx().data(|m| m.get_temp::<usize>(pending)),
+    ) else {
+        return;
+    };
+    let answer = widgets::confirm(
+        ui.ctx(),
+        pending.with("modal"),
+        &meta.label,
+        warning,
+        "I understand, change it",
+    );
+    if answer == Some(true) {
+        if let Some(opt) = meta.options.get(i) {
+            set(out, d, meta.key, opt.value.clone());
+        }
+    }
+    if answer.is_some() {
+        ui.ctx().data_mut(|m| m.remove_temp::<usize>(pending));
+    }
 }
 
 fn readonly_row(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta) {

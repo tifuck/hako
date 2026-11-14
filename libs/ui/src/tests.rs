@@ -154,6 +154,7 @@ fn sample_state() -> HubState {
             last_error: None,
         },
         last_profile: Some("Default".into()),
+        last_profile_modified: false,
         profiles: vec!["Default".into()],
         audio: AudioSummary {
             chatmix_active: true,
@@ -306,6 +307,55 @@ fn onboard_memory_gate_renders_and_needs_confirmation() {
             "tab {tab:?} emitted {out:?}"
         );
     }
+}
+
+/// A dropdown with a warning (e.g. a lift-off change that resets surface
+/// calibration) sends nothing while its confirmation is open.
+#[test]
+fn a_warned_choice_waits_for_confirmation() {
+    use hako_core::catalog::SettingOption;
+    let opt = |v: i64, label: &str| SettingOption {
+        value: SettingValue::Int(v),
+        label: label.into(),
+    };
+    let meta = SettingMeta::dropdown(
+        SettingKey::LiftOffDistance,
+        "Lift-off distance",
+        vec![opt(0, "Low"), opt(1, "High")],
+    )
+    .warning("Changing it resets the surface calibration.");
+    let d = dev(
+        DeviceKind::Mouse,
+        vec![meta.clone()],
+        map(&[(SettingKey::LiftOffDistance, SettingValue::Int(0))]),
+    );
+    let ctx = egui::Context::default();
+    let pending = egui::Id::new(("hako_confirm", d.id.key(), meta.key.as_str()));
+    ctx.data_mut(|m| m.insert_temp(pending, 1usize));
+    let mut out = Vec::new();
+    let frame = |raw: egui::RawInput, out: &mut Vec<UiCommand>| {
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| controls::choice(ui, &d, &meta, out));
+        });
+    };
+    for _ in 0..3 {
+        frame(input(), &mut out);
+    }
+    assert!(out.is_empty(), "sent before confirming: {out:?}");
+    assert_eq!(ctx.data(|m| m.get_temp::<usize>(pending)), Some(1));
+    // Escape dismisses the question: the pick is dropped, nothing sent.
+    let mut esc = input();
+    esc.events.push(egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Default::default(),
+    });
+    frame(esc, &mut out);
+    frame(input(), &mut out);
+    assert!(out.is_empty(), "sent after dismissing: {out:?}");
+    assert_eq!(ctx.data(|m| m.get_temp::<usize>(pending)), None);
 }
 
 #[test]
@@ -524,6 +574,17 @@ fn profile_names_are_filesystem_safe() {
     assert!(valid_profile_name("Gaming 2"));
     assert!(!valid_profile_name("../etc"));
     assert!(!valid_profile_name("  "));
+}
+
+#[test]
+fn a_changed_profile_shows_as_modified() {
+    let mut st = sample_state();
+    assert_eq!(profile_label(Some(&st)), "Default");
+    st.last_profile_modified = true;
+    assert_eq!(profile_label(Some(&st)), "Default (modified)");
+    st.last_profile = None;
+    assert_eq!(profile_label(Some(&st)), "No profile");
+    assert_eq!(profile_label(None), "No profile");
 }
 
 // ── Key bindings ─────────────────────────────────────────────────

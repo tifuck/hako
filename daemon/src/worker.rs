@@ -266,6 +266,9 @@ struct Gate {
     /// `vid_pid` the opt-in is stored under.
     stem: String,
     allowed: bool,
+    /// Why `config.toml` could not be read: the opt-in is unknown, so the
+    /// device is neither switched out of save mode nor sent onboard writes.
+    unreadable: Option<String>,
     /// `OPT_IN_EPOCH` when `allowed` was read.
     epoch: usize,
 }
@@ -273,11 +276,15 @@ struct Gate {
 impl Gate {
     fn load(paths: ConfigPaths, stem: String) -> Self {
         let epoch = OPT_IN_EPOCH.load(Ordering::SeqCst);
-        let allowed = load_app_config(&paths).is_ok_and(|c| c.onboard_writes.contains(&stem));
+        let (allowed, unreadable) = match load_app_config(&paths) {
+            Ok(c) => (c.onboard_writes.contains(&stem), None),
+            Err(e) => (false, Some(format!("{e:#}"))),
+        };
         Self {
             paths,
             stem,
             allowed,
+            unreadable,
             epoch,
         }
     }
@@ -326,6 +333,9 @@ impl Gate {
     /// Without the opt-in, a driver's `save_to_device` mode must be off.
     fn enforce(&self, a: &mut dyn DeviceAdapter) -> Result<()> {
         if self.unallowed_saving(a) {
+            if let Some(e) = &self.unreadable {
+                bail!("did not leave save-to-device mode, as its opt-in could not be read ({e})");
+            }
             a.set(SettingKey::SaveToDevice, SettingValue::Bool(false))
                 .context("could not leave save-to-device mode")?;
         }
@@ -580,11 +590,14 @@ fn check(
         let leaving_save_mode =
             *key == SettingKey::SaveToDevice && *value == SettingValue::Bool(false);
         if meta.persistent && !gate.allowed && !leaving_save_mode {
+            let why = match &gate.unreadable {
+                Some(e) => format!("whether that is allowed could not be read ({e})"),
+                None => "turn on \"Allow saving to device memory\" (Device tab) first".into(),
+            };
             return Err(Refused::new(
                 "invalid_value",
                 format!(
-                    "{} is saved to the {}'s onboard memory: turn on \"Allow saving to device \
-                     memory\" (Device tab) first",
+                    "{} is saved to the {}'s onboard memory: {why}",
                     meta.label, snap.name
                 ),
             )
@@ -719,6 +732,34 @@ mod tests {
         set_checked(&mut a, &mut gate, Dpi, SettingValue::Int(400)).unwrap();
         assert!(!a.saving);
         assert_eq!(a.writes, [SaveToDevice, Dpi]);
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    #[test]
+    fn an_unreadable_config_writes_nothing_based_on_defaults() {
+        use SettingKey::{Dpi, DpiStage1, SaveToDevice};
+        let paths = temp_paths("unreadable");
+        let mut a = fake();
+        a.saving = true;
+        std::fs::write(&paths.config_toml, "onboard_writes = [").unwrap();
+        let mut gate = Gate::load(paths.clone(), a.id.config_stem());
+
+        let e = gate.enforce(&mut a).unwrap_err();
+        assert!(format!("{e:#}").contains("config.toml"), "{e:#}");
+        assert!(
+            a.saving && a.writes.is_empty(),
+            "left save mode on defaults"
+        );
+        for key in [Dpi, DpiStage1] {
+            let e = set_checked(&mut a, &mut gate, key, SettingValue::Int(400)).unwrap_err();
+            assert!(format!("{e:#}").contains("config.toml"), "{e:#}");
+        }
+        assert!(a.writes.is_empty());
+        // Leaving the mode by hand is still let through.
+        set_checked(&mut a, &mut gate, SaveToDevice, SettingValue::Bool(false)).unwrap();
+        let e = set_checked(&mut a, &mut gate, DpiStage1, SettingValue::Int(400)).unwrap_err();
+        assert!(format!("{e:#}").contains("could not be read"), "{e:#}");
+        assert_eq!(a.writes, [SaveToDevice]);
         let _ = std::fs::remove_dir_all(paths.root);
     }
 

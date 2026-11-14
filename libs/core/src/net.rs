@@ -123,7 +123,8 @@ pub enum NetOp {
         key: Option<String>,
     },
     /// A pending request by peer id: an incoming one is accepted or denied;
-    /// an outgoing one is cancelled (`accept: false`).
+    /// an outgoing one is cancelled (`accept: false`) or, once the other
+    /// machine accepted it, confirmed (`accept: true`: the codes match).
     Respond {
         id: String,
         accept: bool,
@@ -377,8 +378,12 @@ pub struct PairRequest {
     pub address: String,
     /// Six digits from the handshake; equal on both machines.
     pub code: String,
-    /// They asked us (Accept / Deny); else we are waiting for them.
+    /// They asked us (Accept / Deny); else we asked them.
     pub incoming: bool,
+    /// We asked and they accepted: nothing is pinned here until this
+    /// machine's user confirms the code (Confirm / Cancel).
+    #[serde(default)]
+    pub accepted: bool,
 }
 
 #[cfg(test)]
@@ -511,6 +516,7 @@ mod tests {
                 address: "192.168.1.30:47821".into(),
                 code: "123 456".into(),
                 incoming: true,
+                accepted: false,
             }],
         };
         let json = serde_json::to_string(&state).unwrap();

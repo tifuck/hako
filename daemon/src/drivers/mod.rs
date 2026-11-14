@@ -26,6 +26,7 @@ pub mod turtlebeach;
 pub mod wooting;
 
 use crate::hid::HidDeviceInfo;
+use crate::remap::RemapPids;
 use anyhow::{bail, Result};
 use hako_audio::AudioService;
 use hako_core::catalog::{ControlKind, SettingKey, SettingMeta, SettingValue, SettingsMap};
@@ -55,7 +56,9 @@ pub struct DriverCtx {
 
 /// One supported product. `product_ids` lists every PID the same physical
 /// device can enumerate as (receiver, wired, ...); at most one adapter is open
-/// per model. The first PID is canonical: it names the model's remap file.
+/// per model. The first PID is canonical: it names the model's remap file. A
+/// model whose receiver also hosts other devices lists its own device's PID
+/// first, then the receiver's (see [`Model::remap_pids`]).
 pub struct Model {
     pub vendor_id: u16,
     pub product_ids: &'static [u16],
@@ -104,14 +107,24 @@ impl Model {
     /// PIDs the remap engine should treat as this device: the model's own,
     /// or for a device paired to a multi-device receiver its own PID first
     /// (it names the remap file) plus the receiver's, whose input nodes may
-    /// carry its events.
-    pub fn remap_pids(&self, id: &DeviceId) -> Vec<u16> {
+    /// carry its events. Never the model's own device PID (PRO 2: `40a8` is
+    /// the mouse, `c543` its receiver): that is another device.
+    pub fn remap_pids(&self, id: &DeviceId) -> RemapPids {
         if self.claims(id) {
-            self.product_ids.to_vec()
-        } else {
-            std::iter::once(id.product_id)
-                .chain(self.product_ids.iter().copied())
-                .collect()
+            return RemapPids {
+                pids: self.product_ids.to_vec(),
+                own: self.product_ids.len(),
+            };
+        }
+        let receiver = match self.product_ids {
+            [_, rest @ ..] if !rest.is_empty() => rest,
+            receiver_only => receiver_only,
+        };
+        RemapPids {
+            pids: std::iter::once(id.product_id)
+                .chain(receiver.iter().copied())
+                .collect(),
+            own: 1,
         }
     }
 }
@@ -355,10 +368,12 @@ pub fn udev_rules() -> String {
         "\n# QMK / VIA keyboards: raw HID interface (usage page 0xFF60, usage 0x61).\n\
          KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", PROGRAM=\"/bin/sh -c 'LC_ALL=C grep -qaP \\\"\\x06\\x60\\xff\\x09\\x61\\\" /sys%p/device/report_descriptor'\", {access}\n"
     );
-    // HID LampArray (usage page 0x59, usage 0x01) in the spec's encoding.
+    // HID LampArray (usage page 0x59, usage 0x01) in every encoding the
+    // driver's parser accepts.
     out += &format!(
         "\n# HID LampArray / Dynamic Lighting devices (usage page 0x59, usage 0x01).\n\
-         KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", PROGRAM=\"/bin/sh -c 'LC_ALL=C grep -qaP \\\"\\x05\\x59\\x09\\x01\\xa1\\x01\\\" /sys%p/device/report_descriptor'\", {access}\n"
+         KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", PROGRAM=\"/bin/sh -c 'od -An -tx1 -v -w4096 /sys%p/device/report_descriptor | grep -qE \\\"{}\\\"'\", {access}\n",
+        lamparray::udev_pattern()
     );
     out += &format!(
         "\n# Host-side remaps and macros inject through uinput.\n\

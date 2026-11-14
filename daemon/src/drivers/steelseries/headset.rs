@@ -840,7 +840,8 @@ impl HeadsetAdapter {
     ) -> Result<Self> {
         let info = find_hidraw(VID, pid, Some(spec.interface))?;
         let dev = HidrawDevice::open(&info.path)?;
-        let settings = hako_core::config::load_device_settings(&paths, VID, pid)?;
+        let mut settings = hako_core::config::load_device_settings(&paths, VID, pid)?;
+        crate::drivers::sanitize_saved(&mut settings, &controls(spec));
         let batteries = match spec.family {
             Family::GameBuds => vec![battery("Left"), battery("Right")],
             _ if spec.battery => vec![battery("Headset")],

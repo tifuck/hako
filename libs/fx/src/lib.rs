@@ -6,6 +6,7 @@
 
 use hako_core::AuxEffectKind;
 use std::ffi::{c_char, c_int, c_ulong, c_void, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 mod character;
@@ -20,6 +21,10 @@ pub trait Effect: Send {
     /// `controls`: the stage's values in port order, read every block (they
     /// change live). `left` / `right` hold the input and receive the output.
     fn process(&mut self, controls: &[f32], left: &mut [f32], right: &mut [f32]);
+
+    /// Forgets everything heard so far (delay lines, tails, envelopes,
+    /// smoothers, model state): the next block runs as on a new instance.
+    fn reset(&mut self);
 }
 
 /// The effect a plugin `label` runs at `rate` Hz.
@@ -156,7 +161,7 @@ fn descriptors() -> &'static [Descriptor] {
                     implementation_data: std::ptr::null_mut(),
                     instantiate,
                     connect_port,
-                    activate: None,
+                    activate: Some(activate),
                     run,
                     run_adding: None,
                     set_run_adding_gain: None,
@@ -182,6 +187,8 @@ struct Instance {
     effect: Box<dyn Effect>,
     ports: Vec<*mut f32>,
     controls: Vec<f32>,
+    /// Set by `activate`: the next `run` resets the effect first.
+    reset: AtomicBool,
 }
 
 unsafe extern "C" fn instantiate(desc: *const Descriptor, rate: c_ulong) -> *mut c_void {
@@ -197,6 +204,7 @@ unsafe extern "C" fn instantiate(desc: *const Descriptor, rate: c_ulong) -> *mut
         effect,
         ports: vec![std::ptr::null_mut(); ports],
         controls: vec![0.0; ports - AUDIO_PORTS.len()],
+        reset: AtomicBool::new(false),
     }))
     .cast()
 }
@@ -209,15 +217,36 @@ unsafe extern "C" fn connect_port(handle: *mut c_void, port: c_ulong, data: *mut
     }
 }
 
+/// PipeWire's filter-chain calls `deactivate` + `activate` from its main
+/// thread whenever one of its streams pauses (an idle strip, a suspended
+/// device), so stale tails must not play when it wakes. 0.3.x does not stop
+/// the data thread first, so the reset itself waits for the next `run`.
+unsafe extern "C" fn activate(handle: *mut c_void) {
+    // SAFETY: `handle` came from `instantiate`; `run` borrows `reset` shared only.
+    unsafe { &(*handle.cast::<Instance>()).reset }.store(true, Ordering::Release);
+}
+
 unsafe extern "C" fn run(handle: *mut c_void, samples: c_ulong) {
-    // SAFETY: `handle` came from `instantiate`.
-    let instance = unsafe { &mut *handle.cast::<Instance>() };
+    let instance = handle.cast::<Instance>();
+    // SAFETY: `handle` came from `instantiate`; field by field, as `activate`
+    // may set `reset` meanwhile.
+    let (effect, ports, controls, reset) = unsafe {
+        (
+            &mut (*instance).effect,
+            &(*instance).ports,
+            &mut (*instance).controls,
+            &(*instance).reset,
+        )
+    };
+    if reset.swap(false, Ordering::Acquire) {
+        effect.reset();
+    }
     let n = samples as usize;
-    let [in_l, in_r, out_l, out_r] = [0, 1, 2, 3].map(|i| instance.ports[i]);
+    let [in_l, in_r, out_l, out_r] = [0, 1, 2, 3].map(|i| ports[i]);
     if [in_l, in_r, out_l, out_r].iter().any(|p| p.is_null()) {
         return;
     }
-    for (value, port) in instance.controls.iter_mut().zip(&instance.ports[4..]) {
+    for (value, port) in controls.iter_mut().zip(&ports[4..]) {
         if !port.is_null() {
             // SAFETY: a connected control port points at one f32.
             *value = unsafe { **port };
@@ -233,7 +262,15 @@ unsafe extern "C" fn run(handle: *mut c_void, samples: c_ulong) {
             std::slice::from_raw_parts_mut(out_r, n),
         )
     };
-    instance.effect.process(&instance.controls, left, right);
+    // One NaN / Inf would stick in every stage's filters and feedback paths.
+    for s in left.iter_mut().chain(right.iter_mut()) {
+        *s = if s.is_finite() {
+            s.clamp(-16.0, 16.0)
+        } else {
+            0.0
+        };
+    }
+    effect.process(controls, left, right);
 }
 
 unsafe extern "C" fn cleanup(handle: *mut c_void) {
@@ -306,5 +343,149 @@ mod tests {
             index += 1;
         }
         assert!(ladspa_descriptor(index).is_null());
+    }
+
+    /// Runs plugin `index` on `values` through the C ABI: 100 blocks of a vowel plus sibilance,
+    /// with NaN and ±Inf samples in block 10 if `poison`; the left output.
+    fn run_poisoned(index: c_ulong, values: &[f32], poison: bool) -> Vec<f32> {
+        let desc = unsafe { &*ladspa_descriptor(index) };
+        let handle = unsafe { (desc.instantiate)(desc, 48000) };
+        let n = 512;
+        let mut values = values.to_vec();
+        let mut out = Vec::new();
+        for block in 0..100 {
+            let mut l: Vec<f32> = (block * n..(block + 1) * n)
+                .map(|i| {
+                    let t = i as f32 / 48000.0;
+                    0.3 * (std::f32::consts::TAU * 300.0 * t).sin()
+                        + 0.2 * (std::f32::consts::TAU * 8000.0 * t).sin()
+                })
+                .collect();
+            if poison && block == 10 {
+                l[5..8].copy_from_slice(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY]);
+            }
+            let mut r = l.clone();
+            unsafe {
+                (desc.connect_port)(handle, 0, l.as_mut_ptr());
+                (desc.connect_port)(handle, 1, r.as_mut_ptr());
+                (desc.connect_port)(handle, 2, l.as_mut_ptr());
+                (desc.connect_port)(handle, 3, r.as_mut_ptr());
+                for (i, v) in values.iter_mut().enumerate() {
+                    (desc.connect_port)(handle, 4 + i as c_ulong, v);
+                }
+                (desc.run)(handle, n as c_ulong);
+            }
+            out.extend(l);
+        }
+        unsafe { (desc.cleanup)(handle) };
+        out
+    }
+
+    /// Runs `blocks` 512-sample blocks of `signal` (by sample index) in both channels through
+    /// `handle` on `values`; the left output.
+    fn run_blocks(
+        desc: &Descriptor,
+        handle: *mut c_void,
+        values: &mut [f32],
+        blocks: usize,
+        signal: impl Fn(usize) -> f32,
+    ) -> Vec<f32> {
+        let n = 512;
+        let mut out = Vec::new();
+        for block in 0..blocks {
+            let mut l: Vec<f32> = (block * n..(block + 1) * n).map(&signal).collect();
+            let mut r = l.clone();
+            unsafe {
+                (desc.connect_port)(handle, 0, l.as_mut_ptr());
+                (desc.connect_port)(handle, 1, r.as_mut_ptr());
+                (desc.connect_port)(handle, 2, l.as_mut_ptr());
+                (desc.connect_port)(handle, 3, r.as_mut_ptr());
+                for (i, v) in values.iter_mut().enumerate() {
+                    (desc.connect_port)(handle, 4 + i as c_ulong, v);
+                }
+                (desc.run)(handle, n as c_ulong);
+            }
+            out.extend(l);
+        }
+        out
+    }
+
+    /// After `deactivate` + `activate` (PipeWire's reset when a strip pauses) a stage has
+    /// forgotten what it heard: silence comes out silent, and a voice comes out exactly as from
+    /// a new instance.
+    #[test]
+    fn activate_resets_every_stage() {
+        let voice = |i: usize| {
+            let t = i as f32 / 48000.0;
+            0.3 * (std::f32::consts::TAU * 300.0 * t).sin()
+                + 0.2 * (std::f32::consts::TAU * 8000.0 * t).sin()
+        };
+        let loud = |i: usize| {
+            let t = i as f32 / 48000.0;
+            0.8 * (std::f32::consts::TAU * 180.0 * t).sin() + 0.1 * (i as f32 * 1.7).sin()
+        };
+        let stages = AuxEffectKind::all()
+            .into_iter()
+            .filter_map(|k| k.fx_controls());
+        for (index, (label, controls)) in stages.enumerate() {
+            let desc = unsafe { &*ladspa_descriptor(index as c_ulong) };
+            let activate = desc.activate.expect(label);
+            let defaults: Vec<f32> = controls.iter().map(|(_, v)| *v).collect();
+            // Both models, and their pass-through at 0 dB.
+            let variants = match label {
+                "denoise" => vec![defaults, vec![100.0, 1.0], vec![0.0, 0.0]],
+                _ => vec![defaults],
+            };
+            for mut values in variants {
+                let fresh = unsafe { (desc.instantiate)(desc, 48000) };
+                unsafe { activate(fresh) };
+                let expected = run_blocks(desc, fresh, &mut values, 40, voice);
+                unsafe { (desc.cleanup)(fresh) };
+
+                let handle = unsafe { (desc.instantiate)(desc, 48000) };
+                let reset = || unsafe {
+                    if let Some(deactivate) = desc.deactivate {
+                        deactivate(handle);
+                    }
+                    activate(handle);
+                };
+                unsafe { activate(handle) };
+                run_blocks(desc, handle, &mut values, 40, loud);
+                reset();
+                let silence = run_blocks(desc, handle, &mut values, 20, |_| 0.0);
+                let loudest = silence.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+                assert!(loudest < 1e-6, "{label} {values:?}: {loudest} after reset");
+                run_blocks(desc, handle, &mut values, 40, loud);
+                reset();
+                let out = run_blocks(desc, handle, &mut values, 40, voice);
+                unsafe { (desc.cleanup)(handle) };
+                assert!(
+                    out == expected,
+                    "{label} {values:?}: differs from a new instance"
+                );
+            }
+        }
+    }
+
+    /// A non-finite input sample neither sticks in a stage nor stops it working: the output
+    /// stays finite and, once the stage settled, sounds as without it.
+    #[test]
+    fn a_nan_sample_does_not_poison_a_stage() {
+        let rms = |x: &[f32]| (x.iter().map(|s| s * s).sum::<f32>() / x.len() as f32).sqrt();
+        let stages = AuxEffectKind::all()
+            .into_iter()
+            .filter_map(|k| k.fx_controls());
+        for (index, (label, controls)) in stages.enumerate() {
+            let values: Vec<f32> = controls.iter().map(|(_, v)| *v).collect();
+            let poisoned = run_poisoned(index as c_ulong, &values, true);
+            let clean = run_poisoned(index as c_ulong, &values, false);
+            assert!(poisoned.iter().all(|s| s.is_finite()), "{label}");
+            let tail = 80 * 512..;
+            let (poisoned, clean) = (rms(&poisoned[tail.clone()]), rms(&clean[tail]));
+            assert!(
+                (poisoned - clean).abs() <= 0.02 * clean + 1e-4,
+                "{label}: {poisoned} vs {clean}"
+            );
+        }
     }
 }

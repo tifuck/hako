@@ -2872,7 +2872,7 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", MODE="0660", TA
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", PROGRAM="/bin/sh -c 'LC_ALL=C grep -qaP \"\x06\x60\xff\x09\x61\" /sys%p/device/report_descriptor'", MODE="0660", TAG+="uaccess"
 
 # HID LampArray / Dynamic Lighting devices (usage page 0x59, usage 0x01).
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", PROGRAM="/bin/sh -c 'LC_ALL=C grep -qaP \"\x05\x59\x09\x01\xa1\x01\" /sys%p/device/report_descriptor'", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", PROGRAM="/bin/sh -c 'od -An -tx1 -v -w4096 /sys%p/device/report_descriptor | grep -qE \"(( 05 59| 06 59 00| 07 59 00 00 00)( [0-9a-f][48]| [0-9a-f][59] [0-9a-f]{2}| [0-9a-f][6a] [0-9a-f]{2} [0-9a-f]{2}| [0-9a-f][7b] [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2})*( 09 01| 0a 01 00| 0b 01 00 00 00)| 0b 01 00 59 00)( [0-9a-f][48]| [0-9a-f][59] [0-9a-f]{2}| [0-9a-f][6a] [0-9a-f]{2} [0-9a-f]{2}| [0-9a-f][7b] [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2})*( a1 01| a2 01 00| a3 01 00 00 00)\"'", MODE="0660", TAG+="uaccess"
 
 # Host-side remaps and macros inject through uinput.
 KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uinput"

@@ -703,8 +703,18 @@ fn validate_node_name(name: &str) -> Result<(), String> {
     {
         return Err(format!("invalid PipeWire node name {name:?}"));
     }
+    if STRIP_NODE_PREFIXES.iter().any(|p| name.starts_with(p)) {
+        return Err(format!(
+            "node name {name:?} is one of the mixer's own strips (feedback loop)"
+        ));
+    }
     Ok(())
 }
+
+/// Prefixes of the nodes the daemon's strips make (`hako_in_<id>`,
+/// `hako_in_<id>.capture`, `hako_out_<id>`, `hako_out_<id>.play`; see
+/// `hako_audio::mixer::Naming::daemon`): never a device or a virtual name.
+const STRIP_NODE_PREFIXES: [&str; 2] = ["hako_in_", "hako_out_"];
 
 /// ALSA mixer item names (`amixer` argument, no shell): printable ASCII,
 /// no `'` (amixer quotes items with it).
@@ -998,6 +1008,66 @@ mod tests {
             .apply(&MixerOp::PutOutput { output: looped() })
             .unwrap_err();
         assert!(err.contains("feedback"), "{err}");
+    }
+
+    #[test]
+    fn the_strips_own_nodes_are_never_devices_or_virtual_names() {
+        let mut m = sample();
+        let err = m
+            .apply(&MixerOp::PutInput {
+                input: hw("loop", &["hako_out_A1.play"], &["A1"]),
+            })
+            .unwrap_err();
+        assert!(err.contains("own strips"), "{err}");
+        let sink = |sink: &str| {
+            out(
+                "A2",
+                OutputKind::Hardware {
+                    sink: sink.into(),
+                    description: String::new(),
+                },
+            )
+        };
+        let err = m
+            .apply(&MixerOp::PutOutput {
+                output: sink("hako_in_voice.capture"),
+            })
+            .unwrap_err();
+        assert!(err.contains("own strips"), "{err}");
+        let virtual_in = |name: &str| Input {
+            kind: InputKind::Virtual {
+                node_name: name.into(),
+                apps: Vec::new(),
+            },
+            ..hw("game", &[], &[])
+        };
+        let err = m
+            .apply(&MixerOp::PutInput {
+                input: virtual_in("hako_out_A1"),
+            })
+            .unwrap_err();
+        assert!(err.contains("own strips"), "{err}");
+        let err = m
+            .apply(&MixerOp::PutOutput {
+                output: out(
+                    "B2",
+                    OutputKind::Virtual {
+                        node_name: "hako_in_voice".into(),
+                    },
+                ),
+            })
+            .unwrap_err();
+        assert!(err.contains("own strips"), "{err}");
+        assert_eq!(m, sample());
+        // Network peers' nodes are devices.
+        m.apply(&MixerOp::PutInput {
+            input: hw("peer", &["hako_net.1a2b.recv"], &["B1"]),
+        })
+        .unwrap();
+        m.apply(&MixerOp::PutOutput {
+            output: sink("hako_net.1a2b.send"),
+        })
+        .unwrap();
     }
 
     #[test]

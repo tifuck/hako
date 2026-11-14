@@ -13,19 +13,22 @@ pub mod mixer;
 use anyhow::{anyhow, bail, Context, Result};
 use engine::{engine, Direction};
 use hako_core::{
+    get_setting,
     ipc::{AuxEffectChain, AuxEffectKind, EqBandKind},
+    load_device_settings,
     protocol::is_new_error,
-    AuxConfig,
+    AuxConfig, ConfigPaths, SettingKey,
 };
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
+use std::sync::{mpsc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -50,8 +53,6 @@ const LADSPA_DIRS: [&str; 4] = [
 ];
 /// How long a spawned node may take to show its ports.
 const NODE_WAIT: Duration = Duration::from_secs(4);
-/// How long the default sink may take to show in a fresh registry cache.
-const DEFAULT_WAIT: Duration = Duration::from_secs(1);
 /// How long a killed child may take to exit.
 const STOP_WAIT: Duration = Duration::from_secs(2);
 /// LSP's UI default. Unset, PipeWire falls back to the LADSPA minimum (0 ms),
@@ -84,18 +85,21 @@ impl DefaultState {
         self.claims.push((owner, sink));
     }
 
-    /// The sink to make the default now that `owner` let go. The session's
-    /// original is kept until `restored` (a failed restore can be retried).
-    fn release(&mut self, owner: DefaultOwner) -> Option<String> {
+    /// `None` when `owner` did not hold the default; else the sink to make
+    /// the default now that it let go, if known. The session's original is
+    /// kept until `restored` (a failed restore can be retried).
+    fn release(&mut self, owner: DefaultOwner) -> Option<Option<String>> {
         let was_current = self.claims.last().is_some_and(|(held, _)| *held == owner);
         self.claims.retain(|(held, _)| *held != owner);
         if !was_current {
             return None;
         }
-        self.claims
-            .last()
-            .map(|(_, sink)| sink.clone())
-            .or_else(|| self.session_original.clone())
+        Some(
+            self.claims
+                .last()
+                .map(|(_, sink)| sink.clone())
+                .or_else(|| self.session_original.clone()),
+        )
     }
 
     /// What `release` returned is the default (or the user's pick stands).
@@ -469,11 +473,20 @@ impl AudioService {
         state.mixer_game = false;
         let mut chatmix = destroy_chatmix_locked(&mut state);
         kill_orphans_locked(&state);
-        if let Some(original) = state.defaults.restore() {
-            if let Err(e) = restore_default_sink(&original) {
-                state.defaults.session_original = Some(original);
+        // Without an original of its own (a crashed hakod's, or `hakod
+        // --reset-audio` with none running), the persisted one.
+        let original = state.defaults.restore();
+        let target = restore_target(
+            original.clone(),
+            configured_default().as_deref(),
+            load_original(),
+        );
+        match target.map(|target| restore_default_sink(&target)) {
+            Some(Err(e)) => {
+                state.defaults.session_original = original;
                 chatmix = chatmix.and(Err(e));
             }
+            _ => persist_original(None),
         }
         record_result(&mut state.chatmix_error, &chatmix);
         seen(&mut state);
@@ -490,9 +503,12 @@ impl AudioService {
 
     /// Versions before the native engine made line-in links with `pw-link`,
     /// which outlive their creator: remove capture -> sink links matching the
-    /// `[aux]` config. No-op when either node is absent (nothing can be
-    /// linked).
+    /// `[aux]` config. No-op unless a device file has that line-in on (links
+    /// the user made are left alone), or when either node is absent.
     pub fn remove_orphan_aux_links(&self, cfg: &AuxConfig) -> Result<()> {
+        if !ConfigPaths::xdg().is_ok_and(|paths| legacy_line_in_on(&paths)) {
+            return Ok(());
+        }
         let (Ok((capture, mono)), Ok(sink)) = (
             find_source_node(&cfg.capture_name_regex),
             find_sink_node_name(&cfg.sink_name_regex),
@@ -533,9 +549,35 @@ impl Drop for AudioService {
         // Only what this instance owns; process-wide sweeps are `kill_orphans`.
         let _ = destroy_chatmix_locked(state);
         if let Some(original) = state.defaults.restore() {
-            let _ = restore_default_sink(&original);
+            if restore_default_sink(&Restore::To(original)).is_ok() {
+                persist_original(None);
+            }
         }
     }
+}
+
+/// A device file has the pre-mixer line-in on (`aux_enabled`): only then
+/// can a version before the native engine have linked it.
+fn legacy_line_in_on(paths: &ConfigPaths) -> bool {
+    let files = std::fs::read_dir(&paths.devices_dir)
+        .into_iter()
+        .flatten()
+        .flatten();
+    files
+        .filter_map(|file| {
+            let name = file.file_name();
+            let (vid, pid) = name.to_str()?.strip_suffix(".toml")?.split_once('_')?;
+            Some((
+                u16::from_str_radix(vid, 16).ok()?,
+                u16::from_str_radix(pid, 16).ok()?,
+            ))
+        })
+        .any(|(vid, pid)| {
+            load_device_settings(paths, vid, pid).is_ok_and(|settings| {
+                get_setting(&settings, SettingKey::AuxEnabled).and_then(|v| v.as_bool())
+                    == Some(true)
+            })
+        })
 }
 
 fn kill_orphans_locked(state: &AudioState) {
@@ -572,22 +614,20 @@ fn ensure_chatmix_locked(state: &mut AudioState, sink_regexes: &[&str]) -> Resul
 }
 
 /// The loopbacks into `sink` at the last dial position, then the
-/// default-sink claim if wanted. A failed step takes the loopbacks down
-/// again (ChatMix is retried while not up).
+/// default-sink claim if wanted. Failed volumes take the loopbacks down
+/// again (ChatMix is retried while not up); a failed claim is only an
+/// error (ChatMix works without it).
 fn start_chatmix_locked(state: &mut AudioState, sink: &str) -> Result<()> {
     spawn_chatmix(state, sink)?;
-    let ready = apply_dial(state).and_then(|()| {
-        if state.chatmix_set_default {
-            claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
-        } else {
-            Ok(())
-        }
-    });
-    if let Err(error) = ready {
+    if let Err(error) = apply_dial(state) {
         cleanup_chatmix_children(&mut state.chatmix);
         return Err(error);
     }
     info!("ChatMix sinks ready -> {sink}");
+    if state.chatmix_set_default {
+        claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
+            .context("ChatMix default output")?;
+    }
     Ok(())
 }
 
@@ -673,61 +713,178 @@ fn cleanup_chatmix_children(chatmix: &mut ChatMixState) {
     }
 }
 
-/// Make `sink` the default for `owner`, remembering the session's original.
+/// Make `sink` the default for `owner`, remembering the session's configured
+/// default (on disk too: a crashed hakod's successor still knows it). Not
+/// again while the user has picked another output since hako took it.
 fn claim_default(defaults: &mut DefaultState, owner: DefaultOwner, sink: &str) -> Result<()> {
-    let original = if defaults.claims.is_empty() && defaults.session_original.is_none() {
-        session_default()
+    let configured = configured_default();
+    if user_moved_claim(defaults.held(), configured.as_deref()) {
+        info!("default output changed by the user; not taking it again");
+        return Ok(());
+    }
+    let first = defaults.claims.is_empty() && defaults.session_original.is_none();
+    let original = if first {
+        original_default(configured.as_deref(), load_original())
     } else {
         None
     };
     set_default_sink(sink)?;
     defaults.claim(owner, sink.to_string(), original);
+    if first {
+        persist_original(defaults.session_original.as_deref());
+    }
     Ok(())
 }
 
-/// The session's default sink, given a moment to show in a fresh cache.
-/// Unknown, the claim still goes ahead (ChatMix should not wait on it); the
-/// server picks a fallback when hako lets go.
-fn session_default() -> Option<String> {
-    let found = engine().and_then(|engine| {
-        engine.wait_for(DEFAULT_WAIT, |graph| Ok(graph.default_sink.is_some()))?;
-        current_default_sink()
-    });
-    match found {
-        Ok(sink) => Some(sink),
-        Err(e) => {
-            warn!("default output unknown, it will not be restored: {e:#}");
-            None
-        }
+/// The configured default to go back to when hako takes it: the current
+/// one, unless a crashed hakod left its own sink configured; then the one
+/// that hakod persisted.
+fn original_default(configured: Option<&str>, persisted: Option<String>) -> Option<String> {
+    match configured {
+        Some(sink) if mixer::is_hako_node(sink) => persisted,
+        sink => sink.map(str::to_string),
     }
+}
+
+/// The user picked another output while hako held `held` (WirePlumber keeps
+/// the configured default while hako's sink is respawned).
+fn user_moved_claim(held: Option<&str>, configured: Option<&str>) -> bool {
+    held.is_some_and(|held| configured.is_some_and(|configured| configured != held))
+}
+
+/// Where the configured default goes when hako lets go of it.
+#[derive(Debug, PartialEq, Eq)]
+enum Restore {
+    To(String),
+    /// Unset: WirePlumber picks one, as before hako took it.
+    Clear,
+}
+
+/// `original` if known. Else, while hako's own sink is still configured,
+/// what a crashed hakod persisted, or unset (no original was configured,
+/// or it is lost). `None` leaves the configured default alone.
+fn restore_target(
+    original: Option<String>,
+    configured: Option<&str>,
+    persisted: Option<String>,
+) -> Option<Restore> {
+    if let Some(sink) = original {
+        return Some(Restore::To(sink));
+    }
+    configured.is_some_and(mixer::is_hako_node).then(|| {
+        persisted
+            .filter(|sink| !mixer::is_hako_node(sink))
+            .map_or(Restore::Clear, Restore::To)
+    })
 }
 
 fn release_default(defaults: &mut DefaultState, owner: DefaultOwner) -> Result<()> {
     let ours = defaults.held().map(str::to_string);
-    if let Some(sink) = defaults.release(owner) {
-        let moved = ours.as_deref().is_some_and(|ours| {
-            user_moved_default(
-                ours,
-                resolve_node_id(ours).is_ok(),
-                current_default_sink().ok().as_deref(),
-            )
-        });
-        if moved {
-            info!("default output changed by the user; not restoring {sink}");
-        } else {
-            restore_default_sink(&sink)?;
-        }
-        defaults.restored();
+    let Some(next) = defaults.release(owner) else {
+        return Ok(());
+    };
+    let moved = ours.as_deref().is_some_and(|ours| {
+        user_moved_default(
+            ours,
+            resolve_node_id(ours).is_ok(),
+            current_default_sink().ok().as_deref(),
+        )
+    });
+    if moved {
+        info!("default output changed by the user; not restoring it");
+    } else if let Some(target) =
+        restore_target(next, configured_default().as_deref(), load_original())
+    {
+        restore_default_sink(&target)?;
+    }
+    defaults.restored();
+    if defaults.held().is_none() {
+        persist_original(None);
     }
     Ok(())
 }
 
-/// Make `name` the configured default again, present or not: WirePlumber
-/// keeps it by name and uses it once it is there.
-fn restore_default_sink(name: &str) -> Result<()> {
+/// Make a sink the configured default again, present or not (WirePlumber
+/// keeps it by name and uses it once it is there), or unset it.
+fn restore_default_sink(target: &Restore) -> Result<()> {
+    let (name, shown) = match target {
+        Restore::To(name) => (Some(name.as_str()), name.as_str()),
+        Restore::Clear => (None, "(unset)"),
+    };
     engine()?
         .set_default_sink(name)
-        .with_context(|| format!("restore default output {name}"))
+        .with_context(|| format!("restore default output {shown}"))
+}
+
+/// `default.configured.audio.sink`, given the metadata a moment to show in
+/// a fresh cache.
+#[cfg(not(test))]
+fn configured_default() -> Option<String> {
+    /// How long the default sink may take to show in a fresh registry cache.
+    const DEFAULT_WAIT: Duration = Duration::from_secs(1);
+    let engine = engine().ok()?;
+    let _ = engine.wait_for(DEFAULT_WAIT, |graph| Ok(graph.default_sink.is_some()));
+    engine.with_graph(|graph| graph.configured_sink.clone())
+}
+
+/// Unit tests run next to the user's session: its default is never read.
+#[cfg(test)]
+fn configured_default() -> Option<String> {
+    tests::CONFIGURED.with(|configured| configured.borrow().clone())
+}
+
+/// Where the original default outlives a crash: `$XDG_STATE_HOME/hako/default-sink`.
+#[cfg(not(test))]
+fn original_file() -> Option<PathBuf> {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/state")))
+        .map(|dir| dir.join("hako/default-sink"))
+}
+
+/// Unit tests never touch the user's file.
+#[cfg(test)]
+fn original_file() -> Option<PathBuf> {
+    tests::ORIGINAL_FILE.with(|file| file.borrow().clone())
+}
+
+fn load_original() -> Option<String> {
+    let text = std::fs::read_to_string(original_file()?).ok()?;
+    Some(text.trim().to_string()).filter(|name| !name.is_empty())
+}
+
+/// Write the original default (temp file + rename), or remove it (`None`).
+fn persist_original(original: Option<&str>) {
+    let Some(path) = original_file() else {
+        return;
+    };
+    let result = match original {
+        Some(name) => write_atomic(&path, name),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        },
+    };
+    if let Err(e) = result {
+        warn!("{}: {e}", path.display());
+    }
+}
+
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
 }
 
 /// The user picked another output while `ours` was the default. When `ours`
@@ -772,15 +929,66 @@ fn spawn_loopback(
     latency: u32,
 ) -> Result<Child> {
     kill_loopback_orphan(name);
-    let (capture_props, playback_props) =
-        loopback_props(name, description, playback_target, latency);
-    Command::new("pw-loopback")
-        .args(["-n", name, "-i", &capture_props, "-o", &playback_props])
+    let mut command = loopback_command(name, description, playback_target, latency);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("spawn pw-loopback for {name}"))
+        .stderr(Stdio::null());
+    spawn_owned(command).with_context(|| format!("spawn pw-loopback for {name}"))
+}
+
+type SpawnRequest = (Command, mpsc::Sender<io::Result<Child>>);
+
+/// Spawn a child that must not outlive hakod (it gets SIGTERM when hakod
+/// dies, also outside systemd's cgroup kill). `PR_SET_PDEATHSIG` fires when
+/// the forking *thread* exits, so every such child is forked by one thread
+/// that lives as long as the process.
+fn spawn_owned(mut command: Command) -> io::Result<Child> {
+    static SPAWNER: OnceLock<Option<mpsc::Sender<SpawnRequest>>> = OnceLock::new();
+    let spawner = SPAWNER.get_or_init(|| {
+        let (requests, receiver) = mpsc::channel::<SpawnRequest>();
+        std::thread::Builder::new()
+            .name("hako-spawner".into())
+            .spawn(move || {
+                for (mut command, reply) in receiver {
+                    let _ = reply.send(command.spawn());
+                }
+            })
+            .ok()
+            .map(|_| requests)
+    });
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: only async-signal-safe calls (prctl, getppid, _exit).
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // hakod died before the line above: no signal will come.
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+    let (reply, answer) = mpsc::channel();
+    spawner
+        .as_ref()
+        .and_then(|spawner| spawner.send((command, reply)).ok())
+        .ok_or_else(|| io::Error::other("no spawner thread"))?;
+    answer
+        .recv()
+        .map_err(|_| io::Error::other("spawner thread is gone"))?
+}
+
+/// No `-n`: PipeWire 0.3.48 (Ubuntu 22.04) has no such option (exit 255);
+/// the capture props name the sink.
+fn loopback_command(name: &str, description: &str, playback_target: &str, latency: u32) -> Command {
+    let (capture_props, playback_props) =
+        loopback_props(name, description, playback_target, latency);
+    let mut command = Command::new("pw-loopback");
+    command.args(["-i", &capture_props, "-o", &playback_props]);
+    command
 }
 
 const PLAYBACK: [&str; 2] = ["playback_FL", "playback_FR"];
@@ -843,7 +1051,16 @@ fn reap_exited(child: &mut Option<Child>) {
 }
 
 fn kill_loopback_orphan(name: &str) {
-    pkill(&format!("^pw-loopback -n {name} "));
+    pkill(&loopback_orphan_pattern(name));
+}
+
+/// `pkill -f` pattern for the loopback whose capture props name `name`
+/// (also an older version's, spawned with `-n {name}`).
+fn loopback_orphan_pattern(name: &str) -> String {
+    format!(
+        r#"^pw-loopback .*node\.name="{}" "#,
+        regex::escape(&pw_escape(name))
+    )
 }
 
 /// The line-in DSP of versions before the mixer took the line-in over.
@@ -1140,14 +1357,14 @@ fn write_conf(path: &Path, config: &str) -> Result<()> {
 
 /// `pipewire -c conf`: a filter-chain in its own process.
 fn spawn_pipewire(conf: &Path) -> Result<Child> {
-    Command::new("pipewire")
+    let mut command = Command::new("pipewire");
+    command
         .arg("-c")
         .arg(conf)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("spawn pipewire -c {}", conf.display()))
+        .stderr(Stdio::null());
+    spawn_owned(command).with_context(|| format!("spawn pipewire -c {}", conf.display()))
 }
 
 /// `plugins`: the libraries the chain needs (`plugins_for`).
@@ -1366,7 +1583,7 @@ fn current_default_sink() -> Result<String> {
 
 fn set_default_sink(name: &str) -> Result<()> {
     resolve_node_id(name)?;
-    engine()?.set_default_sink(name)
+    engine()?.set_default_sink(Some(name))
 }
 
 /// `wpctl set-volume <id> <linear>`: WirePlumber's cubic scale, applied to
@@ -1461,30 +1678,42 @@ fn set_capture_percent(card: &str, percent: u8) -> Result<()> {
     amixer(card, &["sset", "Capture", &format!("{percent}%")])?;
     for ((_, c), level) in card_levels().iter_mut() {
         if c == card {
-            *level = percent;
+            *level = (Some(percent), None);
         }
     }
     Ok(())
 }
 
+/// How long a card whose level could not be read shows none before it is
+/// asked again (like the mixer's `CARD_RETRY`: status reads wait on `amixer`).
+const LEVEL_RETRY: Duration = Duration::from_secs(30);
+
+/// A level read, or none until the instant after a failed read.
+type CachedLevel = (Option<u8>, Option<Instant>);
+
 /// Capture level per (node, card), like `CARD_CONTROLS` (card numbers are
 /// reused after an unplug): read once, then followed through hako's own writes.
 /// ponytail: a level changed in another mixer app shows stale until restart.
-static CARD_LEVELS: Mutex<BTreeMap<(String, String), u8>> = Mutex::new(BTreeMap::new());
+static CARD_LEVELS: Mutex<BTreeMap<(String, String), CachedLevel>> = Mutex::new(BTreeMap::new());
 
-fn card_levels() -> MutexGuard<'static, BTreeMap<(String, String), u8>> {
+fn card_levels() -> MutexGuard<'static, BTreeMap<(String, String), CachedLevel>> {
     CARD_LEVELS.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// The "Capture" level in percent of `node`'s card, if it reports one.
 fn capture_level(node: &str, card: &str) -> Option<u8> {
     let key = (node.to_string(), card.to_string());
-    if let Some(level) = card_levels().get(&key) {
-        return Some(*level);
+    if let Some((level, retry)) = card_levels().get(&key) {
+        if retry.is_none_or(|at| Instant::now() < at) {
+            return *level;
+        }
     }
-    let level = parse_percent(&amixer(card, &["sget", "Capture"]).ok()?)?;
-    card_levels().insert(key, level);
-    Some(level)
+    let level = amixer(card, &["sget", "Capture"])
+        .ok()
+        .and_then(|sget| parse_percent(&sget));
+    let retry = level.is_none().then(|| Instant::now() + LEVEL_RETRY);
+    card_levels().insert(key, (level, retry));
+    level
 }
 
 /// The first `[NN%]` of an `amixer sget` volume line.
@@ -1997,6 +2226,35 @@ mod tests {
         );
     }
 
+    /// `pkill -f` matches the command line, arguments joined by spaces.
+    fn command_line(command: &Command) -> String {
+        std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn loopbacks_use_options_pipewire_0_3_48_has_and_orphans_match_by_node_name() {
+        let game = loopback_command(CHATMIX_GAME, "hako Game", "alsa_output.x", 256);
+        let chat = loopback_command(CHATMIX_CHAT, "hako Chat", "alsa_output.x", 256);
+        // 0.3.48's getopt is "hVr:g:c:m:l:C:P:i:o:" (`-n` came in 0.3.52).
+        let options: Vec<_> = game
+            .get_args()
+            .filter_map(|arg| arg.to_str()?.strip_prefix('-'))
+            .collect();
+        assert_eq!(options, ["i", "o"]);
+
+        let pattern = Regex::new(&loopback_orphan_pattern(CHATMIX_GAME)).unwrap();
+        assert!(pattern.is_match(&command_line(&game)));
+        assert!(!pattern.is_match(&command_line(&chat)));
+        // An older version's loopback (spawned with `-n`) is an orphan too.
+        let mut old = Command::new("pw-loopback");
+        old.args(["-n", CHATMIX_GAME]).args(game.get_args());
+        assert!(pattern.is_match(&command_line(&old)));
+    }
+
     #[test]
     fn parses_selected_alsa_card_only() {
         let props = |pairs: &[(&str, &str)]| {
@@ -2063,6 +2321,14 @@ mod tests {
         // Another device under that card number (a replug) is read afresh.
         assert_eq!(capture_level("line-b", "6"), Some(48));
         assert_eq!(amixer_calls(), ["6 sget Capture"]);
+        // A failed read is not repeated on every status read, only once
+        // its retry time has come.
+        assert_eq!(capture_level("line-a", "9"), None);
+        assert!(amixer_calls().is_empty());
+        let key = ("line-a".to_string(), "9".to_string());
+        card_levels().get_mut(&key).unwrap().1 = Some(Instant::now());
+        assert_eq!(capture_level("line-a", "9"), None);
+        assert_eq!(amixer_calls(), ["9 sget Capture"]);
     }
 
     #[test]
@@ -2154,6 +2420,39 @@ mod tests {
     }
 
     #[test]
+    fn owned_child_outlives_the_thread_that_asked() {
+        let mut child = std::thread::spawn(|| {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            spawn_owned(command).expect("spawn sleep")
+        })
+        .join()
+        .unwrap();
+        // The death signal is sent a moment after the thread is joinable.
+        std::thread::sleep(Duration::from_millis(200));
+        let running = child.try_wait().unwrap().is_none();
+        let _ = stop_child(&mut child);
+        assert!(running, "killed when the spawning thread exited");
+    }
+
+    #[test]
+    fn owned_child_gets_a_death_signal() {
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                "import ctypes; s = ctypes.c_int(); \
+                 ctypes.CDLL(None).prctl(2, ctypes.byref(s)); print(s.value)",
+            ])
+            .stdout(Stdio::piped());
+        let Ok(child) = spawn_owned(command) else {
+            return eprintln!("no python3: PR_GET_PDEATHSIG not checked");
+        };
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "15");
+    }
+
+    #[test]
     fn commands_are_killed_at_the_timeout() {
         let t0 = std::time::Instant::now();
         let err =
@@ -2179,7 +2478,7 @@ mod tests {
         let mut defaults = DefaultState::default();
         defaults.claim(DefaultOwner::ChatMix, "game".into(), s("speakers"));
         assert_eq!(defaults.held(), Some("game"));
-        assert_eq!(defaults.release(DefaultOwner::ChatMix), s("speakers"));
+        assert_eq!(defaults.release(DefaultOwner::ChatMix), Some(s("speakers")));
         defaults.restored();
         assert_eq!(defaults.release(DefaultOwner::ChatMix), None);
         defaults.claim(DefaultOwner::ChatMix, "game".into(), s("hdmi"));
@@ -2195,7 +2494,11 @@ mod tests {
         for original in ["game", CHATMIX_GAME, CHATMIX_CHAT, "hako_in_music"] {
             let mut defaults = DefaultState::default();
             defaults.claim(DefaultOwner::ChatMix, "game".into(), s(original));
-            assert_eq!(defaults.release(DefaultOwner::ChatMix), None, "{original}");
+            assert_eq!(
+                defaults.release(DefaultOwner::ChatMix),
+                Some(None),
+                "{original}"
+            );
         }
     }
 
@@ -2205,13 +2508,124 @@ mod tests {
         let mut defaults = DefaultState::default();
         defaults.claim(DefaultOwner::ChatMix, "game".into(), s("speakers"));
         // Restoring "speakers" failed: no `restored`.
-        assert_eq!(defaults.release(DefaultOwner::ChatMix), s("speakers"));
+        assert_eq!(defaults.release(DefaultOwner::ChatMix), Some(s("speakers")));
         assert_eq!(defaults.held(), None);
         // A new claim does not take the fallback the server picked meanwhile.
         defaults.claim(DefaultOwner::ChatMix, "game".into(), s("hdmi"));
-        assert_eq!(defaults.release(DefaultOwner::ChatMix), s("speakers"));
+        assert_eq!(defaults.release(DefaultOwner::ChatMix), Some(s("speakers")));
         defaults.restored();
         assert_eq!(defaults.restore(), None);
+    }
+
+    thread_local! {
+        /// `default.configured.audio.sink` as unit tests see it.
+        pub(super) static CONFIGURED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+        /// The persisted original default, if a test wants one.
+        pub(super) static ORIGINAL_FILE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// The configured default (what the user chose, present or not) is the
+    /// original; hako's own, left by a crash, is replaced by the persisted one.
+    #[test]
+    fn the_original_is_the_configured_default_or_what_a_crash_left() {
+        let s = |n: &str| Some(n.to_string());
+        assert_eq!(original_default(Some("bt"), s("old")), s("bt"));
+        assert_eq!(original_default(Some(CHATMIX_GAME), s("bt")), s("bt"));
+        assert_eq!(original_default(Some(CHATMIX_GAME), None), None);
+        assert_eq!(original_default(None, s("bt")), None);
+
+        assert_eq!(
+            restore_target(s("bt"), Some(CHATMIX_GAME), s("x")),
+            Some(Restore::To("bt".into()))
+        );
+        // No original: hako's sink is not left configured.
+        assert_eq!(
+            restore_target(None, Some(CHATMIX_GAME), None),
+            Some(Restore::Clear)
+        );
+        assert_eq!(
+            restore_target(None, Some(CHATMIX_GAME), s("bt")),
+            Some(Restore::To("bt".into()))
+        );
+        assert_eq!(
+            restore_target(None, Some(CHATMIX_GAME), s(CHATMIX_CHAT)),
+            Some(Restore::Clear)
+        );
+        // The user's own pick (or none) stands.
+        assert_eq!(restore_target(None, Some("speakers"), s("bt")), None);
+        assert_eq!(restore_target(None, None, s("bt")), None);
+    }
+
+    #[test]
+    fn a_default_the_user_moved_away_is_not_claimed_again() {
+        assert!(user_moved_claim(Some(CHATMIX_GAME), Some("hdmi")));
+        assert!(!user_moved_claim(Some(CHATMIX_GAME), Some(CHATMIX_GAME)));
+        assert!(!user_moved_claim(None, Some("hdmi")));
+        assert!(!user_moved_claim(Some(CHATMIX_GAME), None));
+
+        // A held claim is kept as it is: no PipeWire call is made (claiming
+        // a sink that does not exist would fail).
+        const GAME: &str = "hako-test-no-such-game";
+        CONFIGURED.with(|c| *c.borrow_mut() = Some("hdmi".into()));
+        let mut defaults = DefaultState::default();
+        defaults.claim(DefaultOwner::ChatMix, GAME.into(), None);
+        claim_default(&mut defaults, DefaultOwner::ChatMix, GAME).unwrap();
+        assert_eq!(defaults.held(), Some(GAME));
+        CONFIGURED.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn the_original_default_is_persisted_until_released() {
+        let dir = std::env::temp_dir().join(format!("hako-default-test-{}", std::process::id()));
+        let file = dir.join("hako/default-sink");
+        ORIGINAL_FILE.with(|f| *f.borrow_mut() = Some(file.clone()));
+        assert_eq!(load_original(), None);
+        persist_original(Some("bluez_output.headphones"));
+        assert_eq!(load_original().as_deref(), Some("bluez_output.headphones"));
+        persist_original(Some("speakers"));
+        assert_eq!(load_original().as_deref(), Some("speakers"));
+        persist_original(None);
+        assert!(!file.exists());
+        persist_original(None);
+
+        // Let go with nothing to restore (the user's own default stands):
+        // the file goes too.
+        persist_original(Some("speakers"));
+        let mut defaults = DefaultState::default();
+        defaults.claim(DefaultOwner::ChatMix, "hako-test-no-such-sink".into(), None);
+        release_default(&mut defaults, DefaultOwner::ChatMix).unwrap();
+        assert_eq!(defaults.held(), None);
+        assert!(!file.exists());
+        ORIGINAL_FILE.with(|f| *f.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_device_file_with_the_old_line_in_on_counts() {
+        let root = std::env::temp_dir().join(format!("hako-line-in-test-{}", std::process::id()));
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        assert!(!legacy_line_in_on(&paths), "no devices dir");
+        let save = |pid, on| {
+            let mut settings = hako_core::SettingsMap::new();
+            hako_core::merge_setting(
+                &mut settings,
+                SettingKey::AuxEnabled,
+                hako_core::SettingValue::Bool(on),
+            );
+            hako_core::save_device_settings(&paths, 0x1038, pid, &settings).unwrap();
+        };
+        save(0x12e0, false);
+        std::fs::write(paths.devices_dir.join("notes.toml"), "aux_enabled = true").unwrap();
+        assert!(!legacy_line_in_on(&paths));
+        save(0x12e5, true);
+        assert!(legacy_line_in_on(&paths));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -2404,8 +2818,6 @@ mod tests {
         fn spawn(name: &str) -> Self {
             let child = Command::new("pw-loopback")
                 .args([
-                    "-n",
-                    name,
                     "-i",
                     &format!("media.class=Audio/Sink node.name=\"{name}\""),
                     "-o",
@@ -2713,5 +3125,61 @@ mod tests {
             );
         }
         assert_eq!(updated.flatten(), Some(80.0));
+    }
+
+    /// ChatMix's `pw-loopback` with hako's exact arguments stays up on a
+    /// private server (its own `core.name`, never the session's). The release
+    /// job runs it against Ubuntu 22.04's PipeWire 0.3.48.
+    #[test]
+    #[ignore = "spawns a private PipeWire server and pw-loopback"]
+    fn live_loopback_stays_up() {
+        let name = format!("hako-test-loopback-{}", std::process::id());
+        let conf = std::env::temp_dir().join(format!("{name}.conf"));
+        let log = conf.with_extension("log");
+        std::fs::write(
+            &conf,
+            format!(
+                "context.properties = {{ core.daemon = true core.name = {name} support.dbus = false }}\n\
+                 context.spa-libs = {{ audio.convert.* = audioconvert/libspa-audioconvert support.* = support/libspa-support }}\n\
+                 context.modules = [ {{ name = libpipewire-module-protocol-native }} {{ name = libpipewire-module-client-node }} {{ name = libpipewire-module-adapter }} {{ name = libpipewire-module-access }} ]\n"
+            ),
+        )
+        .unwrap();
+        let socket = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join(&name);
+        let mut server = Command::new("pipewire")
+            .arg("-c")
+            .arg(&conf)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut loopback = loopback_command(CHATMIX_GAME, "hako Game", "hako-test-nowhere", 256)
+            .env("PIPEWIRE_REMOTE", &name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let exited = loopback.try_wait().unwrap();
+        let _ = stop_child(&mut loopback);
+        let _ = stop_child(&mut server);
+        let errors = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_file(&conf);
+        let _ = std::fs::remove_file(&log);
+        for suffix in ["", ".lock", "-manager", "-manager.lock"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", socket.display()));
+        }
+        assert!(
+            exited.is_none(),
+            "pw-loopback exited with {exited:?}: {errors}"
+        );
     }
 }

@@ -1,8 +1,8 @@
 //! Network page: LAN audio with other hako machines. Turn it on, pair
-//! (Accept / Deny with a 6-digit code on both screens), then each paired
-//! machine's link and receive buffer. Edits go out as `NetOp`s and are
-//! applied to the local copy first; the daemon's state is adopted once
-//! nothing is in flight.
+//! (a 6-digit code on both screens: Accept / Deny there, then Confirm
+//! here), then each paired machine's link and receive buffer. Edits go
+//! out as `NetOp`s and are applied to the local copy first; the daemon's
+//! state is adopted once nothing is in flight.
 
 use crate::theme::{self, pal};
 use crate::widgets::{self, Tone};
@@ -24,7 +24,8 @@ pub struct NetUi {
     error: Option<String>,
     /// `PatchNet` calls sent and not answered yet (the client sets this).
     pub busy: bool,
-    /// Incoming requests already announced with a toast.
+    /// Requests needing an answer (incoming, or ours accepted) already
+    /// announced with a toast.
     announced: Vec<String>,
     /// "Connect to address" draft.
     address: String,
@@ -65,7 +66,7 @@ impl NetUi {
         match (&self.state, &self.error) {
             (None, Some(_)) => ("Not available".into(), pal().text_faint),
             (None, None) => ("Loading…".into(), pal().text_faint),
-            (Some(s), _) if s.requests.iter().any(|r| r.incoming) => {
+            (Some(s), _) if s.requests.iter().any(|r| r.incoming || r.accepted) => {
                 ("Pairing request".into(), pal().accent)
             }
             (Some(s), _) if !s.enabled => ("Off".into(), pal().text_faint),
@@ -119,23 +120,33 @@ pub fn icon_network(p: &egui::Painter, r: Rect, c: Color32) {
 }
 
 impl HakoAppUi {
-    /// Adopt daemon state and toast incoming requests not seen yet (unless
-    /// the page is open: the card is there).
+    /// Adopt daemon state and toast requests needing an answer not seen yet
+    /// (unless the page is open: the card is there).
     pub(crate) fn net_frame(&mut self, dragging: bool) {
         self.net.sync(dragging);
         let Some(st) = &self.net.state else {
             return;
         };
-        let incoming: Vec<&PairRequest> = st.requests.iter().filter(|r| r.incoming).collect();
-        let fresh: Vec<String> = incoming
+        let answer: Vec<&PairRequest> = st
+            .requests
+            .iter()
+            .filter(|r| r.incoming || r.accepted)
+            .collect();
+        let fresh: Vec<String> = answer
             .iter()
             .filter(|r| !self.net.announced.contains(&r.id))
-            .map(|r| r.name.clone())
+            .map(|r| {
+                if r.incoming {
+                    format!("{} wants to pair — open Network", r.name)
+                } else {
+                    format!("{} accepted — confirm the code in Network", r.name)
+                }
+            })
             .collect();
-        self.net.announced = incoming.iter().map(|r| r.id.clone()).collect();
+        self.net.announced = answer.iter().map(|r| r.id.clone()).collect();
         if !(self.show_net && !self.show_settings) {
-            for name in fresh {
-                self.notify(Tone::Info, format!("{name} wants to pair — open Network"));
+            for text in fresh {
+                self.notify(Tone::Info, text);
             }
         }
     }
@@ -366,8 +377,11 @@ impl HakoAppUi {
                 }
                 for n in &st.nearby {
                     let asked = st.requests.iter().any(|r| r.id == n.id);
+                    // The id comes from its key: a borrowed name shows
+                    // another id.
+                    let detail = format!("{} · id {}", n.address, n.id);
                     ui.push_id(&n.id, |ui| {
-                        widgets::row(ui, &n.name, Some(&n.address), |ui| {
+                        widgets::row(ui, &n.name, Some(&detail), |ui| {
                             if ui
                                 .add_enabled_ui(!asked, |ui| widgets::button(ui, "Pair"))
                                 .inner
@@ -450,10 +464,12 @@ fn name_field(ui: &mut Ui, name: &str) -> Option<String> {
         .then(|| draft.to_string())
 }
 
-/// An incoming request (Accept / Deny) or one we sent (Cancel).
+/// An incoming request (Accept / Deny), one we sent (Cancel), or ours
+/// accepted there (Confirm / Cancel).
 fn request_card(ui: &mut Ui, r: &PairRequest, ops: &mut Vec<NetOp>) {
+    let answer = r.incoming || r.accepted;
     let mut frame = theme::card();
-    if r.incoming {
+    if answer {
         frame = frame.stroke(Stroke::new(1.5_f32, pal().accent));
     }
     ui.push_id(&r.id, |ui| {
@@ -461,6 +477,8 @@ fn request_card(ui: &mut Ui, r: &PairRequest, ops: &mut Vec<NetOp>) {
             ui.set_width(ui.available_width());
             let title = if r.incoming {
                 format!("{} wants to pair", r.name)
+            } else if r.accepted {
+                format!("{} accepted", r.name)
             } else {
                 format!("Waiting for {} to accept", r.name)
             };
@@ -478,13 +496,18 @@ fn request_card(ui: &mut Ui, r: &PairRequest, ops: &mut Vec<NetOp>) {
             ui.add_space(theme::SPACE_SM);
             ui.label(
                 egui::RichText::new(fmt_code(&r.code))
-                    .size(if r.incoming { 34.0 } else { 24.0 })
+                    .size(if answer { 34.0 } else { 24.0 })
                     .monospace()
                     .strong()
                     .color(pal().text),
             );
             ui.add_space(theme::SPACE_XS);
-            widgets::hint(ui, &format!("Check that {} shows the same code", r.name));
+            let hint = if r.accepted {
+                format!("Confirm only if {} shows the same code", r.name)
+            } else {
+                format!("Check that {} shows the same code", r.name)
+            };
+            widgets::hint(ui, &hint);
             ui.add_space(theme::SPACE_MD);
             ui.horizontal(|ui| {
                 let respond = |accept| NetOp::Respond {
@@ -496,6 +519,13 @@ fn request_card(ui: &mut Ui, r: &PairRequest, ops: &mut Vec<NetOp>) {
                         ops.push(respond(true));
                     }
                     if widgets::button(ui, "Deny").clicked() {
+                        ops.push(respond(false));
+                    }
+                } else if r.accepted {
+                    if widgets::primary_button(ui, "Confirm").clicked() {
+                        ops.push(respond(true));
+                    }
+                    if widgets::button(ui, "Cancel").clicked() {
                         ops.push(respond(false));
                     }
                 } else if widgets::button(ui, "Cancel").clicked() {

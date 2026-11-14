@@ -3,7 +3,8 @@
 //! DSP/Deep Learning Approach to Real-Time Full-Band Speech Enhancement", 2018, via the
 //! `nnnoiseless` port) as the light model. Both are 48 kHz mono models on 10 ms hops: the input
 //! is folded to mono and fed through a hop FIFO, and the voice goes to both channels. Latency is
-//! one hop plus the model's delay: 40 ms with DeepFilterNet, 20 ms with RNNoise.
+//! one hop plus DeepFilterNet's delay, 40 ms, with either model: RNNoise's input is held back to
+//! match, so switching models never skips or repeats.
 
 use crate::Effect;
 use deep_filter_rt::tract::{DfParams, DfTract, RuntimeParams};
@@ -13,14 +14,17 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 const RATE: f32 = 48000.0;
 const HOP: usize = DenoiseState::FRAME_SIZE;
+/// DeepFilterNet 3's delay (`DfTract::delay`), which RNNoise is held back to.
+const DELAY: usize = 1440;
 /// RNNoise's output lags its input by one frame (`rnnoise_lags_one_frame`).
 const RNN_DELAY: usize = HOP;
 /// RNNoise works on samples in the i16 range.
 const RNN_SCALE: f32 = 32768.0;
-/// Hops a model replays before it takes over, so it starts warm and in step.
+/// Hops a model taking over runs in step behind the old one's output before it fades in, so it
+/// starts warm.
 const WARM_HOPS: usize = 6;
-/// Recent mono input: the replayed hops, and the dry signal behind a model's delay.
-const HISTORY: usize = 2 * WARM_HOPS * HOP;
+/// Recent mono input: the current hop and the dry signal behind the delay.
+const HISTORY: usize = HOP + DELAY;
 /// Per-sample smoothing of RNNoise's dry share, about 10 ms.
 const BLEND_SMOOTH: f32 = 0.002;
 
@@ -38,6 +42,8 @@ pub struct Denoise {
 struct Inner {
     engines: Engines,
     active: Option<Model>,
+    /// Hops the other model has run so far to take over from `active`.
+    warm: usize,
     history: [f32; HISTORY],
     input: [f32; HOP],
     output: [f32; HOP],
@@ -48,10 +54,15 @@ struct Inner {
 struct Engines {
     /// `None` if the model failed to load; RNNoise stands in.
     dfn: Option<DfTract>,
+    /// `dfn` as loaded, for `reset` (a clone shares the weights).
+    dfn_fresh: Option<DfTract>,
     dfn_reduction: f32,
     rnn: Box<DenoiseState<'static>>,
     rnn_frame: [f32; HOP],
     rnn_dry: f32,
+    /// Inferences run, so tests can count them per hop.
+    #[cfg(test)]
+    runs: usize,
 }
 
 impl Denoise {
@@ -60,16 +71,21 @@ impl Denoise {
         if rate != RATE {
             return Self { inner: None };
         }
+        let dfn = catch_unwind(load_deep_filter).ok().flatten();
         Self {
             inner: Some(Box::new(Inner {
                 engines: Engines {
-                    dfn: catch_unwind(load_deep_filter).ok().flatten(),
+                    dfn_fresh: dfn.clone(),
+                    dfn,
                     dfn_reduction: 100.0,
                     rnn: DenoiseState::new(),
                     rnn_frame: [0.0; HOP],
                     rnn_dry: 0.0,
+                    #[cfg(test)]
+                    runs: 0,
                 },
                 active: None,
+                warm: 0,
                 history: [0.0; HISTORY],
                 input: [0.0; HOP],
                 output: [0.0; HOP],
@@ -110,45 +126,61 @@ impl Effect for Denoise {
             }
         }
     }
+
+    // ponytail: the fresh models (a ~10 µs DeepFilterNet clone, a new RNNoise state) allocate
+    // on the audio thread, like their inference.
+    fn reset(&mut self) {
+        let Some(inner) = &mut self.inner else {
+            return;
+        };
+        let engines = &mut inner.engines;
+        engines.dfn.clone_from(&engines.dfn_fresh);
+        engines.dfn_reduction = 100.0;
+        engines.rnn = DenoiseState::new();
+        engines.rnn_frame = [0.0; HOP];
+        engines.rnn_dry = 0.0;
+        inner.active = None;
+        inner.warm = 0;
+        inner.history = [0.0; HISTORY];
+        inner.input = [0.0; HOP];
+        inner.output = [0.0; HOP];
+        inner.fade = [0.0; HOP];
+        inner.pos = 0;
+    }
 }
 
 impl Inner {
-    /// Runs `model` on the hop in `input`, into `output`. A model taking over first replays the
-    /// last hops, then fades in over the hop.
+    /// Runs `model` on the hop in `input`, into `output`. The first model starts at once; one
+    /// taking over from another runs alongside it for `WARM_HOPS` hops (at most two inferences
+    /// per hop), then fades in over the next.
     fn hop(&mut self, model: Model, reduction_db: f32) {
         self.history.copy_within(HOP.., 0);
         self.history[HISTORY - HOP..].copy_from_slice(&self.input);
-        if self.active == Some(model) {
-            self.engines.run(
-                model,
-                &self.history,
-                HISTORY,
-                reduction_db,
-                &mut self.output,
-            );
-            return;
-        }
-        for back in (0..=WARM_HOPS).rev() {
-            let end = HISTORY - back * HOP;
+        let Some(old) = self.active.filter(|&old| old != model) else {
+            self.active = Some(model);
+            self.warm = 0;
             self.engines
-                .run(model, &self.history, end, reduction_db, &mut self.fade);
-        }
-        match self.active {
-            Some(old) => {
-                self.engines
-                    .run(old, &self.history, HISTORY, reduction_db, &mut self.output)
-            }
-            None => self.output.fill(0.0),
+                .run(model, &self.history, reduction_db, &mut self.output);
+            return;
+        };
+        self.engines
+            .run(model, &self.history, reduction_db, &mut self.fade);
+        self.engines
+            .run(old, &self.history, reduction_db, &mut self.output);
+        self.warm += 1;
+        if self.warm <= WARM_HOPS {
+            return;
         }
         for (i, (out, new)) in self.output.iter_mut().zip(&self.fade).enumerate() {
             *out += (new - *out) * (i + 1) as f32 / HOP as f32;
         }
         self.active = Some(model);
+        self.warm = 0;
     }
 }
 
 impl Engines {
-    /// One hop of `model`: the input is the hop of `history` ending at `end`.
+    /// One hop of `model` on the newest hop of `history`, `DELAY` samples late.
     // ponytail: on the audio thread tract allocates its tensors and takes its (uncontended)
     // executor lock per hop, and easyfft allocates its FFT plan on a thread's first RNNoise
     // frame; fully preallocated inference needs an engine without that.
@@ -156,11 +188,13 @@ impl Engines {
         &mut self,
         model: Model,
         history: &[f32; HISTORY],
-        end: usize,
         reduction_db: f32,
         out: &mut [f32; HOP],
     ) {
-        let input = &history[end - HOP..end];
+        #[cfg(test)]
+        {
+            self.runs += 1;
+        }
         match (model, &mut self.dfn) {
             (Model::DeepFilter, Some(df)) => {
                 if reduction_db != self.dfn_reduction {
@@ -168,20 +202,29 @@ impl Engines {
                     self.dfn_reduction = reduction_db;
                 }
                 let ok = match (
-                    ArrayView2::from_shape((1, HOP), input),
+                    ArrayView2::from_shape((1, HOP), dry(history, 0)),
                     ArrayViewMut2::from_shape((1, HOP), &mut out[..]),
                 ) {
                     (Ok(noisy), Ok(enh)) => {
-                        catch_unwind(AssertUnwindSafe(|| df.process(noisy, enh)))
-                            .is_ok_and(|r| r.is_ok())
+                        match catch_unwind(AssertUnwindSafe(|| df.process(noisy, enh))) {
+                            Ok(result) => result.is_ok(),
+                            // Not retried every hop: RNNoise takes over, as when it failed to load.
+                            Err(_) => {
+                                self.dfn = None;
+                                false
+                            }
+                        }
                     }
                     _ => false,
                 };
                 if !ok {
-                    out.copy_from_slice(dry(history, end, df.delay()));
+                    out.copy_from_slice(dry(history, DELAY));
                 }
             }
-            _ => {
+            // The DeepFilterNet that panicked, until RNNoise has taken over.
+            (Model::DeepFilter, None) => out.copy_from_slice(dry(history, DELAY)),
+            (Model::RnNoise, _) => {
+                let input = dry(history, DELAY - RNN_DELAY);
                 for (s, x) in self.rnn_frame.iter_mut().zip(input) {
                     *s = x * RNN_SCALE;
                 }
@@ -191,7 +234,7 @@ impl Engines {
                 } else {
                     10f32.powf(-reduction_db / 20.0)
                 };
-                for (o, d) in out.iter_mut().zip(dry(history, end, RNN_DELAY)) {
+                for (o, d) in out.iter_mut().zip(dry(history, DELAY)) {
                     self.rnn_dry += (target - self.rnn_dry) * BLEND_SMOOTH;
                     *o = *o / RNN_SCALE * (1.0 - self.rnn_dry) + d * self.rnn_dry;
                 }
@@ -207,10 +250,9 @@ fn load_deep_filter() -> Option<DfTract> {
     DfTract::new(DfParams::default(), &params).ok()
 }
 
-/// The hop of `history` `delay` samples before the one ending at `end`.
-fn dry(history: &[f32; HISTORY], end: usize, delay: usize) -> &[f32] {
-    let start = end.saturating_sub(HOP + delay);
-    &history[start..start + HOP]
+/// The hop of `history` `delay` samples before the newest.
+fn dry(history: &[f32; HISTORY], delay: usize) -> &[f32] {
+    &history[HISTORY - HOP - delay..][..HOP]
 }
 
 #[cfg(test)]
@@ -343,7 +385,7 @@ mod tests {
     }
 
     /// At 0 dB both models pass the input through, delayed by the latency they report, whatever
-    /// the block size.
+    /// the block size; at full strength the voice comes out at the same latency.
     #[test]
     fn latency_is_constant_and_as_reported() {
         let dfn_delay = Denoise::new(RATE)
@@ -353,15 +395,13 @@ mod tests {
             .dfn
             .unwrap()
             .delay();
-        assert_eq!(dfn_delay, 1440);
+        assert_eq!(dfn_delay, DELAY);
         let mut input = vec![0.0; RATE as usize / 2];
         for at in [5000, 13_337, 20_000] {
             input[at] = 0.5;
         }
-        for (model, latency) in [
-            (Model::DeepFilter, HOP + dfn_delay),
-            (Model::RnNoise, HOP + RNN_DELAY),
-        ] {
+        let latency = HOP + DELAY;
+        for model in [Model::DeepFilter, Model::RnNoise] {
             for block in [1, 64, 333, 1024, 8192] {
                 let out = run(&mut Denoise::new(RATE), controls(0.0, model), &input, block);
                 assert_eq!(out.len(), input.len());
@@ -372,6 +412,49 @@ mod tests {
                     );
                 }
             }
+        }
+        let voice = vowel(150 * HOP);
+        for model in [Model::DeepFilter, Model::RnNoise] {
+            let out = run(&mut Denoise::new(RATE), controls(100.0, model), &voice, 512);
+            let corr = |lag: usize| -> f32 {
+                (30 * HOP..130 * HOP).map(|i| voice[i] * out[i + lag]).sum()
+            };
+            let (_, lag) = (latency - 2 * HOP..=latency + 2 * HOP)
+                .map(|lag| (corr(lag), lag))
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .unwrap();
+            assert_eq!(lag, latency, "RNNoise: {}", model == Model::RnNoise);
+        }
+    }
+
+    /// A live switch runs at most one extra inference per hop, and at 0 dB the output stays the
+    /// input at the same latency through every switch.
+    #[test]
+    fn switching_models_is_seamless_and_cheap() {
+        let mut input = vec![0.0; RATE as usize];
+        for at in (1000..input.len()).step_by(4999) {
+            input[at] = 0.5;
+        }
+        let mut fx = Denoise::new(RATE);
+        let runs = |fx: &Denoise| fx.inner.as_ref().unwrap().engines.runs;
+        let mut out = Vec::new();
+        for (i, hop) in input.chunks(HOP).enumerate() {
+            let model = if i / 25 % 2 == 0 {
+                Model::DeepFilter
+            } else {
+                Model::RnNoise
+            };
+            let before = runs(&fx);
+            out.extend(run(&mut fx, controls(0.0, model), hop, HOP));
+            let hop_runs = runs(&fx) - before;
+            assert!(
+                hop_runs <= if i == 0 { 1 } else { 2 },
+                "hop {i}: {hop_runs}"
+            );
+        }
+        let latency = HOP + DELAY;
+        for (i, (&o, &x)) in out[latency..].iter().zip(&input).enumerate() {
+            assert!((o - x).abs() < 1e-3, "sample {i}: {o} vs {x}");
         }
     }
 

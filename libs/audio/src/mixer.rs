@@ -883,15 +883,19 @@ impl Strip {
         self.child.is_some()
     }
 
-    fn stop(&mut self) {
+    /// A process that does not exit in time goes to `unreaped`.
+    fn stop(&mut self, unreaped: &mut Vec<Child>) {
         if let Some(mut child) = self.child.take() {
-            let _ = stop_child(&mut child);
+            if let Err(e) = stop_child(&mut child) {
+                warn!("mixer strip {}: {e:#}", self.def.playback);
+                unreaped.push(child);
+            }
         }
         let _ = std::fs::remove_file(&self.conf);
     }
 
-    fn fail(&mut self, error: String) {
-        self.stop();
+    fn fail(&mut self, error: String, unreaped: &mut Vec<Child>) {
+        self.stop(unreaped);
         self.failures += 1;
         let wait = Duration::from_secs(1 << (self.failures - 1).min(5)).min(MAX_RETRY);
         self.retry_at = Instant::now() + wait;
@@ -986,17 +990,98 @@ struct CardClaim {
 
 /// Put the card's input selection back, unless the node is gone or on
 /// another card (its card number may be another device's by now).
-fn release_card(node: &str, claim: &CardClaim, present: bool) {
+fn release_card(node: &str, claim: &CardClaim, present: bool, saved: Option<&Path>) {
     let (Some(previous), true) = (&claim.previous, present) else {
         return;
     };
     match set_input_source(&claim.card, previous) {
-        Ok(()) => info!(
-            "mixer: {node}: card {} input source back to {previous}",
-            claim.card
-        ),
+        Ok(()) => {
+            info!(
+                "mixer: {node}: card {} input source back to {previous}",
+                claim.card
+            );
+            save_previous(saved, &claim.card, None);
+        }
         Err(e) => warn!("mixer: {node}: restoring card {} input: {e:#}", claim.card),
     }
+}
+
+/// The card's stable id (`/proc/asound/cardN/id`): its number can be
+/// another card's after a replug or reboot.
+#[cfg(not(test))]
+fn card_id(card: &str) -> Option<String> {
+    if card.is_empty() || !card.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let id = std::fs::read_to_string(format!("/proc/asound/card{card}/id")).ok()?;
+    Some(id.trim().to_string()).filter(|id| !id.is_empty())
+}
+
+/// Unit tests never read the machine's cards.
+#[cfg(test)]
+fn card_id(card: &str) -> Option<String> {
+    Some(format!("test{card}"))
+}
+
+/// Cards' "Input Source" before hako changed it, by card id, as `saved`
+/// (`MixerGraph::saved_cards`) has them.
+fn saved_previous(saved: &Path) -> BTreeMap<String, String> {
+    std::fs::read_to_string(saved)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// The card's "Input Source" before hako changed it, from a run that
+/// crashed before giving it back.
+fn load_previous(saved: Option<&Path>, card: &str) -> Option<String> {
+    saved_previous(saved?).remove(&card_id(card)?)
+}
+
+/// Remember (`Some`) or forget the card's own input across a crash:
+/// owner-only, replaced atomically, gone once no card is held.
+// ponytail: kept in the runtime dir, so a reboot (or logout) forgets it;
+// move it to the config dir if cards stay on hako's input after that.
+fn save_previous(saved: Option<&Path>, card: &str, previous: Option<&str>) {
+    let (Some(saved), Some(id)) = (saved, card_id(card)) else {
+        return;
+    };
+    let mut all = saved_previous(saved);
+    let changed = match previous {
+        Some(p) => all.insert(id, p.to_string()).as_deref() != Some(p),
+        None => all.remove(&id).is_some(),
+    };
+    if !changed {
+        return;
+    }
+    let result = if all.is_empty() {
+        std::fs::remove_file(saved).context("remove")
+    } else {
+        let tmp = saved.with_extension("json.tmp");
+        serde_json::to_string(&all)
+            .context("encode")
+            .and_then(|text| write_conf(&tmp, &text))
+            .and_then(|()| std::fs::rename(&tmp, saved).context("rename"))
+    };
+    if let Err(e) = result {
+        warn!("mixer: saving card inputs to {}: {e:#}", saved.display());
+    }
+}
+
+/// Why `def` cannot be started: one of its nodes exists already (`taken`)
+/// or another strip of this build makes it too (`made`, filled as it goes).
+fn clash(def: &StripDef, taken: &[String], made: &mut BTreeSet<String>) -> Option<String> {
+    for name in [&def.capture, &def.playback] {
+        if taken.contains(name) {
+            return Some(format!(
+                "PipeWire node {name} already exists (another program's?)"
+            ));
+        }
+        if !made.insert(name.clone()) {
+            return Some(format!("PipeWire node {name} is made by two strips"));
+        }
+    }
+    None
 }
 
 /// The mixer as it runs. Dropping it stops every strip.
@@ -1007,6 +1092,11 @@ pub struct MixerGraph {
     links: HashMap<(End, End), OwnedLink>,
     /// Capture cards set for sources, by node name.
     cards: BTreeMap<String, CardClaim>,
+    /// The claimed cards' own inputs, for the next start after a crash
+    /// (`None`: not kept).
+    saved_cards: Option<PathBuf>,
+    /// Stopped strip processes that did not exit in time, reaped later.
+    unreaped: Vec<Child>,
     /// App streams moved into virtual inputs, by stream id.
     moved: BTreeMap<u32, Moved>,
     problems: Vec<StripProblem>,
@@ -1016,12 +1106,19 @@ pub struct MixerGraph {
 impl MixerGraph {
     /// `latency`: `node.latency` of every node, in samples at 48 kHz.
     pub fn new(naming: Naming, latency: u32) -> Self {
+        // Unit tests run next to the user's hakod: its runtime dir is not theirs.
+        let saved_cards = (!cfg!(test)).then(|| {
+            hako_core::default_socket_path()
+                .with_file_name(format!("{}mixer-cards.json", naming.files))
+        });
         Self {
             naming,
             latency,
             strips: BTreeMap::new(),
             links: HashMap::new(),
             cards: BTreeMap::new(),
+            saved_cards,
+            unreaped: Vec::new(),
             moved: BTreeMap::new(),
             problems: Vec::new(),
             running: false,
@@ -1068,6 +1165,12 @@ impl MixerGraph {
         self.links.values().map(|l| l.handle.id).collect()
     }
 
+    /// Reap the stopped processes that have exited since.
+    fn reap(&mut self) {
+        self.unreaped
+            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    }
+
     /// Fails if a strip's process has exited.
     pub fn ensure_running(&mut self) -> Result<()> {
         for strip in self.strips.values_mut() {
@@ -1081,6 +1184,7 @@ impl MixerGraph {
     /// Bring the graph in line with `scene` (healing it when called again
     /// with the same scene); `dial` is the ChatMix dial (game, chat).
     pub fn reconcile(&mut self, scene: &Scene, dial: (f32, f32)) {
+        self.reap();
         let engine = engine();
         let (wanted, mut problems) = match &engine {
             Ok(engine) => engine.with_graph(|graph| {
@@ -1112,7 +1216,7 @@ impl MixerGraph {
                 if strip.started.elapsed() >= STABLE {
                     strip.failures = 0;
                 }
-                strip.fail("stopped unexpectedly".into());
+                strip.fail("stopped unexpectedly".into(), &mut self.unreaped);
             }
         }
 
@@ -1125,7 +1229,7 @@ impl MixerGraph {
         for key in remove {
             if let Some(mut strip) = self.strips.remove(&key) {
                 info!("mixer: removing {}", strip.def.playback);
-                strip.stop();
+                strip.stop(&mut self.unreaped);
             }
         }
         let mut build = Vec::new();
@@ -1208,7 +1312,7 @@ impl MixerGraph {
         let mut failures = HashMap::new();
         for (key, _) in &build {
             if let Some(mut strip) = self.strips.remove(key) {
-                strip.stop();
+                strip.stop(&mut self.unreaped);
                 failures.insert(key.clone(), (strip.failures, strip.started));
             }
         }
@@ -1228,6 +1332,7 @@ impl MixerGraph {
         let _ = engine.wait_for(NAME_WAIT, |graph| Ok(taken(graph).is_empty()));
         let taken = engine.with_graph(taken);
 
+        let mut made = BTreeSet::new();
         let mut started = Vec::new();
         for (key, def) in build {
             let side = match key.0 {
@@ -1247,13 +1352,8 @@ impl MixerGraph {
                 retry_at: Instant::now(),
                 error: None,
             };
-            let clash = [&strip.def.capture, &strip.def.playback]
-                .into_iter()
-                .find(|name| taken.contains(name));
-            let spawned = match clash {
-                Some(name) => Err(anyhow::anyhow!(
-                    "PipeWire node {name} already exists (another program's?)"
-                )),
+            let spawned = match clash(&strip.def, &taken, &mut made) {
+                Some(error) => Err(anyhow::anyhow!(error)),
                 None => plugins_for(&strip.def.chain)
                     .and_then(|plugins| strip_config(&strip.def, &self.naming, &plugins))
                     .and_then(|config| write_conf(&strip.conf, &config))
@@ -1272,7 +1372,7 @@ impl MixerGraph {
                     strip.started = Instant::now();
                     started.push(key.clone());
                 }
-                Err(error) => strip.fail(format!("{error:#}")),
+                Err(error) => strip.fail(format!("{error:#}"), &mut self.unreaped),
             }
             self.strips.insert(key, strip);
         }
@@ -1311,11 +1411,14 @@ impl MixerGraph {
                 .child
                 .as_mut()
                 .is_none_or(|c| !matches!(c.try_wait(), Ok(None)));
-            strip.fail(if exited {
-                "its PipeWire process exited at start".into()
-            } else {
-                format!("{} did not appear", strip.def.playback)
-            });
+            strip.fail(
+                if exited {
+                    "its PipeWire process exited at start".into()
+                } else {
+                    format!("{} did not appear", strip.def.playback)
+                },
+                &mut self.unreaped,
+            );
         }
     }
 
@@ -1476,7 +1579,7 @@ impl MixerGraph {
                 let there = present
                     .get(&node)
                     .is_some_and(|(_, card)| *card == claim.card);
-                release_card(&node, &claim, there);
+                release_card(&node, &claim, there, self.saved_cards.as_deref());
             }
         }
         let mut problems = Vec::new();
@@ -1514,9 +1617,18 @@ impl MixerGraph {
             if applied.0 != want.0 || (want.0.is_none() && previous.is_some()) {
                 let result = match &want.0 {
                     // Never switched without knowing what to switch back to.
-                    Some(item) => match previous.clone() {
+                    // A crashed run's record beats the card, which may still
+                    // be on hako's input.
+                    Some(item) => match previous
+                        .clone()
+                        .or_else(|| load_previous(self.saved_cards.as_deref(), card))
+                    {
                         Some(original) => Ok(original),
-                        None => current_input_source(card).context("reading its current input"),
+                        None => current_input_source(card)
+                            .context("reading its current input")
+                            .inspect(|original| {
+                                save_previous(self.saved_cards.as_deref(), card, Some(original))
+                            }),
                     }
                     .and_then(|original| {
                         previous = Some(original);
@@ -1527,7 +1639,10 @@ impl MixerGraph {
                         }
                     }),
                     None => match previous.clone() {
-                        Some(back) => set_input_source(card, &back).map(|()| previous = None),
+                        Some(back) => set_input_source(card, &back).map(|()| {
+                            save_previous(self.saved_cards.as_deref(), card, None);
+                            previous = None;
+                        }),
                         None => Ok(()),
                     },
                 };
@@ -1588,7 +1703,7 @@ impl MixerGraph {
             let there = cards
                 .as_ref()
                 .is_none_or(|cards| cards.get(&node) == Some(&claim.card));
-            release_card(&node, &claim, there);
+            release_card(&node, &claim, there, self.saved_cards.as_deref());
         }
     }
 
@@ -1601,8 +1716,9 @@ impl MixerGraph {
         self.links.clear();
         let names: Vec<String> = self.node_names().iter().map(|n| n.to_string()).collect();
         for strip in self.strips.values_mut() {
-            strip.stop();
+            strip.stop(&mut self.unreaped);
         }
+        self.reap();
         self.strips.clear();
         self.problems.clear();
         self.running = false;
@@ -1620,7 +1736,7 @@ impl Drop for MixerGraph {
         self.release_apps();
         self.links.clear();
         for strip in self.strips.values_mut() {
-            strip.stop();
+            strip.stop(&mut self.unreaped);
         }
     }
 }
@@ -1954,6 +2070,80 @@ mod tests {
         assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
     }
 
+    /// The card's own input outlives a crash: the next run gives that back,
+    /// not hako's item the card is still on.
+    #[test]
+    fn a_cards_own_input_survives_a_crash() {
+        use crate::tests::amixer_calls;
+        let saved = std::env::temp_dir().join(format!(
+            "hako-test-x-mixer-cards-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&saved);
+        let node = "hako-test-crash-line".to_string();
+        let want = vec![(
+            node.clone(),
+            "line-in".to_string(),
+            (Some("Line".to_string()), None),
+        )];
+        let at = HashMap::from([(node.clone(), (5, "7".to_string()))]);
+        let graph = |file: &Path| {
+            let mut graph = MixerGraph::new(test_naming(), 256);
+            graph.saved_cards = Some(file.to_path_buf());
+            graph
+        };
+        amixer_calls();
+
+        let mut first = graph(&saved);
+        first.sync_cards(&want, &at);
+        assert_eq!(amixer_calls()[0], "7 sget Input Source");
+        let text = std::fs::read_to_string(&saved).unwrap();
+        assert_eq!(text, r#"{"test7":"Rear Mic"}"#);
+        // Crashed: nothing given back. A crashed run before it had seen the
+        // card on "Front Mic".
+        std::mem::forget(first);
+        std::fs::write(&saved, r#"{"test7":"Front Mic"}"#).unwrap();
+
+        let mut next = graph(&saved);
+        next.sync_cards(&want, &at);
+        let calls = amixer_calls();
+        assert!(!calls.iter().any(|c| c.contains("sget")), "{calls:?}");
+        next.sync_cards(&[], &at);
+        assert_eq!(amixer_calls(), ["7 sset Input Source Front Mic"]);
+        assert!(!saved.exists(), "given back: forgotten");
+    }
+
+    #[test]
+    fn two_strips_never_make_one_node() {
+        let scene = scene();
+        let taken = vec!["hako-test-mic".to_string()];
+        let mut made = BTreeSet::new();
+        let game = def(&scene, Side::Input, "game");
+        assert_eq!(clash(&game, &taken, &mut made), None);
+        let b1 = def(&scene, Side::Output, "B1");
+        assert!(clash(&b1, &taken, &mut made).is_some_and(|e| e.contains("already exists")));
+        let mut twin = def(&scene, Side::Input, "desk");
+        twin.capture = game.playback.clone();
+        assert!(clash(&twin, &taken, &mut made).is_some_and(|e| e.contains("two strips")));
+    }
+
+    #[test]
+    fn stopped_processes_are_reaped_once_they_exit() {
+        let spawn = |secs: &str| Command::new("sleep").arg(secs).spawn().unwrap();
+        let mut graph = MixerGraph::new(test_naming(), 256);
+        graph.unreaped = vec![spawn("0"), spawn("30")];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while graph.unreaped.len() > 1 && Instant::now() < deadline {
+            graph.reap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(graph.unreaped.len(), 1, "the running one stays");
+        let _ = graph.unreaped[0].kill();
+        let _ = graph.unreaped[0].wait();
+        graph.reap();
+        assert!(graph.unreaped.is_empty());
+    }
+
     #[test]
     fn a_fresh_strip_is_linked_once_its_fader_is_written() {
         let mut graph = MixerGraph::new(test_naming(), 256);
@@ -1980,7 +2170,11 @@ mod tests {
         graph.strips.get_mut(&key).unwrap().fader = Some((0.0, true));
         assert!(graph.linkable().contains_key(&key));
         // An app stream still to hand back keeps a stopped graph busy.
-        graph.strips.get_mut(&key).unwrap().stop();
+        graph
+            .strips
+            .get_mut(&key)
+            .unwrap()
+            .stop(&mut graph.unreaped);
         graph.strips.clear();
         assert!(graph.is_empty());
         let moved = Moved {

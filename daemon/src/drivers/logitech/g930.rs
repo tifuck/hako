@@ -50,6 +50,11 @@ fn battery_percent(raw: u8) -> u8 {
     ((u16::from(raw - RAW_EMPTY) * 100) / u16::from(RAW_FULL - RAW_EMPTY)) as u8
 }
 
+/// Byte 13 of a battery reply of `len` bytes, if it reaches that far.
+fn battery_raw(reply: &[u8], len: usize) -> Option<u8> {
+    reply[..len.min(reply.len())].get(13).copied()
+}
+
 pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
     let mut nodes: Vec<_> = enumerate_hidraw()?
         .into_iter()
@@ -122,15 +127,18 @@ impl G930 {
         let read = || -> Result<u8> {
             let dev = self.dev.as_ref().context("device closed")?;
             dev.set_feature(&mut battery_request())?;
-            let mut buf = [0u8; REPORT];
+            let mut raw = None;
             for i in 0..3 {
+                // A fresh buffer: a short read must not keep the last reply.
+                let mut buf = [0u8; REPORT];
                 buf[0] = 0xff;
-                dev.get_feature(&mut buf)?;
+                let len = dev.get_feature_len(&mut buf)?;
+                raw = battery_raw(&buf, len);
                 if i < 2 {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
-            Ok(buf[13])
+            raw.context("short battery reply")
         };
         self.battery.percent = read().ok().map(battery_percent);
     }
@@ -214,5 +222,9 @@ mod tests {
         assert_eq!(battery_percent(67), 48);
         assert_eq!(battery_percent(10), 0);
         assert_eq!(battery_percent(200), 100);
+        let mut reply = [0u8; REPORT];
+        reply[13] = 67;
+        assert_eq!(battery_raw(&reply, REPORT), Some(67));
+        assert_eq!(battery_raw(&reply, 13), None);
     }
 }

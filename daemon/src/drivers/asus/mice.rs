@@ -144,7 +144,8 @@ impl MouseAdapter {
 
     /// Take unset performance values from the device, then push every setting.
     /// The active DPI stage is never pushed: the mouse's is adopted (see
-    /// [`adopt`]). Runs on open and whenever a wireless mouse comes back.
+    /// [`adopt`]); nor is a lift-off distance the mouse already has (see
+    /// [`resend_lod`]). Runs on open and whenever a wireless mouse comes back.
     fn connect(&mut self) {
         if self.spec.battery != Battery::None {
             if let Err(e) = self.poll_battery() {
@@ -154,8 +155,12 @@ impl MouseAdapter {
         }
         let mut errors = Vec::new();
         let spec = self.spec;
+        let mut hw_lod = None;
         match self.t().and_then(|t| read_performance(spec, t)) {
-            Ok(hw) => adopt(spec, &mut self.settings, hw),
+            Ok(hw) => {
+                hw_lod = get_setting(&hw, SettingKey::LiftOffDistance).cloned();
+                adopt(spec, &mut self.settings, hw)
+            }
             Err(e) => errors.push(format!("read settings: {e}")),
         }
         use SettingKey::*;
@@ -168,6 +173,11 @@ impl MouseAdapter {
             Effect,
         ]);
         for key in keys {
+            if key == LiftOffDistance
+                && !resend_lod(spec.lod, get_setting(&self.settings, key), hw_lod.as_ref())
+            {
+                continue;
+            }
             let offered = controls(self.spec, &self.settings)
                 .iter()
                 .any(|m| m.key == key);
@@ -407,6 +417,13 @@ fn adopt(spec: &MouseSpec, settings: &mut SettingsMap, hw: SettingsMap) {
     }
 }
 
+/// Whether `connect` re-sends the lift-off distance: on `Lod::Calibrated`
+/// mice that write also resets the surface calibration, so only when the
+/// mouse reported a different value.
+fn resend_lod(lod: Lod, wanted: Option<&SettingValue>, hw: Option<&SettingValue>) -> bool {
+    lod != Lod::Calibrated || hw.is_some_and(|hw| Some(hw) != wanted)
+}
+
 fn is_lighting(key: SettingKey) -> bool {
     matches!(
         key,
@@ -549,14 +566,19 @@ pub fn controls(spec: &MouseSpec, settings: &SettingsMap) -> Vec<SettingMeta> {
         c.push(SettingMeta::toggle(AngleSnapping, "Angle snapping"));
     }
     if spec.lod != Lod::None {
-        c.push(SettingMeta::dropdown(
+        let lod = SettingMeta::dropdown(
             LiftOffDistance,
             "Lift-off distance",
             vec![
                 SettingOption::text("low", "Low"),
                 SettingOption::text("high", "High"),
             ],
-        ));
+        );
+        c.push(if spec.lod == Lod::Calibrated {
+            lod.warning("Changing the lift-off distance also resets the surface calibration.")
+        } else {
+            lod
+        });
     }
     if !spec.zones.is_empty() {
         let step = if spec.max_brightness == 4 { 25.0 } else { 1.0 };
@@ -826,6 +848,24 @@ mod tests {
         assert_eq!(int(&saved, SettingKey::DpiStage2), Some(1600));
         assert_eq!(int(&saved, SettingKey::Dpi), Some(1600));
         assert_eq!(int(&saved, SettingKey::DpiStage3), Some(6400));
+    }
+
+    #[test]
+    fn reconnect_keeps_the_surface_calibration() {
+        let (low, high) = (
+            SettingValue::Text("low".into()),
+            SettingValue::Text("high".into()),
+        );
+        // `51 35 FF 00 FF <v>` also recalibrates: only a real change is sent.
+        assert!(!resend_lod(Lod::Calibrated, Some(&low), Some(&low)));
+        assert!(resend_lod(Lod::Calibrated, Some(&high), Some(&low)));
+        assert!(!resend_lod(Lod::Calibrated, Some(&high), None));
+        assert!(resend_lod(Lod::Plain, Some(&low), Some(&low)));
+
+        let calibrated = MICE.iter().find(|m| m.lod == Lod::Calibrated).unwrap();
+        let c = controls(calibrated, &SettingsMap::new());
+        let lod = c.iter().find(|m| m.key == SettingKey::LiftOffDistance);
+        assert!(lod.unwrap().warning.is_some());
     }
 
     /// A mouse whose active profile answers `12 04 00` / `12 00` with fixed

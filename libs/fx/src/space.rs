@@ -41,6 +41,11 @@ impl DelayLine {
         self.buf[self.head] = x;
         self.head = (self.head + 1) & self.mask;
     }
+
+    pub(crate) fn clear(&mut self) {
+        self.buf.fill(0.0);
+        self.head = 0;
+    }
 }
 
 /// Freeverb comb tunings at 44.1 kHz, left channel.
@@ -150,6 +155,20 @@ impl Effect for Reverb {
             *r = *r * (1.0 - m) + (wet_r * same + wet_l * cross) * m;
         }
     }
+
+    fn reset(&mut self) {
+        for comb in self.combs.iter_mut().flatten() {
+            comb.buf.fill(0.0);
+            comb.pos = 0;
+            comb.store = 0.0;
+        }
+        for allpass in self.allpasses.iter_mut().flatten() {
+            allpass.buf.fill(0.0);
+            allpass.pos = 0;
+        }
+        self.width.reset();
+        self.mix.reset();
+    }
 }
 
 /// Longest delay time, ms.
@@ -193,6 +212,14 @@ impl Effect for Delay {
                 *s = *s * (1.0 - m) + echo * m;
             }
         }
+    }
+
+    fn reset(&mut self) {
+        for line in &mut self.lines {
+            line.clear();
+        }
+        self.time.reset();
+        self.mix.reset();
     }
 }
 
@@ -251,6 +278,15 @@ impl Effect for Chorus {
             self.phase = (self.phase + step).fract();
         }
     }
+
+    fn reset(&mut self) {
+        for line in &mut self.lines {
+            line.clear();
+        }
+        self.phase = 0.0;
+        self.depth.reset();
+        self.mix.reset();
+    }
 }
 
 /// Base delay of the flanger sweep, ms.
@@ -307,6 +343,16 @@ impl Effect for Flanger {
             }
             self.phase = (self.phase + step).fract();
         }
+    }
+
+    fn reset(&mut self) {
+        for line in &mut self.lines {
+            line.clear();
+        }
+        self.phase = 0.0;
+        self.depth.reset();
+        self.feedback.reset();
+        self.mix.reset();
     }
 }
 

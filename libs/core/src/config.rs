@@ -21,6 +21,10 @@ pub struct AppConfig {
     pub version: u32,
     #[serde(default)]
     pub last_profile: Option<String>,
+    /// A device setting was changed through the UI since `last_profile` was
+    /// applied or saved: the daemon start does not re-apply it.
+    #[serde(default)]
+    pub last_profile_modified: bool,
     #[serde(default)]
     pub log_level: String,
     #[serde(default = "default_true")]
@@ -47,6 +51,7 @@ impl Default for AppConfig {
         Self {
             version: 1,
             last_profile: None,
+            last_profile_modified: false,
             log_level: "info".into(),
             chatmix_set_default_sink: true,
             aux: AuxConfig::default(),
@@ -210,8 +215,16 @@ pub fn update_app_config<T>(
 
 /// Owner-only temp file, fsynced, then renamed over `path`: a crash never
 /// leaves a truncated file and concurrent writers never share a temp file.
+/// A symlink (dotfile managers) stays one: the file it points to is replaced.
 pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
+    let resolved = fs::read_link(path).ok().map(|target| {
+        fs::canonicalize(path).unwrap_or_else(|_| match path.parent() {
+            Some(dir) => dir.join(&target),
+            None => target,
+        })
+    });
+    let path = resolved.as_deref().unwrap_or(path);
     let tmp = path.with_extension(format!(
         "toml.{}.{}.tmp",
         std::process::id(),
@@ -485,5 +498,41 @@ mod tests {
             "version = ["
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_symlinked_config_stays_a_link() {
+        let root = std::env::temp_dir().join(format!("hako-cfg-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (dots, link) = (root.join("dotfiles"), root.join("hako"));
+        fs::create_dir_all(&dots).unwrap();
+        fs::create_dir_all(&link).unwrap();
+        fs::write(dots.join("config.toml"), "version = 1\n").unwrap();
+        std::os::unix::fs::symlink("../dotfiles/config.toml", link.join("config.toml")).unwrap();
+        let paths = ConfigPaths {
+            config_toml: link.join("config.toml"),
+            devices_dir: link.join("devices"),
+            profiles_dir: link.join("profiles"),
+            remaps_dir: link.join("remaps"),
+            root: link.clone(),
+        };
+        update_app_config(&paths, |c| {
+            c.last_profile = Some("a".into());
+            Ok(())
+        })
+        .unwrap();
+        let meta = fs::symlink_metadata(&paths.config_toml).unwrap();
+        assert!(meta.file_type().is_symlink());
+        let text = fs::read_to_string(dots.join("config.toml")).unwrap();
+        assert!(text.contains("last_profile = \"a\""), "{text}");
+        assert_eq!(fs::read_dir(&dots).unwrap().count(), 1, "temp file left");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_older_config_has_an_unmodified_last_profile() {
+        let cfg: AppConfig = toml::from_str("version = 1\nlast_profile = \"Gaming\"\n").unwrap();
+        assert_eq!(cfg.last_profile.as_deref(), Some("Gaming"));
+        assert!(!cfg.last_profile_modified);
     }
 }

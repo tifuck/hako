@@ -4,7 +4,8 @@
 use crate::Effect;
 use std::f32::consts::PI;
 
-/// One-pole smoother for control values; snaps to the first target.
+/// One-pole smoother for control values; snaps to the first target, and onto
+/// the target once close, so it never goes denormal.
 pub(crate) struct Smooth {
     value: f32,
     coef: f32,
@@ -23,7 +24,15 @@ impl Smooth {
             self.value = target;
         }
         self.value += self.coef * (target - self.value);
+        if (self.value - target).abs() < 1e-6 {
+            self.value = target;
+        }
         self.value
+    }
+
+    /// Snaps to the next target again.
+    pub(crate) fn reset(&mut self) {
+        self.value = f32::NAN;
     }
 }
 
@@ -85,6 +94,10 @@ impl Biquad {
         z[0] = flush(self.b[1] * x - self.a[0] * y + z[1]);
         z[1] = flush(self.b[2] * x - self.a[1] * y);
         y
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.z = [[0.0; 2]; 2];
     }
 }
 
@@ -158,6 +171,13 @@ impl Effect for DeEsser {
             }
         }
     }
+
+    fn reset(&mut self) {
+        self.split.reset();
+        self.detect.reset();
+        self.env = 0.0;
+        self.gain = 1.0;
+    }
 }
 
 /// Lookahead the limiter delays the signal by: its latency.
@@ -225,6 +245,17 @@ impl Effect for Limiter {
             self.pos = oldest;
         }
     }
+
+    fn reset(&mut self) {
+        self.pos = 0;
+        for delay in &mut self.delay {
+            delay.fill(0.0);
+        }
+        self.needed.fill(1.0);
+        self.released.fill(1.0);
+        self.sum = (self.n + 1) as f64;
+        self.held = 1.0;
+    }
 }
 
 /// Amplitude of the `freq` Hz component of `signal` (single-bin DFT).
@@ -261,6 +292,14 @@ mod tests {
     use super::*;
 
     const RATE: f32 = 48000.0;
+
+    #[test]
+    fn smooth_settles_on_the_target() {
+        let mut s = Smooth::new(RATE, 20.0);
+        s.next(1.0);
+        let last = (0..RATE as usize).map(|_| s.next(0.0)).last();
+        assert_eq!(last, Some(0.0));
+    }
 
     #[test]
     fn deesser_turns_down_only_loud_sibilance() {

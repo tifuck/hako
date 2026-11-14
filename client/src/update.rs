@@ -27,6 +27,15 @@ pub const WARN_ENV: &str = "HAKO_UPDATE_WARN";
 const SIGNING_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJMt1vykoBFjxuEOvgx8kwO1jhHc4NtrJ3s0TchN+Aqf hako-release";
 const SIG_NAMESPACE: &str = "hako-release";
+/// Download caps: a release publisher can't fill memory or the disk. Real
+/// sizes: API answer ~10 KB, `SHA256SUMS` and its signature < 1 KB, builds
+/// ~30 MB.
+const API_MAX: u64 = 1 << 20;
+const SUMS_MAX: u64 = 64 << 10;
+const ASSET_MAX: u64 = 256 << 20;
+/// `install-user.sh`'s exit code when the files are installed but
+/// restarting the daemon failed.
+const RESTART_FAILED: i32 = 3;
 
 /// A release that failed verification (signature or checksum): worth telling
 /// the user about, unlike a network failure.
@@ -104,11 +113,14 @@ fn deb_arch() -> &'static str {
 
 /// The latest release, if newer than this build.
 pub fn check(repo: &str) -> Result<Option<Release>> {
-    let body = run(curl()
-        .args(["-H", "Accept: application/vnd.github+json"])
-        .arg(format!(
-            "https://api.github.com/repos/{repo}/releases/latest"
-        )))
+    let body = fetch(
+        &[
+            "-H",
+            "Accept: application/vnd.github+json",
+            &format!("https://api.github.com/repos/{repo}/releases/latest"),
+        ],
+        API_MAX,
+    )
     .context("GitHub did not answer")?;
     let v: serde_json::Value = serde_json::from_slice(&body)?;
     release(&v, repo, env!("CARGO_PKG_VERSION"), deb_install())
@@ -181,15 +193,36 @@ fn download_dir() -> Result<PathBuf> {
     Ok(cache.join("hako/update"))
 }
 
-/// Download and verify `rel`, replacing any earlier download.
+/// Every hako window shares `dir`: the lock is held for a whole download or
+/// install, so one window never deletes the files another is installing.
+fn lock(dir: &Path) -> Result<std::fs::File> {
+    let path = dir.with_extension("lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            bail!("another hako window is updating; try again in a moment")
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// Download and verify `rel`, replacing any earlier download. The signed
+/// checksums come first: only a build they list is downloaded.
 pub fn download(rel: &Release) -> Result<Ready> {
     let dir = download_dir()?;
+    let _lock = lock(&dir)?;
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
-    let file = dir.join(&rel.name);
-    run(curl().arg("-o").arg(&file).arg(&rel.url)).context("download failed")?;
-    let sums = run(curl().arg(&rel.sums_url))?;
-    let signed = run(curl().arg(&rel.sig_url))
+    let sums = fetch(&[&rel.sums_url], SUMS_MAX)?;
+    let signed = fetch(&[&rel.sig_url], SUMS_MAX)
         .with_context(|| format!("v{} is not signed yet", rel.version))
         .and_then(|sig| {
             verify_signature(&dir, SIGNING_KEY, &sums, &sig)
@@ -203,10 +236,16 @@ pub fn download(rel: &Release) -> Result<Ready> {
     let Some(want) = expected_sum(&sums, &rel.name) else {
         let _ = std::fs::remove_dir_all(&dir);
         bail!(Rejected(format!(
-            "the signed checksums do not list {}, download discarded",
+            "the signed checksums do not list {}, not downloaded",
             rel.name
         )));
     };
+    let file = dir.join(&rel.name);
+    let got = run(curl(ASSET_MAX).arg("-o").arg(&file).arg(&rel.url));
+    if let Err(e) = got {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e.context("download failed"));
+    }
     let got = String::from_utf8(run(Command::new("sha256sum").arg(&file))?)?;
     if got.split_whitespace().next() != Some(want.as_str()) {
         let _ = std::fs::remove_dir_all(&dir);
@@ -220,10 +259,12 @@ pub fn download(rel: &Release) -> Result<Ready> {
 }
 
 /// Install a download, restarting the daemon. Returns a warning for the user
-/// when the device rules could not be updated. The download is kept on
+/// when the device rules could not be updated or the daemon did not restart
+/// (the update is installed either way). The download is kept on
 /// failure so the user can retry.
 pub fn install(ready: &Ready) -> Result<Option<String>> {
     let dir = ready.file.parent().context("bad download path")?;
+    let _lock = lock(dir)?;
     let res = install_file(&ready.file, &ready.sum, dir);
     if res.is_ok() {
         let _ = std::fs::remove_dir_all(dir);
@@ -270,16 +311,36 @@ fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
     )
     .context("the update has no device rules")
     .and_then(|r| update_udev(&r));
-    let warn = rules.err().map(|e| {
+    let rules = rules.err().map(|e| {
         format!(
             "New device rules were not installed ({e:#}). Run: hakod --udev-rules | sudo tee {UDEV_RULES} && sudo udevadm control --reload-rules && sudo udevadm trigger"
         )
     });
-    run(Command::new("bash")
+    let out = Command::new("bash")
         .arg(dir.join(root).join("scripts/install-user.sh"))
-        .env("HAKO_SKIP_UDEV", "1"))
-    .context("install failed")?;
-    Ok(warn)
+        .env("HAKO_SKIP_UDEV", "1")
+        .stdin(Stdio::null())
+        .output()
+        .context("cannot run bash")?;
+    let restart = script_result(&out)?;
+    let warn: Vec<String> = rules.into_iter().chain(restart).collect();
+    Ok((!warn.is_empty()).then(|| warn.join(" ")))
+}
+
+/// `install-user.sh`'s outcome: a warning when the files were installed but
+/// the daemon did not restart (the update is in place, so no error).
+fn script_result(out: &std::process::Output) -> Result<Option<String>> {
+    match out.status.code() {
+        Some(0) => Ok(None),
+        Some(RESTART_FAILED) => Ok(Some(
+            "Installed, but restarting the daemon failed: run systemctl --user restart hakod"
+                .into(),
+        )),
+        _ => bail!(
+            "install failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
 }
 
 /// The device rules live in /etc: ask through polkit, only when they changed.
@@ -308,7 +369,8 @@ pub fn restart(bin: &Path, warn: Option<String>) -> std::io::Error {
     cmd.exec()
 }
 
-fn curl() -> Command {
+/// `curl` refusing bodies over `max` bytes.
+fn curl(max: u64) -> Command {
     let mut c = Command::new("curl");
     c.args([
         "-fsSL",
@@ -318,8 +380,46 @@ fn curl() -> Command {
         "2",
         "--max-time",
         "300",
-    ]);
+        "--max-filesize",
+    ])
+    .arg(max.to_string());
     c
+}
+
+/// `curl args`'s body, at most `max` bytes of it.
+fn fetch(args: &[&str], max: u64) -> Result<Vec<u8>> {
+    read_capped(curl(max).args(args), max)
+}
+
+/// Run to completion; stdout on success, stderr as the error. More than
+/// `max` bytes of stdout is an error, never read: curl before 8.4 checks
+/// `--max-filesize` only against the size the server announces.
+fn read_capped(cmd: &mut Command, max: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("cannot run {:?}", cmd.get_program()))?;
+    let mut body = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .context("no stdout")?
+        .take(max + 1)
+        .read_to_end(&mut body);
+    if read.is_err() || body.len() as u64 > max {
+        let _ = child.kill();
+        let _ = child.wait();
+        read?;
+        bail!("more than {max} bytes");
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(body)
 }
 
 /// Run to completion; stdout on success, stderr as the error.
@@ -491,6 +591,51 @@ mod tests {
         let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         assert!(check_sum(b"abc", abc).is_ok());
         assert!(check_sum(b"abd", abc).is_err());
+    }
+
+    #[test]
+    fn downloads_stop_at_their_cap() {
+        let head = |n: &str| {
+            let mut c = Command::new("head");
+            c.args(["-c", n, "/dev/zero"]);
+            c
+        };
+        assert_eq!(read_capped(&mut head("100"), 100).unwrap().len(), 100);
+        assert!(read_capped(&mut head("101"), 100).is_err());
+        // An endless body is cut off, not read into memory.
+        assert!(read_capped(&mut Command::new("yes"), 1 << 16).is_err());
+        assert!(curl(5)
+            .get_args()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|a| a == ["--max-filesize", "5"]));
+    }
+
+    #[test]
+    fn one_window_updates_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("hako-lock-{}/update", std::process::id()));
+        let held = lock(&dir).unwrap();
+        assert!(lock(&dir).is_err());
+        drop(held);
+        assert!(lock(&dir).is_ok());
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_failed_daemon_restart_still_installs() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |code: i32| std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: b"boom\n".to_vec(),
+        };
+        assert_eq!(script_result(&out(0)).unwrap(), None);
+        assert!(script_result(&out(RESTART_FAILED))
+            .unwrap()
+            .unwrap()
+            .contains("systemctl --user restart hakod"));
+        let e = script_result(&out(1)).unwrap_err();
+        assert_eq!(format!("{e:#}"), "install failed: boom");
     }
 
     #[test]

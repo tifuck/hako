@@ -31,22 +31,28 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bind the daemon socket, owner-only. Refuses to replace a socket another
 /// daemon still answers on; a stale file from a crashed daemon is removed.
-/// The returned lock (held for the daemon's life) keeps two daemons started
-/// at the same moment from both getting past that check.
-pub fn bind(socket_path: &Path) -> Result<(UnixListener, std::fs::File)> {
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// The returned lock on `lock_path` (held for the daemon's life) keeps two
+/// daemons started at the same moment from both getting past that check, and
+/// one per user whatever socket each was given (they would kill each other's
+/// audio processes and share the devices).
+pub fn bind(socket_path: &Path, lock_path: &Path) -> Result<(UnixListener, std::fs::File)> {
+    for dir in [socket_path.parent(), lock_path.parent()]
+        .into_iter()
+        .flatten()
+    {
+        std::fs::create_dir_all(dir)?;
     }
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .mode(0o600)
-        .open(socket_path.with_extension("lock"))?;
+        .open(lock_path)?;
     // SAFETY: valid open fd; flock has no other preconditions.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
-        || std::os::unix::net::UnixStream::connect(socket_path).is_ok()
-    {
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("hakod is already running (lock {})", lock_path.display());
+    }
+    if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
         bail!("hakod is already running on {}", socket_path.display());
     }
     let _ = std::fs::remove_file(socket_path);
@@ -457,17 +463,21 @@ mod tests {
     #[tokio::test]
     async fn bind_is_owner_only_and_refuses_a_live_daemon() {
         let dir = std::env::temp_dir().join(format!("hako-test-{}", std::process::id()));
-        let sock = dir.join("d.sock");
-        let live = bind(&sock).unwrap();
+        let (sock, lock) = (dir.join("d.sock"), dir.join("d.lock"));
+        let live = bind(&sock, &lock).unwrap();
         let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert!(
-            bind(&sock).is_err(),
+            bind(&sock, &lock).is_err(),
             "second daemon must not steal the socket"
+        );
+        assert!(
+            bind(&dir.join("other.sock"), &lock).is_err(),
+            "nor run beside it on another socket"
         );
         drop(live);
         // Stale file (daemon gone) is replaced.
-        assert!(bind(&sock).is_ok());
+        assert!(bind(&sock, &lock).is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

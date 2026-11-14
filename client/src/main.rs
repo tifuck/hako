@@ -120,8 +120,11 @@ struct ClientState {
     /// `GetMixer` failed; `mixer_rev` counts changes.
     mixer: Option<Result<MixerState, String>>,
     mixer_rev: u64,
-    /// `PatchMixer` calls sent and not yet answered.
+    /// `PatchMixer` and `ApplyProfile` calls (a profile replaces the layout)
+    /// sent and not yet answered.
     mixer_pending: usize,
+    /// `ApplyProfile` calls sent and not yet answered, with the mixer after them.
+    applying: usize,
     /// Latest network state from `GetNet` / `PatchNet` / `NetUpdated`, or
     /// why `GetNet` failed; `net_rev` counts changes.
     net: Option<Result<NetState, String>>,
@@ -144,8 +147,11 @@ impl ClientState {
     /// A call for `method` is on its way.
     fn start(&mut self, method: Method) {
         self.pending += 1;
-        if method == Method::PatchMixer {
+        if matches!(method, Method::PatchMixer | Method::ApplyProfile) {
             self.mixer_pending += 1;
+        }
+        if method == Method::ApplyProfile {
+            self.applying += 1;
         }
         if method == Method::PatchNet {
             self.net_pending += 1;
@@ -155,12 +161,22 @@ impl ClientState {
     /// A call for `method` was answered, failed or dropped.
     fn finish(&mut self, method: Method) {
         self.pending -= 1;
-        if method == Method::PatchMixer {
+        if matches!(method, Method::PatchMixer | Method::ApplyProfile) {
             self.mixer_pending -= 1;
+        }
+        if method == Method::ApplyProfile {
+            self.applying -= 1;
         }
         if method == Method::PatchNet {
             self.net_pending -= 1;
         }
+    }
+
+    /// A call for `method` must not be sent now: mixer edits address sources
+    /// by index, so one made on the layout a profile is replacing would land
+    /// on the new layout.
+    fn mixer_locked(&self, method: Method) -> bool {
+        method == Method::PatchMixer && self.applying > 0
     }
 }
 
@@ -523,6 +539,13 @@ impl eframe::App for App {
                 if !read_only(*method) {
                     s.notices.push((Tone::Warn, OFFLINE_NOTICE.into()));
                 }
+                continue;
+            }
+            if s.mixer_locked(*method) {
+                s.notices.push((
+                    Tone::Warn,
+                    "A profile is being applied; the mixer change was not sent".into(),
+                ));
                 continue;
             }
             s.start(*method);
@@ -1152,6 +1175,18 @@ mod tests {
         assert_eq!(s.error.as_deref(), Some("gone"));
         assert_eq!(s.notices.len(), 1);
         assert!(s.notices[0].1.contains("2 queued"), "{:?}", s.notices);
+    }
+
+    #[test]
+    fn mixer_edits_wait_for_an_applied_profile_layout() {
+        let mut s = ClientState::default();
+        s.start(Method::ApplyProfile);
+        assert_eq!(s.mixer_pending, 1, "the mixer page holds its state");
+        assert!(s.mixer_locked(Method::PatchMixer));
+        assert!(!s.mixer_locked(Method::GetMixer));
+        s.finish(Method::ApplyProfile);
+        assert_eq!(s.mixer_pending, 0);
+        assert!(!s.mixer_locked(Method::PatchMixer));
     }
 
     #[test]

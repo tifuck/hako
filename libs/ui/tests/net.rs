@@ -47,6 +47,7 @@ fn sample() -> NetState {
                 address: "192.168.1.40:47821".into(),
                 code: "123456".into(),
                 incoming: true,
+                accepted: false,
             },
             PairRequest {
                 id: "2233445566778899".into(),
@@ -54,6 +55,7 @@ fn sample() -> NetState {
                 address: "192.168.1.30:47821".into(),
                 code: "654 321".into(),
                 incoming: false,
+                accepted: false,
             },
         ],
     }
@@ -145,6 +147,33 @@ fn accepting_an_incoming_request_sends_respond() {
 }
 
 #[test]
+fn our_accepted_request_is_confirmed_here() {
+    let mut st = sample();
+    st.requests[1].accepted = true;
+    let out = drive(app(Some(st), true), |h| {
+        h.get_by_label("Tower accepted");
+        h.get_by_label("654 321");
+        h.get_by_label("Confirm").click();
+    });
+    assert_eq!(
+        patches(&out),
+        [NetOp::Respond {
+            id: "2233445566778899".into(),
+            accept: true
+        }]
+    );
+}
+
+#[test]
+fn nearby_rows_show_the_id_from_the_key() {
+    let mut st = sample();
+    st.requests.clear();
+    drive(app(Some(st), true), |h| {
+        h.get_by_label("192.168.1.30:47821 · id 2233445566778899");
+    });
+}
+
+#[test]
 fn pairing_a_nearby_machine_names_its_key() {
     let mut st = sample();
     st.requests.clear();
@@ -204,6 +233,19 @@ fn a_new_incoming_request_toasts_once_unless_the_page_is_open() {
     }
     let toasts: Vec<&str> = a.toasts.iter().map(|t| t.text.as_str()).collect();
     assert_eq!(toasts, ["Couch wants to pair — open Network"]);
+    // Ours, once accepted there, needs this side's Confirm.
+    let mut st = sample();
+    st.requests[1].accepted = true;
+    a.net.receive(st);
+    let _ = ctx.run(Default::default(), |ctx| a.ui(ctx, &mut out));
+    let toasts: Vec<&str> = a.toasts.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(
+        toasts,
+        [
+            "Couch wants to pair — open Network",
+            "Tower accepted — confirm the code in Network"
+        ]
+    );
 
     let mut a = app(Some(sample()), true);
     let _ = ctx.run(Default::default(), |ctx| a.ui(ctx, &mut out));
