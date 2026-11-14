@@ -547,7 +547,8 @@ impl AuxEffectKind {
 
     /// This stage with `trim_db` of gain moved from before it to after it,
     /// sounding the same; `None` when it cannot (level-dependent stages
-    /// without a threshold to move, or one that would leave its range).
+    /// without a threshold to move, such as the pitch detector's silence
+    /// floor, or one that would leave its range).
     pub fn level_shifted(&self, trim_db: f32) -> Option<Self> {
         let mut kind = self.clone();
         let (threshold, min, max) = match &mut kind {
@@ -555,16 +556,17 @@ impl AuxEffectKind {
             | Self::Compressor { threshold_db, .. }
             | Self::DeEsser { threshold_db, .. } => (threshold_db, -60.0, 0.0),
             Self::Limiter { ceiling_db, .. } => (ceiling_db, -24.0, 0.0),
-            Self::Equalizer { .. }
-            | Self::PitchShift { .. }
-            | Self::Vocoder { .. }
+            Self::Vocoder { follow: 0, .. }
+            | Self::Equalizer { .. }
             | Self::Robot { .. }
             | Self::Reverb { .. }
             | Self::Delay { .. }
             | Self::Chorus { .. }
             | Self::Flanger { .. } => return Some(kind),
             Self::NoiseSuppression { .. }
+            | Self::PitchShift { .. }
             | Self::AutoTune { .. }
+            | Self::Vocoder { .. }
             | Self::Distortion { .. }
             | Self::Bitcrusher { .. } => return None,
         };
@@ -669,5 +671,16 @@ mod tests {
         assert_eq!(reverb.level_shifted(6.0).as_ref(), Some(&reverb));
         let denoise = AuxEffectKind::all().remove(0);
         assert_eq!(denoise.level_shifted(1.0), None);
+        // The pitch detector goes silent below a fixed level.
+        let find =
+            |pick: fn(&AuxEffectKind) -> bool| AuxEffectKind::all().into_iter().find(pick).unwrap();
+        let pitch = find(|k| matches!(k, AuxEffectKind::PitchShift { .. }));
+        assert_eq!(pitch.level_shifted(6.0), None);
+        let mut vocoder = find(|k| matches!(k, AuxEffectKind::Vocoder { .. }));
+        assert_eq!(vocoder.level_shifted(6.0).as_ref(), Some(&vocoder));
+        if let AuxEffectKind::Vocoder { follow, .. } = &mut vocoder {
+            *follow = 1;
+        }
+        assert_eq!(vocoder.level_shifted(6.0), None);
     }
 }

@@ -1605,6 +1605,14 @@ fn resolve_node_id(exact_name: &str) -> Result<u32> {
         .ok_or_else(|| anyhow!("node id not found for {exact_name}"))
 }
 
+/// A buffer's valid bytes: its chunk's `offset .. offset + size`, clamped
+/// to the mapped data.
+pub(crate) fn chunk_bytes(bytes: &[u8], offset: u32, size: u32) -> &[u8] {
+    let offset = (offset as usize).min(bytes.len());
+    let size = (size as usize).min(bytes.len() - offset);
+    &bytes[offset..offset + size]
+}
+
 /// The ALSA card number behind a PipeWire node, from its props.
 fn alsa_card(props: &HashMap<String, String>) -> Option<String> {
     ["api.alsa.card", "alsa.card"]
@@ -1636,7 +1644,7 @@ fn valid_card(card: &str) -> Result<()> {
 }
 
 /// What a card offers its capture devices: the "Input Source" items (empty
-/// when it has none) and whether it has a "Capture" level.
+/// when it has none) and whether it has a "Capture" level (not just a switch).
 fn card_capture_controls(card: &str) -> Result<(Vec<String>, bool)> {
     let controls = amixer(card, &["scontrols"])?;
     let items = if has_control(&controls, "Input Source") {
@@ -1644,7 +1652,20 @@ fn card_capture_controls(card: &str) -> Result<(Vec<String>, bool)> {
     } else {
         Vec::new()
     };
-    Ok((items, has_control(&controls, "Capture")))
+    let level =
+        has_control(&controls, "Capture") && has_volume(&amixer(card, &["sget", "Capture"])?);
+    Ok((items, level))
+}
+
+/// An `amixer sget` control whose `Capabilities:` include a volume
+/// (`cvolume`, or `volume` shared by playback and capture).
+fn has_volume(sget: &str) -> bool {
+    sget.lines()
+        .find_map(|line| line.trim().strip_prefix("Capabilities:"))
+        .is_some_and(|caps| {
+            caps.split_whitespace()
+                .any(|cap| cap == "cvolume" || cap == "volume")
+        })
 }
 
 /// `amixer scontrols` lists `Simple mixer control 'NAME',INDEX`.
@@ -2279,6 +2300,10 @@ mod tests {
     const CAPTURE: &str = "Simple mixer control 'Capture',0\n  Capabilities: cvolume cswitch\n  Capture channels: Front Left - Front Right\n  Limits: Capture 0 - 63\n  Front Left: Capture 30 [48%] [5.25dB] [on]\n  Front Right: Capture 30 [48%] [5.25dB] [on]\n";
     /// A USB headset: no input selection, no capture level.
     const USB_SCONTROLS: &str = "Simple mixer control 'PCM',0\nSimple mixer control 'Mic',0\n";
+    /// A card whose "Capture" is only an on/off switch.
+    const SWITCH_SCONTROLS: &str =
+        "Simple mixer control 'Mic',0\nSimple mixer control 'Capture',0\n";
+    const SWITCH_CAPTURE: &str = "Simple mixer control 'Capture',0\n  Capabilities: cswitch cswitch-joined\n  Capture channels: Mono\n  Mono: Capture [on]\n";
 
     thread_local! {
         /// `amixer` calls of this test thread: `card args...`.
@@ -2296,8 +2321,10 @@ mod tests {
         match (card, args) {
             ("7", ["scontrols"]) => Ok(SCONTROLS.into()),
             ("7", ["sget", "Input Source"]) => Ok(INPUT_SOURCE.into()),
-            ("6", ["sget", "Capture"]) => Ok(CAPTURE.into()),
+            ("6" | "7", ["sget", "Capture"]) => Ok(CAPTURE.into()),
             ("8", ["scontrols"]) => Ok(USB_SCONTROLS.into()),
+            ("4", ["scontrols"]) => Ok(SWITCH_SCONTROLS.into()),
+            ("4", ["sget", "Capture"]) => Ok(SWITCH_CAPTURE.into()),
             (_, ["sset", ..]) => Ok(String::new()),
             _ => bail!("amixer: no such card {card}"),
         }
@@ -2332,6 +2359,15 @@ mod tests {
     }
 
     #[test]
+    fn chunk_bytes_honours_the_offset_within_the_data() {
+        let data = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        assert_eq!(chunk_bytes(&data, 2, 4), [2, 3, 4, 5]);
+        assert_eq!(chunk_bytes(&data, 6, 4), [6, 7], "size clamped");
+        assert!(chunk_bytes(&data, 9, 4).is_empty(), "offset past the end");
+        assert!(chunk_bytes(&data, u32::MAX, u32::MAX).is_empty());
+    }
+
+    #[test]
     fn amixer_output_gives_input_sources_and_capture() {
         assert!(has_control(SCONTROLS, "Input Source"));
         assert!(has_control(SCONTROLS, "Capture"));
@@ -2349,6 +2385,10 @@ mod tests {
             )
         );
         assert_eq!(card_capture_controls("8").unwrap(), (Vec::new(), false));
+        assert_eq!(card_capture_controls("4").unwrap(), (Vec::new(), false));
+        assert!(has_volume(CAPTURE));
+        assert!(has_volume("  Capabilities: volume volume-joined switch\n"));
+        assert!(!has_volume(SWITCH_CAPTURE));
         amixer_calls();
         // Card ids are numbers, nothing else reaches amixer.
         for bad in ["", "hw:2", "-1", "2 3", "1234"] {

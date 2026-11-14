@@ -492,10 +492,17 @@ fn check_sum(data: &[u8], want: &str) -> Result<()> {
     Ok(())
 }
 
-/// `(dotted numbers, is a release)` of `1.2.3` or `1.2.3-rc1`. Only ASCII
-/// letters, digits, `.` and `-` pass (no `..`), so a version is safe inside
-/// a file name.
-fn parse_version(s: &str) -> Option<(Vec<u64>, bool)> {
+/// A pre-release identifier; numeric ones sort numerically and first, as in semver.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum PreId {
+    Num(u64),
+    Text(String),
+}
+
+/// `(dotted numbers, pre-release identifiers)` of `1.2.3` or `1.2.3-rc.1`.
+/// Only ASCII letters, digits, `.` and `-` pass (no `..`), so a version is
+/// safe inside a file name.
+fn parse_version(s: &str) -> Option<(Vec<u64>, Option<Vec<PreId>>)> {
     if s.contains("..")
         || !s
             .bytes()
@@ -503,18 +510,38 @@ fn parse_version(s: &str) -> Option<(Vec<u64>, bool)> {
     {
         return None;
     }
-    let (nums, pre) = s.split_once('-').map_or((s, false), |(n, _)| (n, true));
+    let (nums, pre) = s.split_once('-').map_or((s, None), |(n, p)| (n, Some(p)));
     let nums = nums
         .split('.')
         .map(|p| p.parse().ok())
         .collect::<Option<_>>()?;
-    Some((nums, !pre))
+    let pre = match pre {
+        None => None,
+        Some(p) => Some(
+            p.split('.')
+                .map(|id| match id.parse() {
+                    Ok(n) => Some(PreId::Num(n)),
+                    Err(_) => (!id.is_empty()).then(|| PreId::Text(id.into())),
+                })
+                .collect::<Option<_>>()?,
+        ),
+    };
+    Some((nums, pre))
 }
 
-/// `remote` > `local`, comparing dotted numbers; on a tie a release beats a
-/// pre-release (`0.4.0` > `0.4.0-rc1`), as in semver.
+/// `remote` > `local` in semver order: dotted numbers (missing ones are 0),
+/// then a release beats its pre-releases (`0.4.0` > `0.4.0-rc1`), then
+/// pre-releases compare identifier by identifier (`0.4.0-rc2` > `0.4.0-rc1`).
 fn newer(remote: &str, local: &str) -> bool {
-    matches!((parse_version(remote), parse_version(local)), (Some(r), Some(l)) if r > l)
+    let (Some((mut r, r_pre)), Some((mut l, l_pre))) =
+        (parse_version(remote), parse_version(local))
+    else {
+        return false;
+    };
+    let n = r.len().max(l.len());
+    r.resize(n, 0);
+    l.resize(n, 0);
+    (r, r_pre.is_none(), r_pre) > (l, l_pre.is_none(), l_pre)
 }
 
 /// Hash for `name` from `sha256sum` output (`<hash>  <name>` or `<hash> *<name>`).
@@ -540,6 +567,16 @@ mod tests {
         assert!(newer("0.4.0", "0.4.0-rc1"));
         assert!(!newer("0.4.0-rc1", "0.4.0"));
         assert!(newer("0.4.1-rc1", "0.4.0"));
+        // Missing parts are zeros; pre-releases are ordered among themselves.
+        assert!(!newer("0.4.0", "0.4"));
+        assert!(!newer("0.4", "0.4.0"));
+        assert!(newer("0.4.1", "0.4"));
+        assert!(newer("0.4.0-rc2", "0.4.0-rc1"));
+        assert!(!newer("0.4.0-rc1", "0.4.0-rc2"));
+        assert!(newer("0.4.0-rc.10", "0.4.0-rc.9"));
+        assert!(newer("0.4.0-rc.1", "0.4.0-rc"));
+        assert!(newer("0.4.0-rc", "0.4.0-1"));
+        assert!(!newer("0.4.0-", "0.3.0"));
     }
 
     #[test]

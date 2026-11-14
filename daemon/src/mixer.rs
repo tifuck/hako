@@ -243,8 +243,9 @@ impl MixerService {
     /// wait for the graph to follow. On / off stays as it is: an off mixer
     /// keeps the layout for when it is turned on. Blocking.
     pub fn set_live(&self, mut live: Scene) -> Result<MixerState, PatchError> {
-        live.normalize();
+        // Checked as given: normalising would hide a bad trim or gain.
         live.validate().map_err(PatchError::Invalid)?;
+        live.normalize();
         self.edit(false, |file| {
             file.live = live.clone();
             Ok(())
@@ -1043,6 +1044,38 @@ mod tests {
         bad.outputs[0].id = "X9".into();
         assert!(matches!(mixer.set_live(bad), Err(PatchError::Invalid(_))));
         assert_eq!(mixer.state().unwrap().file.live.outputs[0].gain_db, -9.0);
+
+        // A lone source's trim out of range is refused, not folded away.
+        let lone = |trim_db, gain_db| {
+            let mut scene = layout.clone();
+            scene.inputs.push(hako_core::mixer::Input {
+                id: "mic".into(),
+                label: "Mic".into(),
+                kind: InputKind::Hardware {
+                    sources: vec![Source {
+                        node: "alsa_input.usb-mic".into(),
+                        description: String::new(),
+                        trim_db,
+                        mute: false,
+                        alsa_input: None,
+                        capture_percent: None,
+                    }],
+                },
+                chain: Default::default(),
+                gain_db,
+                mute: false,
+                solo: false,
+                routes: Vec::new(),
+                chatmix: None,
+            });
+            scene
+        };
+        assert!(matches!(
+            mixer.set_live(lone(30.0, -40.0)),
+            Err(PatchError::Invalid(_))
+        ));
+        let state = mixer.set_live(lone(4.0, -10.0)).unwrap();
+        assert_eq!(state.file.live, lone(0.0, -6.0), "valid: normalised");
 
         let state = mixer.set_live(layout.clone()).unwrap();
         assert_eq!(state.file.live, layout);

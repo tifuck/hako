@@ -43,9 +43,11 @@ pub(super) fn v1_packets(look: &Look) -> Vec<Report> {
     match look.effect {
         Effect::Breathing => v1_effect(0x01, V1_BREATHE[look.speed], 0x00, rgb),
         Effect::Wave => {
+            // libcmmk `cmmk_wave_direction`, named by where the wave goes
+            // (OpenRGB sends left/right the other way round).
             let dir = match look.dir {
-                Dir::Left => 0x00,
-                Dir::Right => 0x04,
+                Dir::Left => 0x04,
+                Dir::Right => 0x00,
                 Dir::Up => 0x06,
                 Dir::Down => 0x02,
             };
@@ -222,6 +224,9 @@ mod tests {
         l.speed = 2;
         let p = v1_packets(&l);
         assert_eq!(p[2][5..9], [0x04, 0x2a, 0x06, 0xff]);
+        // Right to left, as on the V2 boards.
+        l.dir = Dir::Left;
+        assert_eq!(v1_packets(&l)[2][7], 0x04);
     }
 
     #[test]

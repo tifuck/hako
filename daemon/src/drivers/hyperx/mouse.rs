@@ -248,20 +248,26 @@ fn link_dpi(s: &mut SettingsMap, key: SettingKey) {
 }
 
 /// Set `key` in the saved (`user`) and shown (`settings`) values. Chosen
-/// stages imply the DPI: a stale saved one would land in the active stage on
-/// the next re-apply, so it goes; the shown one follows [`link_dpi`].
+/// stages imply the DPI: a stale one (saved or shown, which the re-apply
+/// writes) would land in the active stage, so it goes; the shown one is
+/// refilled from the active stage when its DPI is known.
 fn record(
     user: &mut SettingsMap,
     settings: &mut SettingsMap,
     key: SettingKey,
     value: &SettingValue,
 ) {
-    if key == SettingKey::DpiStageActive || STAGES.contains(&key) {
+    let stages = key == SettingKey::DpiStageActive || STAGES.contains(&key);
+    if stages {
         user.remove(SettingKey::Dpi.as_str());
+        settings.remove(SettingKey::Dpi.as_str());
     }
-    for s in [user, settings] {
+    for s in [&mut *user, &mut *settings] {
         merge_setting(s, key, value.clone());
         link_dpi(s, key);
+    }
+    if stages {
+        link_dpi(settings, SettingKey::DpiStageActive);
     }
 }
 
@@ -1262,6 +1268,29 @@ mod tests {
         assert_eq!(get_setting(&user, SettingKey::Dpi), None);
         record(&mut user, &mut shown, SettingKey::DpiStage3, &int(800));
         assert_eq!(get_setting(&shown, SettingKey::Dpi), Some(&int(800)));
+    }
+
+    #[test]
+    fn stage_pick_before_the_table_read_keeps_the_stage_dpi() {
+        // Saved DPI 800, mouse asleep at start (no table read), stage 4 picked.
+        let int = SettingValue::Int;
+        let mut user = SettingsMap::new();
+        merge_setting(&mut user, SettingKey::Dpi, int(800));
+        let mut shown = user.clone();
+        record(&mut user, &mut shown, SettingKey::DpiStageActive, &int(4));
+        assert_eq!(get_setting(&shown, SettingKey::Dpi), None);
+        // The wake-up re-apply, as `apply_key` builds it from `settings`.
+        let get = |k| get_setting(&shown, k).and_then(|v| v.as_int());
+        let edit = TableEdit {
+            stages: STAGES.map(get),
+            active: get(SettingKey::DpiStageActive).and_then(|n| u8::try_from(n - 1).ok()),
+            dpi: get(SettingKey::Dpi),
+            hz: get(SettingKey::ReportRate),
+        };
+        let w = dpi_write(&pad(&TABLE, 64), &edit).unwrap();
+        assert_eq!(w[6], 3);
+        // Stage 4 keeps 3200 DPI (code 63).
+        assert_eq!(w[7..32], TABLE[5..30]);
     }
 
     #[test]

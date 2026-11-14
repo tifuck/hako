@@ -245,7 +245,7 @@ pub enum Control {
     Denied,
     /// Too many pairing requests wait: try again later.
     Busy,
-    /// `t`: sender's clock (ms), echoed by `Pong` for the round trip.
+    /// `t`: sender's clock (µs), echoed by `Pong` for the round trip.
     Ping {
         t: u64,
     },
@@ -457,13 +457,23 @@ fn is_format(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
             | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
             | '\u{180E}'
             | '\u{200B}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{206F}'
             | '\u{FEFF}'
             | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
             | '\u{E0000}'..='\u{E007F}'
     )
 }
@@ -770,6 +780,10 @@ pub(super) mod tests {
             "moc.abd"
         );
         assert_eq!(clean_name("\u{200B} \u{00AD}", "x"), "x");
+        assert_eq!(
+            clean_name("\u{0600}De\u{110BD}s\u{1BCA0}k\u{1D173}\u{13430}", "x"),
+            "Desk"
+        );
         let long = format!(" {}", "n".repeat(40));
         assert_eq!(clean_name(&long, "x"), "n".repeat(MAX_NAME));
     }

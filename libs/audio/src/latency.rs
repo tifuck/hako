@@ -450,14 +450,16 @@ fn capture(
             let Some(data) = buffer.datas_mut().first_mut() else {
                 return;
             };
-            let size = data.chunk().size() as usize;
+            let (offset, size) = (data.chunk().offset(), data.chunk().size());
             let Some(bytes) = data.data() else {
                 return;
             };
             if !go.load(Ordering::Relaxed) {
                 return;
             }
-            let frames = bytes[..size.min(bytes.len())].as_chunks::<STRIDE>().0;
+            let frames = crate::chunk_bytes(bytes, offset, size)
+                .as_chunks::<STRIDE>()
+                .0;
             // Uncontended: the main thread reads it once the run is over.
             let mut rec = recording.lock().unwrap_or_else(PoisonError::into_inner);
             if !frames.is_empty() {

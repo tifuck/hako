@@ -42,16 +42,24 @@ impl Draft {
         }
     }
 
-    fn binding(&self, source: EvdevKey) -> Option<RemapBinding> {
-        let b = RemapBinding {
+    fn unchecked(&self, source: EvdevKey) -> Option<RemapBinding> {
+        Some(RemapBinding {
             source,
             target: self.target,
             mode: self.mode?,
             interval_ms: self.interval_ms,
             steps: self.steps.clone(),
             repeat: self.repeat,
-        };
-        b.validate().ok().map(|_| b)
+        })
+    }
+
+    fn binding(&self, source: EvdevKey) -> Option<RemapBinding> {
+        self.unchecked(source).filter(|b| b.validate().is_ok())
+    }
+
+    /// Why the daemon would refuse this draft, if it would.
+    pub fn error(&self, source: EvdevKey) -> Option<String> {
+        self.unchecked(source)?.validate().err()
     }
 
     /// The saved binding is already this macro (nothing new to save).
@@ -103,12 +111,15 @@ pub(super) fn append_key(ctx: &egui::Context, cx: &Cx, source: EvdevKey, key: Ev
     store(ctx, cx, source, draft);
 }
 
-pub(super) fn apply(cx: &mut Cx, draft: &mut Draft, source: EvdevKey) {
+/// Sends the draft if it is a valid binding; returns whether it did.
+pub(super) fn apply(cx: &mut Cx, draft: &mut Draft, source: EvdevKey) -> bool {
     if let Some(binding) = draft.binding(source) {
         draft.pending = false;
         cx.set(binding);
+        true
     } else {
         draft.pending = true;
+        false
     }
 }
 

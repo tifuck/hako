@@ -894,10 +894,16 @@ impl Strip {
         let _ = std::fs::remove_file(&self.conf);
     }
 
+    /// Stop it and schedule a restart: at once after a crash of a stable
+    /// strip, else with a backoff growing per failure in a row.
     fn fail(&mut self, error: String, unreaped: &mut Vec<Child>) {
+        let stable = self.up() && self.started.elapsed() >= STABLE;
         self.stop(unreaped);
-        self.failures += 1;
-        let wait = Duration::from_secs(1 << (self.failures - 1).min(5)).min(MAX_RETRY);
+        self.failures = if stable { 0 } else { self.failures + 1 };
+        let wait = match self.failures {
+            0 => Duration::ZERO,
+            n => Duration::from_secs(1 << (n - 1).min(5)).min(MAX_RETRY),
+        };
         self.retry_at = Instant::now() + wait;
         warn!(
             "mixer strip {}: {error}; retrying in {wait:?}",
@@ -1206,19 +1212,17 @@ impl MixerGraph {
                 return;
             }
         };
-        let now = Instant::now();
         for strip in self.strips.values_mut() {
             let exited = strip
                 .child
                 .as_mut()
                 .is_some_and(|child| !matches!(child.try_wait(), Ok(None)));
             if exited {
-                if strip.started.elapsed() >= STABLE {
-                    strip.failures = 0;
-                }
                 strip.fail("stopped unexpectedly".into(), &mut self.unreaped);
             }
         }
+        // After the crashes: a stable strip's restart is due now.
+        let now = Instant::now();
 
         let running = self
             .strips
@@ -2184,6 +2188,33 @@ mod tests {
         graph.moved.insert(1, moved);
         assert!(!graph.is_empty());
         graph.moved.clear();
+    }
+
+    #[test]
+    fn a_crash_after_a_stable_run_restarts_at_once() {
+        let crashed = |up_for: Duration, failures| {
+            let mut child = Command::new("true").spawn().unwrap();
+            child.wait().unwrap();
+            let mut strip = Strip {
+                def: def(&scene(), Side::Input, "game"),
+                child: Some(child),
+                conf: std::env::temp_dir()
+                    .join(format!("hako-test-crash-{}.conf", std::process::id())),
+                fader: None,
+                started: Instant::now() - up_for,
+                failures,
+                retry_at: Instant::now(),
+                error: None,
+            };
+            strip.fail("stopped unexpectedly".into(), &mut Vec::new());
+            strip
+        };
+        let stable = crashed(STABLE + Duration::from_secs(1), 3);
+        assert_eq!(stable.failures, 0);
+        assert!(stable.retry_at <= Instant::now());
+        let young = crashed(Duration::from_secs(1), 3);
+        assert_eq!(young.failures, 4);
+        assert!(young.retry_at >= Instant::now() + Duration::from_secs(7));
     }
 
     #[test]

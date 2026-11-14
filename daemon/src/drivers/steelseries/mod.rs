@@ -22,9 +22,9 @@
 //! `set` while the owner-enabled "Save changes to device memory" toggle is on,
 //! and only where `docs/onboard-writes/steelseries.md` rates it HIGH; other
 //! models list it blocked. Keyboard onboard-profile writes and the Apex Pro
-//! flash save are never sent. Exception: `nova_pro` (hardware-verified) has
-//! always followed each setter with `06 09`, which both sources call the save
-//! command; it is left byte-identical pending the owner's decision.
+//! flash save are never sent. `nova_pro` follows the same rule: its `06 09`
+//! (the save command in both sources) comes after a setter only in save mode,
+//! and never for the `225d`.
 
 mod headset;
 mod keyboard;

@@ -256,12 +256,23 @@ fn parse_version(reply: &[u8]) -> Option<(u32, u32, u32)> {
         })
 }
 
-const LIGHT_KEYS: [SettingKey; 4] = [
-    SettingKey::Brightness,
-    SettingKey::ColorR,
-    SettingKey::ColorG,
-    SettingKey::ColorB,
+/// Lighting keys and the values unset ones get (Razer's and Corsair's default
+/// colour): every lighting write sends the colour.
+const LIGHT_DEFAULTS: [(SettingKey, i64); 4] = [
+    (SettingKey::Brightness, 100),
+    (SettingKey::ColorR, 0),
+    (SettingKey::ColorG, 120),
+    (SettingKey::ColorB, 255),
 ];
+
+/// Fill unset lighting keys in `s` from [`LIGHT_DEFAULTS`].
+fn light_defaults(s: &mut SettingsMap) {
+    for (k, v) in LIGHT_DEFAULTS {
+        if get_setting(s, k).is_none() {
+            merge_setting(s, k, SettingValue::Int(v));
+        }
+    }
+}
 
 /// Why the model's flash save is not offered, if it has a known one.
 pub(super) fn save_blocked(spec: &KeyboardSpec) -> Option<&'static str> {
@@ -390,11 +401,15 @@ impl KeyboardAdapter {
             paths,
         };
         // Leave onboard lighting and actuation alone until the user sets them.
-        let s = a.settings.clone();
         let mut restore = Vec::new();
-        if LIGHT_KEYS.iter().any(|&k| get_setting(&s, k).is_some()) {
+        if LIGHT_DEFAULTS
+            .iter()
+            .any(|&(k, _)| get_setting(&a.settings, k).is_some())
+        {
+            light_defaults(&mut a.settings);
             restore.push(SettingKey::Brightness);
         }
+        let s = a.settings.clone();
         for key in [SettingKey::ActuationPoint, SettingKey::RapidTap] {
             if a.actuation.is_some() && get_setting(&s, key).is_some() {
                 restore.push(key);
@@ -495,6 +510,9 @@ impl DeviceAdapter for KeyboardAdapter {
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
         let mut proposed = self.settings.clone();
         merge_setting(&mut proposed, key, value);
+        if LIGHT_DEFAULTS.iter().any(|&(k, _)| k == key) {
+            light_defaults(&mut proposed);
+        }
         if let Err(e) = self.apply(&proposed, key) {
             // Actuation (3 reports), rapid tap (2) and zone lighting (2) may
             // stop midway: send the old value back when there is one.
@@ -644,6 +662,20 @@ mod tests {
         assert_eq!(save.key, SettingKey::SaveToDevice);
         assert!(save.persistent && save.blocked.is_some());
         assert!(save.validate(&SettingValue::Bool(true)).is_err());
+    }
+
+    #[test]
+    fn brightness_alone_keeps_a_colour() {
+        let mut s = SettingsMap::new();
+        merge_setting(&mut s, SettingKey::Brightness, SettingValue::Int(40));
+        merge_setting(&mut s, SettingKey::ColorB, SettingValue::Int(7));
+        light_defaults(&mut s);
+        let get = |k| int(&s, k);
+        assert_eq!(get(SettingKey::Brightness), Some(40));
+        assert_eq!(
+            [SettingKey::ColorR, SettingKey::ColorG, SettingKey::ColorB].map(get),
+            [Some(0), Some(120), Some(7)]
+        );
     }
 
     #[test]

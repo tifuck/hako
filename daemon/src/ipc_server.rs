@@ -11,6 +11,7 @@ use hako_core::ipc::{
     SubscribeMetersParams, MAX_METER_TARGETS,
 };
 use hako_core::protocol::AdapterEvent;
+use hako_core::remap::CancelCaptureParams;
 use hako_core::{read_json_frame, write_json_frame};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -94,23 +95,23 @@ pub async fn serve(listener: UnixListener, hub: Arc<DaemonHub>) -> Result<()> {
 }
 
 async fn handle_client(mut stream: UnixStream, hub: Arc<DaemonHub>) -> Result<()> {
-    let mut capture = None;
-    let result = serve_requests(&mut stream, &hub, &mut capture).await;
+    let mut captures = Vec::new();
+    let result = serve_requests(&mut stream, &hub, &mut captures).await;
     // Listening must not outlive the client that asked for it (UI closed or
     // crashed mid-capture): input would stay ungrabbed and, for a recording,
     // every keyboard would keep being read.
-    if let Some(device) = capture {
-        hub.end_capture(device);
+    for capture in captures {
+        hub.end_capture(capture);
     }
     result
 }
 
-/// Request loop of one connection. `capture` tracks the device and session
-/// of the last capture this connection started.
+/// Request loop of one connection. `captures` tracks the device and session
+/// of the latest capture this connection started on each device.
 async fn serve_requests(
     stream: &mut UnixStream,
     hub: &DaemonHub,
-    capture: &mut Option<(DeviceId, u64)>,
+    captures: &mut Vec<(DeviceId, u64)>,
 ) -> Result<()> {
     loop {
         let v = match read_json_frame(stream).await {
@@ -192,15 +193,17 @@ async fn serve_requests(
         let resp = match req.method {
             Method::StartCapture => {
                 let (resp, started) = hub.start_capture(req);
-                if started.is_some() {
-                    *capture = started;
+                if let Some((device, session)) = started {
+                    captures.retain(|(d, _)| *d != device);
+                    captures.push((device, session));
                 }
                 resp
             }
             Method::CancelCapture => {
+                let params = req.params.clone();
                 let resp = hub.handle(req).await;
                 if resp.ok {
-                    *capture = None;
+                    forget_cancelled(captures, params);
                 }
                 resp
             }
@@ -209,6 +212,14 @@ async fn serve_requests(
         write_json_frame(stream, &resp).await?;
     }
     Ok(())
+}
+
+/// Stop tracking the capture of the device a successful `CancelCapture`
+/// with these params named (others keep running).
+fn forget_cancelled(captures: &mut Vec<(DeviceId, u64)>, params: serde_json::Value) {
+    if let Ok(p) = serde_json::from_value::<CancelCaptureParams>(params) {
+        captures.retain(|(device, _)| *device != p.device_id);
+    }
 }
 
 /// Meter frames until the client leaves (a failed write). Its streams go
@@ -360,6 +371,23 @@ mod tests {
             pushed += 1;
             assert!(pushed < 64, "the socket never filled up");
         }
+    }
+
+    #[test]
+    fn cancelling_another_devices_capture_keeps_ours_tracked() {
+        let id = |product_id| DeviceId {
+            vendor_id: 0x1234,
+            product_id,
+            instance: "x".into(),
+        };
+        let params = |product_id| serde_json::json!({ "device_id": id(product_id) });
+        // Captures on two devices; each is forgotten only by its own cancel.
+        let mut ours = vec![(id(1), 7), (id(2), 8)];
+        forget_cancelled(&mut ours, params(3));
+        forget_cancelled(&mut ours, serde_json::json!({}));
+        assert_eq!(ours.len(), 2);
+        forget_cancelled(&mut ours, params(1));
+        assert_eq!(ours, [(id(2), 8)]);
     }
 
     #[test]

@@ -1655,7 +1655,11 @@ impl Mapper {
                     break;
                 }
                 r.pos = 0;
-                r.next = now + r.gap + ms(r.steps[0].delay_ms);
+                // From the due time, so wake-up lateness doesn't slow the
+                // loop; after a stall longer than the gap, restart from now
+                // instead of bursting through the missed passes.
+                let due = r.next + r.gap;
+                r.next = if due >= now { due } else { now + r.gap } + ms(r.steps[0].delay_ms);
             }
         }
         for id in done {
@@ -1894,6 +1898,29 @@ mod tests {
         m.key(0, &b, 0, at(t0, 25));
         assert_eq!(keys(&mut m), vec![(30, 1), (30, 0), (30, 1), (30, 0)]);
         assert_eq!(m.next_deadline(), None);
+    }
+
+    #[test]
+    fn turbo_keeps_its_period_when_woken_late() {
+        let b = RemapBinding {
+            mode: RemapMode::Turbo,
+            interval_ms: 10,
+            ..RemapBinding::tap(EvdevKey::BTN_SIDE, A)
+        };
+        let late = Duration::from_micros(500);
+        let t0 = Instant::now();
+        let mut m = Mapper::default();
+        m.key(0, &b, 1, t0);
+        for k in 0..10 {
+            m.tick(at(t0, k * 10 + 5) + late);
+            assert_eq!(m.next_deadline(), Some(at(t0, (k + 1) * 10)));
+            m.tick(at(t0, (k + 1) * 10) + late);
+        }
+        assert_eq!(keys(&mut m).len(), 21);
+        // A stall restarts the loop instead of replaying the missed pulses.
+        m.tick(at(t0, 300));
+        assert_eq!(keys(&mut m), vec![(30, 0)]);
+        assert_eq!(m.next_deadline(), Some(at(t0, 305)));
     }
 
     #[test]

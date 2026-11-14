@@ -21,7 +21,7 @@ use pw::spa;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -47,8 +47,11 @@ const MAX_GAP: usize = 20 * FRAMES_PER_MS;
 /// Audio further behind the buffer than this: the peer started counting
 /// again, so restart instead of dropping it forever.
 const MAX_BEHIND: u64 = NET_RATE as u64;
-/// The largest target, its overflow allowance, a 21 ms quantum and a packet.
-const CAPACITY: usize = (2 * JITTER_MAX_MS as usize + 50) * FRAMES_PER_MS;
+/// The most one cycle of the sender delivers at once: PipeWire's default
+/// `clock.max-quantum` (43 ms), part of the overflow allowance.
+const MAX_BURST: usize = 2048;
+/// The largest target, its overflow allowance, a 43 ms pull and a packet.
+const CAPACITY: usize = (2 * JITTER_MAX_MS as usize + 50) * FRAMES_PER_MS + MAX_BURST;
 /// How often a lost PipeWire connection or a failed stream is retried.
 const RETRY: Duration = Duration::from_secs(1);
 /// How often the drift controller runs.
@@ -71,7 +74,8 @@ const LOCK_SPINS: usize = 200;
 /// One port's live numbers (`hako_core::net::LinkStats` takes these).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PortStats {
-    /// Audio waiting in the receive buffer.
+    /// Audio waiting in the receive buffer: the least left after a pull
+    /// over the last 250 ms (what the jitter target sets).
     pub buffered_ms: f32,
     /// Times the receive buffer ran dry while audio was arriving.
     /// ponytail: a pause of up to 20 ms that runs it dry counts too (packets
@@ -84,7 +88,7 @@ pub struct PortStats {
 }
 
 /// The receive buffer: blocks at peer frame positions in, a steady stream
-/// out. `target` is what stays buffered after each pull.
+/// out. `goal()` is what stays buffered after each pull.
 struct Jitter {
     ring: Box<[[i16; 2]]>,
     start: usize,
@@ -125,12 +129,13 @@ impl Jitter {
         if target == self.target {
             return;
         }
-        if self.len > target + self.pulled {
-            self.skip(self.len - target - self.pulled);
-        } else if target > self.target {
+        let old = self.goal();
+        self.target = target;
+        if self.len > self.goal() + self.pulled {
+            self.skip(self.len - self.goal() - self.pulled);
+        } else if self.goal() > old {
             self.playing = false;
         }
-        self.target = target;
     }
 
     fn push(&mut self, pos: u64, samples: &[i16]) {
@@ -153,7 +158,7 @@ impl Jitter {
                 }
                 let mut fill = gap.saturating_sub(std::mem::take(&mut self.starved_for));
                 if gap > MAX_GAP {
-                    fill = fill.min((self.target + self.pulled).saturating_sub(self.len));
+                    fill = fill.min((self.goal() + self.pulled).saturating_sub(self.len));
                 }
                 for _ in 0..fill {
                     self.put([0; 2]);
@@ -170,16 +175,23 @@ impl Jitter {
             self.put(*frame);
         }
         self.end = Some(new_end);
-        if self.len > self.target + self.pulled + self.target.max(MAX_GAP) {
-            self.skip(self.len - self.target - self.pulled);
+        let goal = self.goal();
+        if self.len > goal + self.pulled + goal.max(MAX_GAP) + MAX_BURST {
+            self.skip(self.len - goal - self.pulled);
         }
     }
 
-    /// Fill `out` (S16LE stereo); silence until target + `out` is buffered.
+    /// The target, but at least a pull: two quanta that tick in step see
+    /// one phase only, and when they slip one pull finds a burst less.
+    fn goal(&self) -> usize {
+        self.target.max(self.pulled)
+    }
+
+    /// Fill `out` (S16LE stereo); silence until `goal()` + `out` is buffered.
     fn pull(&mut self, out: &mut [u8]) {
         let frames = out.as_chunks_mut::<STRIDE>().0;
         self.pulled = frames.len();
-        if !self.playing && self.len >= self.target + frames.len() {
+        if !self.playing && self.len >= self.goal() + frames.len() {
             self.playing = true;
         }
         for frame in frames {
@@ -253,11 +265,14 @@ struct Drift {
 }
 
 impl Drift {
-    /// `error` = average fill minus target, in seconds. The resampler takes
-    /// `NET_RATE / ratio` frames a second from the buffer, so a ratio below
-    /// 1 drains it (checked by the live test).
-    fn update(&mut self, error: f64, dt: f64) -> f64 {
-        self.integral = (self.integral + error * dt).clamp(-MAX_SKEW / KI, MAX_SKEW / KI);
+    /// `error` = lowest fill after a pull minus the goal, in seconds. The
+    /// resampler takes `NET_RATE / ratio` frames a second from the buffer,
+    /// so a ratio below 1 drains it (checked by the live test). `hold`
+    /// keeps the integral (the buffer ran dry: its refill is no drift).
+    fn update(&mut self, error: f64, dt: f64, hold: bool) -> f64 {
+        if !hold {
+            self.integral = (self.integral + error * dt).clamp(-MAX_SKEW / KI, MAX_SKEW / KI);
+        }
         1.0 - (KP * error + KI * self.integral).clamp(-MAX_SKEW, MAX_SKEW)
     }
 }
@@ -273,13 +288,15 @@ struct Sender {
 struct State {
     jitter: Mutex<Jitter>,
     sender: Mutex<Sender>,
-    target_ms: AtomicU32,
+    /// The receive buffer's `goal()` (frames).
+    goal: AtomicU32,
     /// Receive fill in frames after the latest push or pull.
     fill: AtomicU32,
-    /// Fill after each pull while playing, summed, and how many pulls.
-    fill_sum: AtomicU64,
-    fills: AtomicU64,
-    /// Average fill over the last drift tick (frames), for `stats`.
+    /// Lowest fill after a pull while playing since the last drift tick
+    /// (`u32::MAX`: none), and whether it ran dry since.
+    fill_min: AtomicU32,
+    starved: AtomicBool,
+    /// `fill_min` of the last drift tick (frames), for `stats`.
     buffered: AtomicU32,
     dropouts: AtomicU64,
     /// Resampler ratio of the receive stream (f64 bits).
@@ -302,10 +319,10 @@ impl State {
                 pos: 0,
                 last: None,
             }),
-            target_ms: AtomicU32::new(jitter_ms),
+            goal: AtomicU32::new(target_frames(jitter_ms) as u32),
             fill: AtomicU32::new(0),
-            fill_sum: AtomicU64::new(0),
-            fills: AtomicU64::new(0),
+            fill_min: AtomicU32::new(u32::MAX),
+            starved: AtomicBool::new(false),
             buffered: AtomicU32::new(0),
             dropouts: AtomicU64::new(0),
             ratio: AtomicU64::new(1f64.to_bits()),
@@ -330,6 +347,7 @@ impl State {
 
     fn publish(&self, jitter: &Jitter) {
         self.fill.store(jitter.len as u32, Ordering::Relaxed);
+        self.goal.store(jitter.goal() as u32, Ordering::Relaxed);
         self.dropouts.store(jitter.dropouts, Ordering::Relaxed);
     }
 
@@ -358,16 +376,36 @@ impl State {
                     continue;
                 }
             };
+            let was_playing = jitter.playing;
             jitter.pull(out);
             self.publish(&jitter);
             if jitter.playing {
-                self.fill_sum
-                    .fetch_add(jitter.len as u64, Ordering::Relaxed);
-                self.fills.fetch_add(1, Ordering::Relaxed);
+                self.fill_min
+                    .fetch_min(jitter.len as u32, Ordering::Relaxed);
+            } else if was_playing {
+                self.starved.store(true, Ordering::Relaxed);
             }
             return;
         }
         out.fill(0);
+    }
+
+    /// A drift tick: the lowest fill after a pull since the last one sets
+    /// the receive stream's resampler ratio (arrivals come in bursts, so
+    /// the average sits above what is left before the next one).
+    fn correct_drift(&self, drift: &mut Drift) {
+        let low = self.fill_min.swap(u32::MAX, Ordering::Relaxed);
+        let starved = self.starved.swap(false, Ordering::Relaxed);
+        if low == u32::MAX {
+            self.buffered
+                .store(self.fill.load(Ordering::Relaxed), Ordering::Relaxed);
+            return;
+        }
+        self.buffered.store(low, Ordering::Relaxed);
+        let goal = self.goal.load(Ordering::Relaxed);
+        let error = (f64::from(low) - f64::from(goal)) / f64::from(NET_RATE);
+        let ratio = drift.update(error, DRIFT_TICK.as_secs_f64(), starved);
+        self.ratio.store(ratio.to_bits(), Ordering::Relaxed);
     }
 
     /// The sink's process callback.
@@ -497,11 +535,9 @@ impl NetPort {
     /// New receive buffer target, live.
     pub fn set_jitter(&self, ms: u32) {
         let s = &self.state;
-        s.jitter
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_target(ms);
-        s.target_ms.store(ms, Ordering::Relaxed);
+        let mut jitter = s.jitter.lock().unwrap_or_else(PoisonError::into_inner);
+        jitter.set_target(ms);
+        s.publish(&jitter);
     }
 
     pub fn stats(&self) -> PortStats {
@@ -712,24 +748,10 @@ fn tick(engine: &EngineRc, context: &pw::context::ContextRc) {
     }
 }
 
-/// Every `DRIFT_TICK`: the average fill since the last tick sets the
-/// receive stream's resampler ratio.
+/// Every `DRIFT_TICK`.
 fn correct_drift(engine: &EngineRc) {
     for port in engine.borrow_mut().ports.values_mut() {
-        let s = &port.spec.state;
-        let n = s.fills.swap(0, Ordering::Relaxed);
-        let sum = s.fill_sum.swap(0, Ordering::Relaxed);
-        if n == 0 {
-            s.buffered
-                .store(s.fill.load(Ordering::Relaxed), Ordering::Relaxed);
-            continue;
-        }
-        let fill = sum as f64 / n as f64;
-        s.buffered.store(fill.round() as u32, Ordering::Relaxed);
-        let target = target_frames(s.target_ms.load(Ordering::Relaxed)) as f64;
-        let error = (fill - target) / f64::from(NET_RATE);
-        let ratio = port.drift.update(error, DRIFT_TICK.as_secs_f64());
-        s.ratio.store(ratio.to_bits(), Ordering::Relaxed);
+        port.spec.state.correct_drift(&mut port.drift);
     }
 }
 
@@ -1007,10 +1029,8 @@ mod tests {
         j.push(0, &block(MS, 1));
         j.push(11 * MS as u64, &block(MS, 2));
         assert_eq!(j.len, 12 * MS);
-        let out = pull(&mut j, 10 * MS);
-        assert!(out[..MS].iter().all(|&s| s == 1));
-        assert!(out[MS..].iter().all(|&s| s == 0));
-        assert_eq!(pull(&mut j, MS), vec![0; MS]);
+        assert_eq!(pull(&mut j, MS), vec![1; MS]);
+        assert_eq!(pull(&mut j, 10 * MS), vec![0; 10 * MS]);
         assert_eq!(j.ring[j.start], [2, 2]);
     }
 
@@ -1083,14 +1103,14 @@ mod tests {
     fn overflow_drops_the_oldest_down_to_target() {
         let mut j = Jitter::new(10);
         pull(&mut j, 5 * MS);
-        for i in 0..7 {
+        for i in 0..15 {
             j.push(i * 5 * MS as u64, &block(5 * MS, i as i16));
         }
-        // Limit: 10 target + 5 pull + 20 allowance = 35 ms.
-        assert_eq!(j.len, 35 * MS);
-        j.push(35 * MS as u64, &block(5 * MS, 7));
+        // Limit: 10 target + 5 pull + 20 allowance + a burst = 77.7 ms.
+        assert_eq!(j.len, 75 * MS);
+        j.push(75 * MS as u64, &block(5 * MS, 15));
         assert_eq!(j.len, 15 * MS);
-        assert_eq!(j.ring[j.start], [5, 5]);
+        assert_eq!(j.ring[j.start], [13, 13]);
     }
 
     #[test]
@@ -1141,13 +1161,57 @@ mod tests {
         for _ in 0..(60.0 / dt) as usize {
             error += dt * (1.002 - 1.0 / ratio);
             worst = worst.max(error.abs());
-            ratio = drift.update(error, dt);
+            ratio = drift.update(error, dt, false);
         }
         assert!(error.abs() < 0.000_2, "{error}");
         assert!(worst < 0.004, "{worst}");
         assert!((ratio - 1.0 / 1.002).abs() < 1e-4, "{ratio}");
         // Clamped to ±0.5 %.
-        assert_eq!(Drift::default().update(1.0, dt), 1.0 - MAX_SKEW);
+        assert_eq!(Drift::default().update(1.0, dt, false), 1.0 - MAX_SKEW);
+        // A dry spell leaves the integral alone.
+        let mut drift = Drift::default();
+        drift.update(-1.0, dt, true);
+        assert_eq!(drift.integral, 0.0);
+    }
+
+    /// Equal clocks, a perfect link and a 2 ms target: the sender's
+    /// quantum `burst` arrives at once (as 5 ms packets), the receiver
+    /// pulls `quantum / ratio` frames a cycle. Regulating the average fill
+    /// pinned the ratio at 0.995 with a dropout every few cycles.
+    #[test]
+    fn bursts_keep_a_small_target_without_dropouts() {
+        for (burst, quantum) in [(1024, 256), (1024, 1024), (NET_MAX_FRAMES, 1024)] {
+            let s = State::new(2, Box::new(|_, _| {}));
+            let mut drift = Drift::default();
+            let (mut sent, mut carry) = (0u64, 0.0);
+            let mut out = vec![0u8; 2 * quantum * STRIDE];
+            for cycle in 0..60 * NET_RATE as u64 / quantum as u64 {
+                let now = cycle * quantum as u64;
+                while sent + burst as u64 <= now {
+                    for at in (sent..sent + burst as u64).step_by(NET_MAX_FRAMES) {
+                        let frames = NET_MAX_FRAMES.min((sent + burst as u64 - at) as usize);
+                        let mut j = s.jitter.lock().unwrap();
+                        j.push(at, &block(frames, 1));
+                        s.publish(&j);
+                    }
+                    sent += burst as u64;
+                }
+                carry += quantum as f64 / f64::from_bits(s.ratio.load(Ordering::Relaxed));
+                let frames = carry as usize;
+                carry -= frames as f64;
+                s.play(&mut out[..frames * STRIDE]);
+                if cycle % (DRIFT_TICK.as_millis() as u64 * MS as u64 / quantum as u64) == 0 {
+                    s.correct_drift(&mut drift);
+                }
+            }
+            let ratio = f64::from_bits(s.ratio.load(Ordering::Relaxed));
+            let dropouts = s.dropouts.load(Ordering::Relaxed);
+            assert_eq!(dropouts, 0, "burst {burst}, quantum {quantum}");
+            assert!(
+                (ratio - 1.0).abs() < 0.000_5,
+                "burst {burst}: ratio {ratio}"
+            );
+        }
     }
 
     mod live {
@@ -1273,11 +1337,13 @@ mod tests {
                         let Some(data) = buffer.datas_mut().first_mut() else {
                             return;
                         };
-                        let size = data.chunk().size() as usize;
+                        let (offset, size) = (data.chunk().offset(), data.chunk().size());
                         let Some(bytes) = data.data() else {
                             return;
                         };
-                        for s in bytes[..size.min(bytes.len())].as_chunks::<4>().0 {
+                        let off = (offset as usize).min(bytes.len());
+                        let bytes = &bytes[off..][..(size as usize).min(bytes.len() - off)];
+                        for s in bytes.as_chunks::<4>().0 {
                             let v = f32::from_le_bytes(*s).abs().min(f32::MAX);
                             peak.fetch_max(v.to_bits(), Ordering::Relaxed);
                         }

@@ -88,7 +88,7 @@ impl SteelSeriesAdapter {
         defaults_into(&mut settings);
         let mut adapter = Self {
             id,
-            name: "Arctis Nova Pro Wireless".into(),
+            name: model_name(pid).into(),
             dev: Some(dev),
             settings,
             last_error: None,
@@ -375,6 +375,14 @@ fn battery_pct(raw: u8) -> Option<u8> {
     Some(((raw as u16 * 100 + 4) / 8).min(100) as u8)
 }
 
+/// `pid`'s name in the model table.
+fn model_name(pid: u16) -> &'static str {
+    super::MODELS
+        .iter()
+        .find(|m| m.product_ids.contains(&pid))
+        .map_or("Arctis Nova Pro Wireless", |m| m.name)
+}
+
 fn defaults_into(s: &mut SettingsMap) {
     for key in [
         "aux_gate_enabled",
@@ -565,6 +573,13 @@ mod tests {
         let waits: Vec<_> = (1..=6).map(|f| init_retry_after(f).as_secs()).collect();
         assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
         assert_eq!(init_retry_after(u32::MAX), INIT_RETRY_MAX);
+    }
+
+    #[test]
+    fn names_come_from_the_model_table() {
+        assert_eq!(model_name(0x12e0), "Arctis Nova Pro Wireless");
+        assert_eq!(model_name(0x12e5), "Arctis Nova Pro Wireless X");
+        assert_eq!(model_name(0x225d), "Arctis Nova Pro Wireless X (White)");
     }
 
     #[test]

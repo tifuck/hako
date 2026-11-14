@@ -434,7 +434,7 @@ impl LogitechMouseAdapter {
                         );
                     }
                     // Solaar ExtendedAdjustableDpi read: sensor, x, default x,
-                    // y, default y, lod (0 low / 1 medium / 2 high) at param[9].
+                    // y, default y, lod (1 low / 2 medium / 3 high) at param[9].
                     self.lod = Some(r[13]);
                 }
             } else {

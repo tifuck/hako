@@ -489,11 +489,11 @@ fn open_stream(
                 let Some(data) = buffer.datas_mut().first_mut() else {
                     return;
                 };
-                let size = data.chunk().size() as usize;
+                let (offset, size) = (data.chunk().offset(), data.chunk().size());
                 let Some(bytes) = data.data() else {
                     return;
                 };
-                let peak = stereo_peak(&bytes[..size.min(bytes.len())]);
+                let peak = stereo_peak(crate::chunk_bytes(bytes, offset, size));
                 for r in readers.borrow().iter() {
                     r.hold(0, peak[0]);
                     r.hold(1, peak[1]);

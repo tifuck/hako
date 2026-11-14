@@ -410,8 +410,7 @@ pub(super) fn editor(ui: &mut Ui, cx: &mut Cx, source: EvdevKey, draft: &mut Dra
         ui.add_enabled_ui(can_save && !draft.steps.is_empty(), |ui| {
             if widgets::primary_button(ui, "Save macro").clicked() {
                 draft.mode = Some(RemapMode::Macro);
-                draft.steps_dirty = false;
-                apply(cx, draft, source);
+                draft.steps_dirty = !apply(cx, draft, source);
             }
         });
         if draft.steps_dirty {
@@ -422,4 +421,8 @@ pub(super) fn editor(ui: &mut Ui, cx: &mut Cx, source: EvdevKey, draft: &mut Dra
             );
         }
     });
+    // E.g. a recorded button the virtual device can't send.
+    if let Some(err) = draft.error(source).filter(|_| !draft.steps.is_empty()) {
+        ui.colored_label(theme::pal().warn, err);
+    }
 }

@@ -458,6 +458,8 @@ fn run(
             // that now owns the device and its audio): just let go.
             Err(RecvTimeoutError::Disconnected) => return,
         }
+        // A write or a tick may have shortened the interval.
+        next_tick = next_tick.min(Instant::now() + adapter.tick_interval());
     }
 }
 
@@ -1004,6 +1006,61 @@ mod tests {
             }
         }
         assert_eq!(errors, ["Fake: timeout", "Fake: unplugged"]);
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    /// Ticks hourly until written to, then at once; its first tick shuts
+    /// the worker down.
+    struct Woken {
+        fake: Fake,
+        fast: bool,
+        worker: mpsc::Sender<Cmd>,
+        ack: mpsc::Sender<()>,
+    }
+
+    impl DeviceAdapter for Woken {
+        fn id(&self) -> &DeviceId {
+            self.fake.id()
+        }
+        fn snapshot(&self) -> DeviceSnapshot {
+            self.fake.snapshot()
+        }
+        fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+            self.fast = true;
+            self.fake.set(key, value)
+        }
+        fn tick(&mut self) -> Result<()> {
+            let _ = self.worker.send(Cmd::Shutdown(self.ack.clone()));
+            Ok(())
+        }
+        fn shutdown(&mut self) {}
+        fn tick_interval(&self) -> Duration {
+            if self.fast {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(3600)
+            }
+        }
+    }
+
+    #[test]
+    fn a_write_that_shortens_the_tick_interval_takes_effect_at_once() {
+        let paths = temp_paths("woken");
+        let (tx, rx) = mpsc::channel();
+        let (ack, done) = mpsc::channel();
+        let a = Woken {
+            fake: fake(),
+            fast: false,
+            worker: tx.clone(),
+            ack,
+        };
+        let gate = Gate::load(paths.clone(), a.id().config_stem());
+        let shared = Arc::new(Mutex::new(gate.view(&a)));
+        let (reply, _answer) = oneshot::channel();
+        let (key, value) = (SettingKey::Dpi, SettingValue::Int(400));
+        tx.send(Cmd::Set { key, value, reply }).unwrap();
+        std::thread::spawn(move || run(Box::new(a), gate, rx, shared, broadcast::channel(4).0));
+        assert!(done.recv_timeout(Duration::from_secs(5)).is_ok());
         let _ = std::fs::remove_dir_all(paths.root);
     }
 

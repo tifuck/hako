@@ -48,6 +48,9 @@ const SYNC_EVERY: Duration = Duration::from_secs(20);
 const PROBE_RETRY: Duration = Duration::from_secs(30);
 /// DPI slider when the device's list cannot be read.
 const DPI_FALLBACK: (u16, u16, u16) = (100, 25600, 50);
+/// 0x2202 lift-off byte values (0 = no LOD control); the device rejects 0
+/// in a write (OpenLogi x2202 `Lod`, Solaar #3372).
+const LOD_CHOICES: [(u8, &str); 3] = [(1, "Low"), (2, "Medium"), (3, "High")];
 
 /// How the adapter reaches the device.
 #[derive(Clone, Copy)]
@@ -608,7 +611,7 @@ impl HidppAdapter {
                 }
                 if ext {
                     self.lod = Some(r[13]);
-                    if self.lod_settable && r[13] <= 2 {
+                    if self.lod_settable && LOD_CHOICES.iter().any(|&(v, _)| v == r[13]) {
                         merge_setting(
                             &mut self.settings,
                             SettingKey::LiftOffDistance,
@@ -820,15 +823,7 @@ impl HidppAdapter {
             });
         }
         if self.lod_settable {
-            c.push(SettingMeta::dropdown(
-                LiftOffDistance,
-                "Lift-off distance",
-                vec![
-                    SettingOption::int(0, "Low"),
-                    SettingOption::int(1, "Medium"),
-                    SettingOption::int(2, "High"),
-                ],
-            ));
+            c.push(lod_meta());
         }
         if self.feat.rate.is_some() && !self.rates.is_empty() {
             c.push(SettingMeta::dropdown(
@@ -920,6 +915,14 @@ impl HidppAdapter {
 
 fn dpi_meta(min: u16, max: u16, step: u16) -> SettingMeta {
     SettingMeta::slider(SettingKey::Dpi, "DPI", min.into(), max.into(), step.into()).unit("dpi")
+}
+
+fn lod_meta() -> SettingMeta {
+    let options = LOD_CHOICES
+        .iter()
+        .map(|&(v, label)| SettingOption::int(v.into(), label))
+        .collect();
+    SettingMeta::dropdown(SettingKey::LiftOffDistance, "Lift-off distance", options)
 }
 
 fn fallback_name(kind: DeviceKind, pid: u16) -> String {
@@ -1106,6 +1109,14 @@ mod tests {
         let mut f = Features::default();
         f.note(hidpp::FEAT_EQUALIZER, 6, 1);
         assert_eq!(f.equalizer, Some(6));
+    }
+
+    #[test]
+    fn lift_off_choices_are_the_wire_values() {
+        let meta = lod_meta();
+        // The PRO X 2 reads back 3 (High); 0 means no LOD and is refused.
+        assert!(meta.validate(&SettingValue::Int(3)).is_ok());
+        assert!(meta.validate(&SettingValue::Int(0)).is_err());
     }
 
     #[test]

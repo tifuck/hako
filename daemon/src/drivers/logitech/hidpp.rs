@@ -425,7 +425,7 @@ pub fn dpi_slider(dpis: &[u16]) -> Option<(u16, u16, u16)> {
 }
 
 /// 0x2202 fn 1 GetSensorCapabilities flags (params\[2\]): bit 1 = lift-off
-/// distance settable, 0 low / 1 medium / 2 high (Solaar ExtendedAdjustableDpi).
+/// distance settable, 1 low / 2 medium / 3 high (OpenLogi x2202 `Lod`).
 pub fn ext_dpi_has_lod(flags: u8) -> bool {
     flags & 0x02 != 0
 }

@@ -2017,6 +2017,37 @@ fn the_add_dialog_stops_at_the_source_limit() {
     }
 }
 
+/// A recorded take the daemon would refuse (BTN_MISC can't be emitted) is not
+/// shown as saved: nothing is sent, the changes stay unsaved, and why is shown.
+#[test]
+fn a_macro_the_daemon_would_refuse_stays_unsaved() {
+    let (st, id) = tkl(DeviceRemaps {
+        recorded: steps(&[0x100]),
+        ..remaps(DeviceKind::Keyboard)
+    });
+    let app = bind_app(&egui::Context::default(), &st, &id, 34);
+    let mut h = drive(app);
+    h.ctx.data_mut(|m| {
+        m.insert_temp(egui::Id::new(("tab", id.key())), Tab::Bindings);
+        m.insert_temp(egui::Id::new(("bind_selected", id.key())), 34_u16);
+    });
+    h.run_steps(4);
+    click(&mut h, "     Record");
+    assert!(matches!(
+        sent(&mut h).as_slice(),
+        [UiCommand::StartCapture { .. }]
+    ));
+    assert!(shown(&h, "Unsaved changes"));
+    click(&mut h, "Save macro");
+    assert!(sent(&mut h).is_empty());
+    assert!(shown(&h, "Unsaved changes"));
+    use egui_kittest::kittest::Queryable;
+    assert!(h
+        .query_all_by_label_contains("emittable key")
+        .next()
+        .is_some());
+}
+
 /// The profile menu: update the current profile under its own name, and
 /// delete one only after the question.
 #[test]
