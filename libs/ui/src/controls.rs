@@ -129,6 +129,23 @@ fn settled(ui: &Ui, d: &DeviceSnapshot, out: &[UiCommand]) -> bool {
         })
 }
 
+/// `meta`'s range, `min` / `max` filling in what it leaves open; `None` when
+/// it is one no slider can show (`min > max`, NaN), which clamping would
+/// panic on.
+pub(crate) fn range(meta: &SettingMeta, min: f64, max: f64) -> Option<(f32, f32)> {
+    let (min, max) = (
+        meta.min.unwrap_or(min) as f32,
+        meta.max.unwrap_or(max) as f32,
+    );
+    (min <= max).then_some((min, max))
+}
+
+/// Stands in for a control whose range is unusable.
+fn bad_range(ui: &mut Ui) -> egui::Response {
+    ui.label(egui::RichText::new("—").color(pal().text_muted))
+        .on_hover_text("hakod reported an invalid range for this control")
+}
+
 fn is_int(meta: &SettingMeta) -> bool {
     let whole = |o: Option<f64>| o.is_none_or(|v| v.fract() == 0.0);
     whole(meta.step) && whole(meta.min) && whole(meta.max)
@@ -175,8 +192,9 @@ fn slider(
     out: &mut Vec<UiCommand>,
 ) -> (f32, egui::Response) {
     let key = meta.key;
-    let min = meta.min.unwrap_or(0.0) as f32;
-    let max = meta.max.unwrap_or(100.0) as f32;
+    let Some((min, max)) = range(meta, 0.0, 100.0) else {
+        return (num(d, key).unwrap_or(0.0) as f32, bad_range(ui));
+    };
     let int = is_int(meta);
     let dpi = key == SettingKey::Dpi;
     let server = num(d, key).unwrap_or(min as f64) as f32;
@@ -791,8 +809,10 @@ const DPI_MARKS: [i64; 7] = [400, 800, 1600, 3200, 6400, 12800, 25600];
 pub fn dpi(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec<UiCommand>) {
     let key = meta.key;
     let id = draft_id(d, key);
-    let min = meta.min.unwrap_or(100.0) as f32;
-    let max = meta.max.unwrap_or(32000.0) as f32;
+    let Some((min, max)) = range(meta, 100.0, 32000.0) else {
+        bad_range(ui);
+        return;
+    };
     let step = meta.step.unwrap_or(1.0).max(1.0) as f32;
     let server = num(d, key).unwrap_or(1600.0) as f32;
     let live = ui.ctx().data(|m| m.get_temp::<f32>(id)).unwrap_or(server);

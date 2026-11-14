@@ -304,6 +304,11 @@ fn stinger_2_is_its_own_model_and_keeps_old_settings() {
     hako_core::config::save_device_settings(&paths, HP, 0x0d93, &own).unwrap();
     assert_eq!(load_settings(&CLOUD_STINGER_2, &paths).unwrap(), own);
     assert_eq!(load_settings(&CLOUD_II_HP, &paths).unwrap(), old);
+    // An unparsable old file is an error, not silently empty settings.
+    std::fs::remove_file(hako_core::config::device_config_path(&paths, HP, 0x0d93)).unwrap();
+    let broken = hako_core::config::device_config_path(&paths, HP, 0x0696);
+    std::fs::write(&broken, "not = [toml").unwrap();
+    assert!(load_settings(&CLOUD_STINGER_2, &paths).is_err());
     let _ = std::fs::remove_dir_all(root);
 }
 

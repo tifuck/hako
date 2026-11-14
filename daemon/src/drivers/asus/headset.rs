@@ -95,7 +95,9 @@ impl HeadsetAdapter {
             Some(iface) => Transport::open(pid, iface, REPORT_ID)?,
             None => Transport::open_page(pid, 0xff00, REPORT_ID)?,
         };
-        let settings = hako_core::config::load_device_settings(&paths, VID, spec.pids[0])?;
+        let mut settings = hako_core::config::load_device_settings(&paths, VID, spec.pids[0])?;
+        let offered = controls(spec, &settings);
+        crate::drivers::sanitize_saved(&mut settings, &offered);
         let mut a = Self {
             spec,
             id: DeviceId {
@@ -383,6 +385,7 @@ impl DeviceAdapter for HeadsetAdapter {
         }
         self.last_error = None;
         hako_core::config::save_device_settings(&self.paths, VID, self.spec.pids[0], &self.settings)
+            .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
@@ -432,6 +435,21 @@ mod tests {
             .all(|m| m.key != SettingKey::MicNoiseFilter && m.key != SettingKey::VoicePrompts));
         merge_setting(&mut s, SettingKey::Effect, strobing.clone());
         assert_eq!(effect_wire(&HEADSETS[1], &s), 1);
+    }
+
+    #[test]
+    fn saved_values_are_sanitized_before_they_are_sent() {
+        // `as u8` would send 266 as 10 and a 256-minute sleep timer as 0 (never).
+        let mut s = SettingsMap::new();
+        merge_setting(&mut s, SettingKey::MicSideTone, SettingValue::Int(266));
+        merge_setting(&mut s, SettingKey::PmShutdown, SettingValue::Int(256));
+        let c = controls(&HEADSETS[1], &s);
+        crate::drivers::sanitize_saved(&mut s, &c);
+        assert_eq!(
+            get_setting(&s, SettingKey::MicSideTone),
+            Some(&SettingValue::Int(p::HS_SIDETONE_MAX.into()))
+        );
+        assert_eq!(get_setting(&s, SettingKey::PmShutdown), None);
     }
 
     #[test]

@@ -217,6 +217,11 @@ pub struct KeyboardAdapter {
     t: Option<Transport>,
     settings: SettingsMap,
     battery: Option<BatteryState>,
+    /// The last battery read was answered (a wireless board is in range).
+    reachable: bool,
+    /// The lighting still has to be (re)sent: its last restore failed, or a
+    /// wireless board came back after an absence (lighting is volatile).
+    restore_pending: bool,
     last_poll: Instant,
     last_error: Option<String>,
     paths: ConfigPaths,
@@ -251,6 +256,8 @@ impl KeyboardAdapter {
     ) -> Result<Self> {
         let mut settings = hako_core::config::load_device_settings(&paths, VID, spec.pids[0])?;
         lighting_defaults(&mut settings, true);
+        let offered = controls(spec, &settings);
+        crate::drivers::sanitize_saved(&mut settings, &offered);
         let has_battery = spec.battery.is_some() && !spec.no_battery.contains(&pid);
         let mut a = Self {
             spec,
@@ -267,18 +274,34 @@ impl KeyboardAdapter {
                 charging: false,
                 present: true,
             }),
+            reachable: true,
+            restore_pending: false,
             last_poll: Instant::now(),
             last_error: None,
             paths,
         };
         // Lighting is volatile (no `50 55` save): restore it on every open.
-        if let Err(e) = a.apply() {
-            warn!("{}: restore lighting: {e}", spec.name);
-            a.last_error = Some(e.to_string());
-        }
+        a.restore();
         a.poll_battery();
         info!("{} open via {path}", spec.name);
         Ok(a)
+    }
+
+    /// Send the saved lighting; on failure it is tried again from `tick`.
+    fn restore(&mut self) {
+        match self.apply() {
+            Ok(()) => {
+                if self.restore_pending {
+                    self.last_error = None;
+                }
+                self.restore_pending = false;
+            }
+            Err(e) => {
+                warn!("{}: restore lighting: {e}", self.spec.name);
+                self.last_error = Some(e.to_string());
+                self.restore_pending = true;
+            }
+        }
     }
 
     fn apply(&mut self) -> Result<()> {
@@ -320,10 +343,16 @@ impl KeyboardAdapter {
                 let (pct, charging) = p::kb_battery(&r, at);
                 state.percent = Some(pct);
                 state.charging = charging;
+                // Back in range: it lost the lighting meanwhile.
+                if !self.reachable {
+                    self.restore_pending = true;
+                }
+                self.reachable = true;
             }
             Err(_) => {
                 state.percent = None;
                 state.charging = false;
+                self.reachable = false;
             }
         }
     }
@@ -362,6 +391,10 @@ impl DeviceAdapter for KeyboardAdapter {
             self.last_error = Some(e.to_string());
             return Err(e);
         }
+        if key != SettingKey::SaveToDevice {
+            // The whole lighting was just sent.
+            self.restore_pending = false;
+        }
         let stored = if key != SettingKey::SaveToDevice && self.saving() {
             self.store()
                 .context("changed, but not saved to device memory")
@@ -374,7 +407,8 @@ impl DeviceAdapter for KeyboardAdapter {
             VID,
             self.spec.pids[0],
             &self.settings,
-        )?;
+        )
+        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))?;
         stored
     }
 
@@ -383,8 +417,13 @@ impl DeviceAdapter for KeyboardAdapter {
     }
 
     fn tick(&mut self) -> Result<()> {
-        if self.battery.is_some() && self.last_poll.elapsed() >= BATTERY_POLL {
+        let due = self.last_poll.elapsed() >= BATTERY_POLL;
+        if due && self.battery.is_some() {
             self.poll_battery();
+        }
+        if due && self.restore_pending && self.reachable {
+            self.last_poll = Instant::now();
+            self.restore();
         }
         Ok(())
     }

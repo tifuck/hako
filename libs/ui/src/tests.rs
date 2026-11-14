@@ -2018,3 +2018,113 @@ fn snapshot_readme() {
     }
     save("themes", grid, Some(h * 2 + gap));
 }
+
+/// While hakod is unreachable, controls acting on its stale state send nothing.
+#[test]
+fn controls_are_disabled_while_the_daemon_is_offline() {
+    let mut h = drive(HakoAppUi {
+        state: Some(sample_state()),
+        daemon_error: Some("Disconnected from hakod. Reconnecting…".into()),
+        settings: Some(AppSettings::default()),
+        show_settings: true,
+        ..Default::default()
+    });
+    click(&mut h, "Reset");
+    assert!(sent(&mut h).is_empty());
+    h.state_mut().0.daemon_error = None;
+    h.run_steps(2);
+    click(&mut h, "Reset");
+    assert!(matches!(sent(&mut h).as_slice(), [UiCommand::ResetAudio]));
+}
+
+/// A range no slider can show (min > max, NaN) renders a placeholder
+/// instead of panicking in `clamp`.
+#[test]
+fn invalid_slider_ranges_do_not_panic() {
+    use SettingKey::*;
+    assert_eq!(
+        controls::range(&SettingMeta::slider(Volume, "V", 0.0, 10.0, 1.0), 0.0, 1.0),
+        Some((0.0, 10.0))
+    );
+    assert_eq!(
+        controls::range(&SettingMeta::slider(Volume, "V", 5.0, 1.0, 1.0), 0.0, 1.0),
+        None
+    );
+    assert_eq!(
+        controls::range(
+            &SettingMeta::slider(Volume, "V", f64::NAN, 1.0, 1.0),
+            0.0,
+            1.0
+        ),
+        None
+    );
+    let d = dev(
+        DeviceKind::Mouse,
+        vec![
+            SettingMeta::slider(Dpi, "DPI", 26000.0, 100.0, 50.0),
+            SettingMeta::slider(LiftOffDistance, "Lift-off", 3.0, f64::NAN, 1.0),
+        ],
+        map(&[(Dpi, SettingValue::Int(800))]),
+    );
+    let ctx = egui::Context::default();
+    let mut app = HakoAppUi {
+        state: Some(HubState {
+            devices: vec![d.clone()],
+            ..sample_state()
+        }),
+        selected: Some(d.id.clone()),
+        daemon_error: None,
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    for _ in 0..2 {
+        let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    }
+    assert!(out.is_empty(), "{out:?}");
+}
+
+/// A remapper problem (e.g. no permission to grab) shows on the page even
+/// with no key selected.
+#[test]
+fn remap_errors_show_without_a_selected_key() {
+    let err = "cannot grab /dev/input/event5: permission denied";
+    let (st, id) = tkl(DeviceRemaps {
+        last_error: Some(err.into()),
+        ..remaps(DeviceKind::Keyboard)
+    });
+    let ctx = egui::Context::default();
+    let app = bind_app(&ctx, &st, &id, 0);
+    let mut h = egui_kittest::Harness::builder()
+        .with_size([1200.0, 1400.0])
+        .build_state(
+            |ctx, (app, out): &mut (HakoAppUi, Vec<UiCommand>)| app.ui(ctx, out),
+            (app, Vec::new()),
+        );
+    h.ctx.data_mut(|m| {
+        m.insert_temp(egui::Id::new(("tab", id.key())), Tab::Bindings);
+        m.insert_temp(egui::Id::new(("bind_selected", id.key())), 0u16);
+    });
+    h.run_steps(4);
+    assert!(shown(&h, "Nothing selected"));
+    assert!(shown(&h, err));
+}
+
+#[test]
+fn a_burst_of_toasts_keeps_the_errors() {
+    let toast = |tone, text: &str| widgets::Toast {
+        tone,
+        text: text.into(),
+        shown: None,
+    };
+    let mut list = vec![toast(widgets::Tone::Error, "failed")];
+    list.extend((0..5).map(|i| toast(widgets::Tone::Ok, &format!("ok {i}"))));
+    widgets::trim_toasts(&mut list);
+    let texts: Vec<&str> = list.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(texts, ["failed", "ok 2", "ok 3", "ok 4"]);
+    // Only errors: the oldest goes.
+    let mut list: Vec<_> = (0..5)
+        .map(|i| toast(widgets::Tone::Error, &format!("e{i}")))
+        .collect();
+    widgets::trim_toasts(&mut list);
+    assert_eq!(list[0].text, "e1");
+}

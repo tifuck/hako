@@ -10,11 +10,12 @@
 //! control, and is switched off whenever the opt-in is not (or no longer) given.
 
 use crate::drivers::{DeviceAdapter, EventTx, Model};
-use anyhow::{anyhow, bail, Result};
-use hako_core::catalog::{ControlKind, SettingKey, SettingMeta, SettingValue};
+use anyhow::{anyhow, bail, Context, Result};
+use hako_core::catalog::{SettingKey, SettingMeta, SettingValue};
 use hako_core::config::{load_app_config, load_device_settings, update_app_config, ConfigPaths};
 use hako_core::device::DeviceSnapshot;
 use hako_core::protocol::{is_new_error, AdapterEvent};
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -94,23 +95,33 @@ pub struct DeviceHandle {
 }
 
 impl DeviceHandle {
+    /// Start the device's worker. Its first writes (leaving an unallowed
+    /// save-to-device mode, repairing saved values) run on the worker thread:
+    /// blocking HID stays off the caller's, and a driver that panics there
+    /// fails this open only. Blocking (up to `SET_TIMEOUT`).
     pub fn spawn(
         model: &'static Model,
         adapter: Box<dyn DeviceAdapter>,
         events: EventTx,
         nodes: Vec<PathBuf>,
         paths: ConfigPaths,
-    ) -> Self {
-        let mut gate = Gate::load(paths, adapter.id().config_stem());
-        let mut adapter = adapter;
-        gate.enforce(adapter.as_mut());
-        repair_saved(adapter.as_mut(), &mut gate);
-        let snapshot = Arc::new(Mutex::new(gate.view(adapter.as_ref())));
+    ) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
-        let shared = snapshot.clone();
+        let (ready, started) = mpsc::channel();
         std::thread::Builder::new()
             .name("hako-dev".into())
             .spawn(move || {
+                let Ok((mut adapter, gate, shared)) =
+                    catch_unwind(AssertUnwindSafe(|| start(adapter, paths, &events)))
+                else {
+                    error!("device worker panicked while starting");
+                    return;
+                };
+                // The caller gave up waiting: nobody will drive this adapter.
+                if ready.send(shared.clone()).is_err() {
+                    adapter.shutdown();
+                    return;
+                }
                 let fallback = shared.clone();
                 let ev = events.clone();
                 // A driver bug must not leave a handle that looks connected
@@ -124,8 +135,13 @@ impl DeviceHandle {
                     snap.last_error = Some("driver crashed; reopening".into());
                     let _ = ev.send(AdapterEvent::Updated(snap.clone()));
                     let mut crashed = CRASHED.lock().unwrap_or_else(|p| p.into_inner());
-                    if !crashed.contains(&snap.id.key()) {
-                        crashed.push(snap.id.key());
+                    let (n, at) = crashed
+                        .get_or_insert_with(HashMap::new)
+                        .entry(snap.id.key())
+                        .or_insert((0, Instant::now()));
+                    *n += 1;
+                    *at = Instant::now();
+                    if *n == 1 {
                         let _ = ev.send(AdapterEvent::Error {
                             device: Some(snap.id.clone()),
                             message: format!("{}: driver crashed; reopening it", snap.name),
@@ -133,13 +149,18 @@ impl DeviceHandle {
                     }
                 }
             })
-            .expect("spawn device thread");
-        Self {
+            .context("spawn device thread")?;
+        let snapshot = match started.recv_timeout(SET_TIMEOUT) {
+            Ok(snapshot) => snapshot,
+            Err(RecvTimeoutError::Timeout) => bail!("the device did not answer while opening"),
+            Err(RecvTimeoutError::Disconnected) => bail!("driver crashed while opening"),
+        };
+        Ok(Self {
             model,
             nodes,
             snapshot,
             tx,
-        }
+        })
     }
 
     /// Last published state; never waits on the device.
@@ -169,12 +190,19 @@ impl DeviceHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(cmd(reply))
-            .map_err(|_| anyhow!("device worker stopped"))?;
+            .map_err(|_| Refused::new("io", STOPPED))?;
         // A wedged device must not hang the IPC connection that asked.
         match tokio::time::timeout(SET_TIMEOUT, rx).await {
-            Ok(reply) => reply.map_err(|_| anyhow!("device worker stopped"))?,
+            Ok(reply) => reply.map_err(|_| Refused::new("io", STOPPED))?,
             Err(_) => Err(Refused::new("busy", "the device did not answer in time").into()),
         }
+    }
+
+    /// `e` (from `set`) says the worker did not answer at all (wedged or
+    /// stopped), so later writes to it would fail the same way.
+    pub fn unresponsive(e: &anyhow::Error) -> bool {
+        e.downcast_ref::<Refused>()
+            .is_some_and(|r| r.code == "busy" || r.message == STOPPED)
     }
 
     /// Ask the worker to release the device; the receiver fires when done.
@@ -185,10 +213,46 @@ impl DeviceHandle {
     }
 }
 
-/// Devices whose driver crash was pushed as an `Error`, until a reopened
-/// worker has run for `RECOVERED_AFTER`: a driver that crashes soon after
-/// every reopen is reported once.
-static CRASHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+const STOPPED: &str = "device worker stopped";
+
+/// Driver crashes per device key (count, last one), until a reopened worker
+/// has run for `RECOVERED_AFTER`: a driver that crashes soon after every
+/// reopen is reported once, and reopened with backoff (`crashes`).
+static CRASHED: Mutex<Option<HashMap<String, (u32, Instant)>>> = Mutex::new(None);
+
+/// Consecutive driver crashes of the device with key `key`, and the last one.
+pub fn crashes(key: &str) -> Option<(u32, Instant)> {
+    CRASHED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()?
+        .get(key)
+        .copied()
+}
+
+/// The worker's state before it takes requests: the opt-in loaded and
+/// enforced, saved values repaired, the first snapshot published.
+fn start(
+    mut adapter: Box<dyn DeviceAdapter>,
+    paths: ConfigPaths,
+    events: &EventTx,
+) -> (Box<dyn DeviceAdapter>, Gate, Arc<Mutex<DeviceSnapshot>>) {
+    let mut gate = Gate::load(paths, adapter.id().config_stem());
+    if let Err(e) = gate.enforce(adapter.as_mut()) {
+        warn!("{}: {e:#}", gate.stem);
+        let snap = adapter.snapshot();
+        let _ = events.send(AdapterEvent::Error {
+            device: Some(snap.id),
+            message: format!(
+                "{}: {e:#}; its changes are refused until it does",
+                snap.name
+            ),
+        });
+    }
+    repair_saved(adapter.as_mut(), &mut gate);
+    let shared = Arc::new(Mutex::new(gate.view(adapter.as_ref())));
+    (adapter, gate, shared)
+}
 
 /// Bumped whenever any worker changes an opt-in, so workers sharing a `vid_pid`
 /// stem (identical devices) reload theirs.
@@ -220,7 +284,10 @@ impl Gate {
     fn refresh(&mut self, a: &mut dyn DeviceAdapter) {
         if self.epoch != OPT_IN_EPOCH.load(Ordering::SeqCst) {
             *self = Self::load(self.paths.clone(), std::mem::take(&mut self.stem));
-            self.enforce(a);
+            // A failure is retried (and refuses the write) in `check`.
+            if let Err(e) = self.enforce(a) {
+                warn!("{}: {e:#}", self.stem);
+            }
         }
     }
 
@@ -244,19 +311,23 @@ impl Gate {
         s
     }
 
+    /// The device saves every change to its onboard memory without the opt-in.
+    fn unallowed_saving(&self, a: &dyn DeviceAdapter) -> bool {
+        !self.allowed
+            && a.snapshot()
+                .settings
+                .get(SettingKey::SaveToDevice.as_str())
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+    }
+
     /// Without the opt-in, a driver's `save_to_device` mode must be off.
-    fn enforce(&self, a: &mut dyn DeviceAdapter) {
-        let saving = a
-            .snapshot()
-            .settings
-            .get(SettingKey::SaveToDevice.as_str())
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if saving && !self.allowed {
-            if let Err(e) = a.set(SettingKey::SaveToDevice, SettingValue::Bool(false)) {
-                warn!("{}: could not leave save-to-device mode: {e:#}", self.stem);
-            }
+    fn enforce(&self, a: &mut dyn DeviceAdapter) -> Result<()> {
+        if self.unallowed_saving(a) {
+            a.set(SettingKey::SaveToDevice, SettingValue::Bool(false))
+                .context("could not leave save-to-device mode")?;
         }
+        Ok(())
     }
 
     /// Turn the opt-in on or off (saved first, so a failed save changes nothing).
@@ -338,11 +409,11 @@ fn run(
                 let snap = gate.view(adapter.as_ref());
                 if !crash_cleared && started.elapsed() >= RECOVERED_AFTER {
                     crash_cleared = true;
-                    let key = snap.id.key();
-                    CRASHED
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .retain(|k| *k != key);
+                    if let Some(crashed) =
+                        CRASHED.lock().unwrap_or_else(|p| p.into_inner()).as_mut()
+                    {
+                        crashed.remove(&snap.id.key());
+                    }
                 }
                 match ticked {
                     Err(e) => {
@@ -391,7 +462,7 @@ fn repair_saved(a: &mut dyn DeviceAdapter, gate: &mut Gate) {
         let Some(value) = snap.settings.get(key).filter(|v| file.get(key) == Some(*v)) else {
             continue;
         };
-        let Some(fixed) = nearest_valid(meta, value) else {
+        let Some(fixed) = meta.nearest_valid(value) else {
             continue;
         };
         warn!(
@@ -402,27 +473,6 @@ fn repair_saved(a: &mut dyn DeviceAdapter, gate: &mut Gate) {
             warn!("{}: could not repair {key}: {e:#}", snap.name);
         }
     }
-}
-
-/// The in-range whole/fractional number closest to `value` for an invalid
-/// slider value; `None` when it is valid or not a slider.
-fn nearest_valid(meta: &SettingMeta, value: &SettingValue) -> Option<SettingValue> {
-    if meta.kind != ControlKind::Slider && meta.kind != ControlKind::ColorChannel
-        || meta.validate(value).is_ok()
-    {
-        return None;
-    }
-    let n = value.as_float().filter(|f| f.is_finite())?;
-    let n = n.clamp(meta.min.unwrap_or(f64::MIN), meta.max.unwrap_or(f64::MAX));
-    let fixed = if [meta.min, meta.max, meta.step]
-        .iter()
-        .all(|v| v.is_none_or(|v| v.fract() == 0.0))
-    {
-        SettingValue::Int(n.round() as i64)
-    } else {
-        SettingValue::Float(n)
-    };
-    meta.validate(&fixed).is_ok().then_some(fixed)
 }
 
 /// Every write is checked against the control the driver declares for it, so
@@ -439,8 +489,12 @@ fn set_checked(
     let [(key, value)] = values;
     if key == SettingKey::OnboardWrites {
         gate.set(value.as_bool().unwrap_or(false))?;
-        gate.enforce(a);
-        return Ok(());
+        return gate.enforce(a).map_err(|e| {
+            anyhow!(
+                "saved, but the device is still in save-to-device mode ({e:#}); its changes are \
+                 refused until it leaves it"
+            )
+        });
     }
     a.set(key, value)
 }
@@ -473,7 +527,7 @@ fn check(
     values: &[(SettingKey, SettingValue)],
 ) -> Result<()> {
     gate.refresh(a);
-    let snap = gate.view(a);
+    let mut snap = gate.view(a);
     if !snap.connected {
         bail!(
             "{} is not connected{}",
@@ -482,6 +536,25 @@ fn check(
                 .map(|e| format!(": {e}"))
                 .unwrap_or_default()
         );
+    }
+    // Every write would land in onboard memory without the owner's consent:
+    // only leaving that mode (or deciding the opt-in) is let through.
+    if gate.unallowed_saving(a) {
+        let exempt = matches!(
+            values,
+            [(SettingKey::SaveToDevice, SettingValue::Bool(false))]
+                | [(SettingKey::OnboardWrites, _)]
+        );
+        if let Err(e) = gate.enforce(a) {
+            if !exempt {
+                bail!(
+                    "{} is in save-to-device mode without \"Allow saving to device memory\" and \
+                     {e:#}: changes are refused until it leaves it",
+                    snap.name
+                );
+            }
+        }
+        snap = gate.view(a);
     }
     for (key, value) in values {
         let meta = snap
@@ -496,7 +569,9 @@ fn check(
             })?;
         meta.validate(value)
             .map_err(|e| Refused::new("invalid_value", e))?;
-        if meta.persistent && !gate.allowed {
+        let leaving_save_mode =
+            *key == SettingKey::SaveToDevice && *value == SettingValue::Bool(false);
+        if meta.persistent && !gate.allowed && !leaving_save_mode {
             return Err(Refused::new(
                 "invalid_value",
                 format!(
@@ -524,6 +599,8 @@ mod tests {
         /// Keys of each `set_many`, shared so a test can watch the worker.
         batches: Arc<Mutex<Vec<Vec<SettingKey>>>>,
         saving: bool,
+        /// Fails to leave save-to-device mode.
+        stuck: bool,
     }
 
     impl DeviceAdapter for Fake {
@@ -556,6 +633,9 @@ mod tests {
         }
         fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
             if key == SettingKey::SaveToDevice {
+                if self.stuck && value == SettingValue::Bool(false) {
+                    bail!("no answer");
+                }
                 self.saving = value.as_bool().unwrap();
             }
             self.writes.push(key);
@@ -595,7 +675,95 @@ mod tests {
             writes: vec![],
             batches: Arc::default(),
             saving: false,
+            stuck: false,
         }
+    }
+
+    #[test]
+    fn a_device_stuck_in_save_mode_takes_no_changes_without_the_opt_in() {
+        use SettingKey::{Dpi, OnboardWrites, SaveToDevice};
+        let paths = temp_paths("stuck");
+        let mut a = fake();
+        let stem = a.id.config_stem();
+        let mut gate = Gate::load(paths.clone(), stem.clone());
+        let (on, off) = (SettingValue::Bool(true), SettingValue::Bool(false));
+        set_checked(&mut a, &mut gate, OnboardWrites, on.clone()).unwrap();
+        set_checked(&mut a, &mut gate, SaveToDevice, on).unwrap();
+        a.stuck = true;
+        a.writes.clear();
+
+        // The revocation is saved, but the reply says the device kept saving.
+        let e = set_checked(&mut a, &mut gate, OnboardWrites, off.clone()).unwrap_err();
+        assert!(format!("{e:#}").contains("saved, but"), "{e:#}");
+        assert!(!Gate::load(paths.clone(), stem).allowed);
+        assert!(a.saving);
+
+        // So nothing more is written (to onboard memory) without consent.
+        assert!(set_checked(&mut a, &mut gate, Dpi, SettingValue::Int(400)).is_err());
+        assert!(set_many_checked(&mut a, &mut gate, &[(Dpi, SettingValue::Int(400))]).is_err());
+        assert!(a.writes.is_empty() && a.batches.lock().unwrap().is_empty());
+        // Leaving the mode is let through (the device's own error comes back).
+        let e = set_checked(&mut a, &mut gate, SaveToDevice, off).unwrap_err();
+        assert!(format!("{e:#}").contains("no answer"), "{e:#}");
+
+        // Once the device answers, the next write leaves the mode first.
+        a.stuck = false;
+        set_checked(&mut a, &mut gate, Dpi, SettingValue::Int(400)).unwrap();
+        assert!(!a.saving);
+        assert_eq!(a.writes, [SaveToDevice, Dpi]);
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    /// Panics in `snapshot` (while opening) or in every `tick`.
+    struct Crashy {
+        fake: Fake,
+        at_open: bool,
+    }
+
+    impl DeviceAdapter for Crashy {
+        fn id(&self) -> &DeviceId {
+            self.fake.id()
+        }
+        fn snapshot(&self) -> DeviceSnapshot {
+            assert!(!self.at_open, "driver bug");
+            self.fake.snapshot()
+        }
+        fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+            self.fake.set(key, value)
+        }
+        fn tick(&mut self) -> Result<()> {
+            panic!("driver bug")
+        }
+        fn shutdown(&mut self) {}
+        fn tick_interval(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+
+    #[test]
+    fn a_driver_crash_fails_its_open_or_is_counted_for_backoff() {
+        let paths = temp_paths("crash");
+        let model = crate::drivers::models().next().unwrap();
+        let crashy = |instance: &str, at_open| {
+            let mut fake = fake();
+            fake.id.instance = instance.into();
+            Box::new(Crashy { fake, at_open })
+        };
+        let events = broadcast::channel(16).0;
+        let spawn = |a| DeviceHandle::spawn(model, a, events.clone(), vec![], paths.clone());
+
+        let e = spawn(crashy("crash-open", true)).err().unwrap();
+        assert!(format!("{e:#}").contains("crashed"), "{e:#}");
+
+        let h = spawn(crashy("crash-tick", false)).unwrap();
+        let key = h.snapshot().id.key();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while h.snapshot().connected && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!h.snapshot().connected);
+        assert_eq!(crashes(&key).map(|(n, _)| n), Some(1));
+        let _ = std::fs::remove_dir_all(paths.root);
     }
 
     #[test]
@@ -786,20 +954,22 @@ mod tests {
     fn invalid_saved_slider_values_get_the_nearest_valid_one() {
         let pct = SettingMeta::slider(SettingKey::Brightness, "B", 0.0, 100.0, 1.0);
         assert_eq!(
-            nearest_valid(&pct, &SettingValue::Int(300)),
+            pct.nearest_valid(&SettingValue::Int(300)),
             Some(SettingValue::Int(100))
         );
         assert_eq!(
-            nearest_valid(&pct, &SettingValue::Float(40.4)),
+            pct.nearest_valid(&SettingValue::Float(40.4)),
             Some(SettingValue::Int(40))
         );
-        assert_eq!(nearest_valid(&pct, &SettingValue::Int(50)), None);
+        assert_eq!(pct.nearest_valid(&SettingValue::Int(50)), None);
         let mix = SettingMeta::slider(SettingKey::Volume, "V", 0.0, 1.0, 0.01);
         assert_eq!(
-            nearest_valid(&mix, &SettingValue::Float(1.5)),
+            mix.nearest_valid(&SettingValue::Float(1.5)),
             Some(SettingValue::Float(1.0))
         );
         let toggle = SettingMeta::toggle(SettingKey::GameMode, "G");
-        assert_eq!(nearest_valid(&toggle, &SettingValue::Int(3)), None);
+        assert_eq!(toggle.nearest_valid(&SettingValue::Int(3)), None);
+        let empty = SettingMeta::slider(SettingKey::Volume, "V", 10.0, 0.0, 1.0);
+        assert_eq!(empty.nearest_valid(&SettingValue::Int(50)), None);
     }
 }

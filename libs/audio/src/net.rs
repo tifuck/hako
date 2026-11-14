@@ -129,6 +129,15 @@ impl Jitter {
     }
 
     fn push(&mut self, pos: u64, samples: &[i16]) {
+        let frames = samples.as_chunks::<2>().0;
+        // A position from the network that would wrap: start over.
+        let Some(new_end) = pos.checked_add(frames.len() as u64) else {
+            self.len = 0;
+            self.end = None;
+            self.playing = false;
+            self.starved = false;
+            return;
+        };
         match self.end {
             Some(end) if pos < end && end - pos <= MAX_BEHIND => return,
             Some(end) if pos >= end && pos - end <= MAX_GAP as u64 => {
@@ -145,11 +154,10 @@ impl Jitter {
                 self.starved = false;
             }
         }
-        let frames = samples.as_chunks::<2>().0;
         for frame in frames {
             self.put(*frame);
         }
-        self.end = Some(pos + frames.len() as u64);
+        self.end = Some(new_end);
         if self.len > self.target + self.pulled + self.target.max(MAX_GAP) {
             self.skip(self.len - self.target - self.pulled);
         }
@@ -266,6 +274,8 @@ struct State {
     /// push / block sent.
     pushed: AtomicU64,
     sent: AtomicU64,
+    /// Why its nodes are missing (set by the PipeWire thread).
+    problem: Mutex<Option<String>>,
 }
 
 impl State {
@@ -287,7 +297,20 @@ impl State {
             epoch: Instant::now(),
             pushed: AtomicU64::new(0),
             sent: AtomicU64::new(0),
+            problem: Mutex::default(),
         }
+    }
+
+    /// Record why the nodes are missing (`None`: they are up); the first
+    /// failure is a warning, repeats of it are not.
+    fn set_problem(&self, label: &str, problem: Option<String>) {
+        let mut slot = self.problem.lock().unwrap_or_else(PoisonError::into_inner);
+        match &problem {
+            Some(p) if slot.is_none() => warn!("net audio: nodes for {label}: {p}"),
+            Some(p) => debug!("net audio: nodes for {label}: {p}"),
+            None => {}
+        }
+        *slot = problem;
     }
 
     fn publish(&self, jitter: &Jitter) {
@@ -365,9 +388,14 @@ struct Spec {
 
 struct Worker {
     tx: pw::channel::Sender<Cmd>,
+    thread: std::thread::JoinHandle<()>,
+    /// Tells this thread's ports from those of one that stopped.
+    generation: u64,
     ports: usize,
     next_id: u64,
 }
+
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// The PipeWire side of every peer: its own thread and connection, started
 /// with the first `open`, healed after a PipeWire restart.
@@ -385,7 +413,8 @@ impl NetAudio {
     /// plays into it goes to `send`) and `recv_node` (Audio/Source, `hako
     /// from <label>`: what `NetPort::push` delivers, after a `jitter_ms`
     /// buffer). Neither autoconnects nor becomes a default device. They
-    /// exist until the port is dropped.
+    /// exist until the port is dropped. An error: the PipeWire thread
+    /// could not be set up (tried again on the next `open`).
     pub fn open(
         &self,
         send_node: &str,
@@ -393,10 +422,21 @@ impl NetAudio {
         label: &str,
         jitter_ms: u32,
         send: SendFn,
-    ) -> NetPort {
+    ) -> Result<NetPort, String> {
         let state = Arc::new(State::new(jitter_ms, send));
         let mut worker = lock(&self.worker);
-        let w = worker.get_or_insert_with(spawn_worker);
+        // A thread that stopped is replaced; its ports have no nodes any
+        // more (`NetPort::problem`).
+        let w = match worker.take() {
+            Some(w) if !w.thread.is_finished() => w,
+            stopped => {
+                if stopped.is_some() {
+                    warn!("net audio: the PipeWire thread stopped; starting another");
+                }
+                spawn_worker()?
+            }
+        };
+        let w = worker.insert(w);
         w.ports += 1;
         w.next_id += 1;
         let id = w.next_id;
@@ -409,17 +449,19 @@ impl NetAudio {
                 state: state.clone(),
             },
         ));
-        NetPort {
+        Ok(NetPort {
             worker: self.worker.clone(),
+            generation: w.generation,
             id,
             state,
-        }
+        })
     }
 }
 
 /// A peer's nodes; dropping it removes them. `Send + Sync`.
 pub struct NetPort {
     worker: Arc<Mutex<Option<Worker>>>,
+    generation: u64,
     id: u64,
     state: Arc<State>,
 }
@@ -456,12 +498,28 @@ impl NetPort {
             sending: s.recent(&s.sent),
         }
     }
+
+    /// Why its nodes are missing (PipeWire unreachable, nodes refused, the
+    /// PipeWire thread stopped); `None` while they are up or coming up.
+    pub fn problem(&self) -> Option<String> {
+        let running = lock(&self.worker)
+            .as_ref()
+            .is_some_and(|w| w.generation == self.generation && !w.thread.is_finished());
+        if !running {
+            return Some("the network audio thread stopped".into());
+        }
+        self.state
+            .problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Drop for NetPort {
     fn drop(&mut self) {
         let mut worker = lock(&self.worker);
-        let Some(w) = worker.as_mut() else {
+        let Some(w) = worker.as_mut().filter(|w| w.generation == self.generation) else {
             return;
         };
         let _ = w.tx.send(Cmd::Close(self.id));
@@ -477,23 +535,29 @@ fn lock(worker: &Mutex<Option<Worker>>) -> MutexGuard<'_, Option<Worker>> {
     worker.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn spawn_worker() -> Worker {
+/// Start the PipeWire thread and wait until its loop is set up.
+fn spawn_worker() -> Result<Worker, String> {
     let (tx, rx) = pw::channel::channel();
-    let spawned = std::thread::Builder::new()
+    let (ready, started) = std::sync::mpsc::channel();
+    let thread = std::thread::Builder::new()
         .name("hako-net".into())
         .spawn(move || {
-            if let Err(e) = run(rx) {
-                warn!("net audio: {e}");
+            if let Err(e) = run(rx, &ready) {
+                let _ = ready.send(Err(e.to_string()));
             }
-        });
-    if let Err(e) = spawned {
-        warn!("net audio: cannot start thread: {e}");
-    }
-    Worker {
+        })
+        .map_err(|e| format!("cannot start the network audio thread: {e}"))?;
+    started
+        .recv()
+        .unwrap_or_else(|_| Err("the thread ended".into()))
+        .map_err(|e| format!("network audio: {e}"))?;
+    Ok(Worker {
         tx,
+        thread,
+        generation: GENERATION.fetch_add(1, Ordering::Relaxed),
         ports: 0,
         next_id: 0,
-    }
+    })
 }
 
 /// Fields drop in order: the listener is unhooked before the stream goes.
@@ -529,7 +593,10 @@ struct Engine {
 
 type EngineRc = Rc<RefCell<Engine>>;
 
-fn run(rx: pw::channel::Receiver<Cmd>) -> Result<(), pw::Error> {
+fn run(
+    rx: pw::channel::Receiver<Cmd>,
+    ready: &std::sync::mpsc::Sender<Result<(), String>>,
+) -> Result<(), pw::Error> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
@@ -575,6 +642,7 @@ fn run(rx: pw::channel::Receiver<Cmd>) -> Result<(), pw::Error> {
         .update_timer(Some(DRIFT_TICK), Some(DRIFT_TICK))
         .into_sync_result()?;
 
+    let _ = ready.send(Ok(()));
     mainloop.run();
     // Streams and the connection go before the context and loop.
     let mut e = engine.borrow_mut();
@@ -600,7 +668,10 @@ fn tick(engine: &EngineRc, context: &pw::context::ContextRc) {
         match connect(context) {
             Ok(conn) => e.conn = Some(conn),
             Err(err) => {
-                debug!("net audio: cannot connect to PipeWire: {err}");
+                for port in e.ports.values() {
+                    let problem = format!("cannot connect to PipeWire: {err}");
+                    port.spec.state.set_problem(&port.spec.label, Some(problem));
+                }
                 return;
             }
         }
@@ -614,9 +685,13 @@ fn tick(engine: &EngineRc, context: &pw::context::ContextRc) {
             port.live = None;
         }
         if port.live.is_none() {
+            let state = &port.spec.state;
             match open_port(&conn.core, &port.spec) {
-                Ok(live) => port.live = Some(live),
-                Err(err) => warn!("net audio: nodes for {}: {err}", port.spec.label),
+                Ok(live) => {
+                    port.live = Some(live);
+                    state.set_problem(&port.spec.label, None);
+                }
+                Err(err) => state.set_problem(&port.spec.label, Some(err.to_string())),
             }
         }
     }
@@ -947,6 +1022,11 @@ mod tests {
         // Far behind: the peer started counting again.
         j.push(0, &block(MS, 4));
         assert_eq!((j.len, j.ring[j.start]), (MS, [4, 4]));
+        // A position that would wrap restarts the buffer, no overflow.
+        j.push(u64::MAX - 10, &block(MS, 5));
+        assert_eq!((j.len, j.end, j.playing), (0, None, false));
+        j.push(0, &block(MS, 6));
+        assert_eq!((j.len, j.ring[j.start]), (MS, [6, 6]));
     }
 
     #[test]
@@ -1078,20 +1158,22 @@ mod tests {
             let engine = engine().unwrap();
             let sent = Arc::new(AtomicUsize::new(0));
             let audio = NetAudio::new();
-            let port = audio.open(
-                &send_node,
-                &recv_node,
-                "test",
-                12,
-                Box::new({
-                    let sent = sent.clone();
-                    move |_, block| {
-                        if block.iter().any(|&s| s.unsigned_abs() > 8_000) {
-                            sent.fetch_add(1, Ordering::Relaxed);
+            let port = audio
+                .open(
+                    &send_node,
+                    &recv_node,
+                    "test",
+                    12,
+                    Box::new({
+                        let sent = sent.clone();
+                        move |_, block| {
+                            if block.iter().any(|&s| s.unsigned_abs() > 8_000) {
+                                sent.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
-                    }
-                }),
-            );
+                    }),
+                )
+                .unwrap();
 
             pw::init();
             let mainloop = pw::main_loop::MainLoopRc::new(None).unwrap();

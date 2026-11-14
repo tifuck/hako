@@ -26,12 +26,13 @@ use hako_core::mixer::{
     load_mixer, normalize_mixer_file, update_mixer, InputKind, MixerFile, MixerOp, MixerState,
     MixerStatus, OutputKind, Scene, Source, MAX_MIXER_OPS,
 };
-use hako_core::protocol::AdapterEvent;
+use hako_core::protocol::{is_new_error, AdapterEvent};
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// How often the graph is healed (crashed strips, devices that came or went).
 const HEAL: Duration = Duration::from_millis(500);
@@ -39,6 +40,11 @@ const HEAL: Duration = Duration::from_millis(500);
 const WRITE_DELAY: Duration = Duration::from_millis(500);
 /// Longest a request waits for the graph (a `PatchMixer`, teardown).
 const APPLY_WAIT: Duration = Duration::from_secs(15);
+/// First wait before a crashed engine restarts; doubles per crash in a row.
+const RESTART_FIRST: Duration = Duration::from_secs(1);
+const RESTART_MAX: Duration = Duration::from_secs(30);
+/// An engine that ran this long since its last crash starts over at `RESTART_FIRST`.
+const RECOVERED_AFTER: Duration = Duration::from_secs(60);
 
 enum Cmd {
     Apply(MixerFile, Option<mpsc::Sender<()>>),
@@ -47,6 +53,9 @@ enum Cmd {
     /// Kill-switch: tear down and stay down until the next `Apply`.
     Reset(mpsc::Sender<()>),
     Shutdown(mpsc::Sender<()>),
+    /// Crash the engine (its reply is dropped by the panic).
+    #[cfg(test)]
+    Panic(mpsc::Sender<()>),
 }
 
 /// `mixer.toml` as the daemon has it, ahead of the disk while a fader
@@ -55,6 +64,8 @@ enum Cmd {
 struct FileCache {
     file: Option<MixerFile>,
     dirty: Option<Instant>,
+    /// The last failed write's error, pushed once until a write succeeds.
+    failed: Option<String>,
 }
 
 struct Shared {
@@ -93,17 +104,24 @@ impl Shared {
         if !now && since.elapsed() < WRITE_DELAY {
             return;
         }
-        cache.dirty = None;
         if let Err(e) = update_mixer(&self.paths, |f| {
             *f = file;
             Ok(())
         }) {
-            warn!("mixer.toml: {e:#}");
-            let _ = self.events.send(AdapterEvent::Error {
-                device: None,
-                message: format!("Mixer: saving mixer.toml failed: {e:#}"),
-            });
+            // Still pending: retried after another `WRITE_DELAY`.
+            cache.dirty = Some(Instant::now());
+            let error = format!("{e:#}");
+            if is_new_error(&mut cache.failed, Some(&error)) {
+                warn!("mixer.toml: {error}");
+                let _ = self.events.send(AdapterEvent::Error {
+                    device: None,
+                    message: format!("Mixer: saving mixer.toml failed: {error}"),
+                });
+            }
+            return;
         }
+        cache.dirty = None;
+        is_new_error(&mut cache.failed, None);
     }
 }
 
@@ -145,14 +163,19 @@ impl MixerService {
             handed_over: false,
             suppressed: false,
             game: None,
+            latency,
             audio: audio.clone(),
             shared: shared.clone(),
         };
         if let Err(e) = std::thread::Builder::new()
             .name("hako-mixer".into())
-            .spawn(move || actor.run(rx))
+            .spawn(move || supervise(actor, rx))
         {
             warn!("spawn mixer thread: {e}");
+            let _ = shared.events.send(AdapterEvent::Error {
+                device: None,
+                message: format!("Mixer: the engine could not start: {e}"),
+            });
         }
         match shared.file() {
             Ok(file) => {
@@ -263,14 +286,28 @@ impl MixerService {
             }
             cache.file = Some(next.clone());
             // Sent under the lock: the actor sees edits in file order.
-            let _ = self.tx.send(Cmd::Apply(next.clone(), Some(reply)));
+            if self.tx.send(Cmd::Apply(next.clone(), Some(reply))).is_err() {
+                return Err(PatchError::Io(anyhow::anyhow!(
+                    "the change is kept, but the mixer engine is not running (restart hakod)"
+                )));
+            }
             next
         };
-        let _ = done.recv_timeout(APPLY_WAIT);
-        Ok(MixerState {
-            file,
-            status: lock(&self.shared.status).clone(),
-        })
+        match done.recv_timeout(APPLY_WAIT) {
+            Ok(()) => Ok(MixerState {
+                file,
+                status: lock(&self.shared.status).clone(),
+            }),
+            Err(RecvTimeoutError::Timeout) => Err(PatchError::Io(anyhow::anyhow!(
+                "the change is kept, but the mixer did not follow within {} s (it is still \
+                 being applied)",
+                APPLY_WAIT.as_secs()
+            ))),
+            Err(RecvTimeoutError::Disconnected) => Err(PatchError::Io(anyhow::anyhow!(
+                "the change is kept, but the mixer engine crashed applying it (it restarts on \
+                 its own)"
+            ))),
+        }
     }
 
     /// Kill-switch: the graph goes and stays down until the next patch.
@@ -506,6 +543,37 @@ fn is_fader(op: &MixerOp) -> bool {
     )
 }
 
+/// Runs the actor. A panic (a bug in graph code) must not leave the mixer
+/// dead with ChatMix handed over: ChatMix comes back, the owner is told, and
+/// the actor restarts with a fresh graph after a backoff.
+fn supervise(mut actor: Actor, rx: mpsc::Receiver<Cmd>) {
+    let mut crashes = 0;
+    loop {
+        let started = Instant::now();
+        if catch_unwind(AssertUnwindSafe(|| actor.run(&rx))).is_ok() {
+            return;
+        }
+        if started.elapsed() >= RECOVERED_AFTER {
+            crashes = 0;
+        }
+        let wait = RESTART_FIRST
+            .saturating_mul(1 << crashes.min(5))
+            .min(RESTART_MAX);
+        crashes += 1;
+        error!("mixer engine crashed; restarting it in {wait:?}");
+        let events = actor.shared.events.clone();
+        if catch_unwind(AssertUnwindSafe(|| actor.recover(wait))).is_err() {
+            error!("mixer engine: recovering from a crash failed; stopped");
+            let _ = events.send(AdapterEvent::Error {
+                device: None,
+                message: "Mixer: the engine crashed and could not recover; restart hakod".into(),
+            });
+            return;
+        }
+        std::thread::sleep(wait);
+    }
+}
+
 /// Owns the graph; every PipeWire change happens on its thread.
 struct Actor {
     graph: MixerGraph,
@@ -517,12 +585,14 @@ struct Actor {
     suppressed: bool,
     /// Last told `AudioService::mixer_default` (a `Hako_Game` input is up).
     game: Option<bool>,
+    /// `node.latency` in samples, for a graph rebuilt after a crash.
+    latency: u32,
     audio: Arc<AudioService>,
     shared: Arc<Shared>,
 }
 
 impl Actor {
-    fn run(mut self, rx: mpsc::Receiver<Cmd>) {
+    fn run(&mut self, rx: &mpsc::Receiver<Cmd>) {
         loop {
             match rx.recv_timeout(HEAL) {
                 Ok(Cmd::Apply(file, reply)) => {
@@ -539,6 +609,7 @@ impl Actor {
                     self.sync();
                 }
                 Ok(Cmd::Latency(samples)) => {
+                    self.latency = samples;
                     self.graph.set_latency(samples);
                     self.sync();
                 }
@@ -555,12 +626,41 @@ impl Actor {
                     let _ = reply.send(());
                     return;
                 }
+                #[cfg(test)]
+                Ok(Cmd::Panic(_reply)) => panic!("mixer engine test crash"),
                 Err(RecvTimeoutError::Timeout) => self.sync(),
                 Err(RecvTimeoutError::Disconnected) => return self.graph.teardown(),
             }
             self.shared.flush(false);
             self.publish();
         }
+    }
+
+    /// After a crash: the graph's processes go (a fresh graph is built at
+    /// the next sync), ChatMix is handed back, the status says not running.
+    fn recover(&mut self, wait: Duration) {
+        self.graph = MixerGraph::new(Naming::daemon(), self.latency);
+        self.game = None;
+        let handed_back = std::mem::take(&mut self.handed_over);
+        if handed_back {
+            if let Err(e) = self.audio.hand_over(false) {
+                warn!("mixer crashed: {e:#}");
+            }
+        }
+        lock(&self.shared.status).running = false;
+        lock(&self.shared.meters).clear();
+        let _ = self.shared.events.send(AdapterEvent::Error {
+            device: None,
+            message: format!(
+                "Mixer: the engine crashed; it restarts in {} s{}",
+                wait.as_secs(),
+                if handed_back {
+                    " (ChatMix is back on its own until then)"
+                } else {
+                    ""
+                }
+            ),
+        });
     }
 
     /// Build / heal the graph while on; tear it down and hand ChatMix back
@@ -972,6 +1072,67 @@ mod tests {
             .unwrap();
         mixer.shutdown();
         assert_eq!(load_mixer(&paths).unwrap().live.outputs[0].gain_db, -9.0);
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_crashed_engine_restarts_and_a_dead_one_fails_patches() {
+        let paths = paths("crash");
+        let (mixer, mut events) = service(&paths);
+        // The change that crashed it gets an error, not its old state.
+        let (reply, done) = mpsc::channel();
+        mixer.tx.send(Cmd::Panic(reply)).unwrap();
+        assert_eq!(done.recv(), Err(mpsc::RecvError));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut told = false;
+        while !told && Instant::now() < deadline {
+            match events.try_recv() {
+                Ok(AdapterEvent::Error { message, .. }) => told = message.contains("crashed"),
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(told, "no Error event");
+        // Restarted (after its backoff): patches are applied again.
+        let state = mixer.patch(&[b1()]).unwrap();
+        assert_eq!(state.file.live.outputs.len(), 1);
+
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        let dead = MixerService {
+            tx,
+            shared: mixer.shared.clone(),
+            audio: mixer.audio.clone(),
+        };
+        let mute = MixerOp::SetOutputMute {
+            output: "B1".into(),
+            mute: true,
+        };
+        assert!(matches!(dead.patch(&[mute]), Err(PatchError::Io(_))));
+        mixer.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_failed_fader_write_stays_pending_and_is_retried() {
+        let paths = paths("flush-retry");
+        let (mixer, _events) = service(&paths);
+        mixer.patch(&[b1()]).unwrap();
+        mixer
+            .patch(&[MixerOp::SetOutputGain {
+                output: "B1".into(),
+                gain_db: -9.0,
+            }])
+            .unwrap();
+        // A directory in the file's place: reading it fails.
+        std::fs::remove_file(mixer_path(&paths)).unwrap();
+        std::fs::create_dir(mixer_path(&paths)).unwrap();
+        mixer.shared.flush(true);
+        assert!(lock(&mixer.shared.cache).dirty.is_some(), "still pending");
+        std::fs::remove_dir(mixer_path(&paths)).unwrap();
+        mixer.shared.flush(true);
+        assert_eq!(load_mixer(&paths).unwrap().live.outputs[0].gain_db, -9.0);
+        mixer.shutdown();
         let _ = std::fs::remove_dir_all(&paths.root);
     }
 

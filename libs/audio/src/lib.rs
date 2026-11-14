@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{info, warn};
 
 pub mod latency;
 pub mod meters;
@@ -48,6 +48,10 @@ const LADSPA_DIRS: [&str; 4] = [
 ];
 /// How long a spawned node may take to show its ports.
 const NODE_WAIT: Duration = Duration::from_secs(4);
+/// How long the default sink may take to show in a fresh registry cache.
+const DEFAULT_WAIT: Duration = Duration::from_secs(1);
+/// How long a killed child may take to exit.
+const STOP_WAIT: Duration = Duration::from_secs(2);
 /// LSP's UI default. Unset, PipeWire falls back to the LADSPA minimum (0 ms),
 /// which makes the gate/compressor detector follow raw peaks and chatter.
 const SIDECHAIN_REACTIVITY_MS: f32 = 10.0;
@@ -66,14 +70,17 @@ struct DefaultState {
 }
 
 impl DefaultState {
+    /// An original a failed restore left is still the one to go back to.
     fn claim(&mut self, owner: DefaultOwner, sink: String, session_default: Option<String>) {
-        if self.claims.is_empty() {
+        if self.claims.is_empty() && self.session_original.is_none() {
             self.session_original = session_default;
         }
         self.claims.retain(|(held, _)| *held != owner);
         self.claims.push((owner, sink));
     }
 
+    /// The sink to make the default now that `owner` let go. The session's
+    /// original is kept until `restored` (a failed restore can be retried).
     fn release(&mut self, owner: DefaultOwner) -> Option<String> {
         let was_current = self.claims.last().is_some_and(|(held, _)| *held == owner);
         self.claims.retain(|(held, _)| *held != owner);
@@ -83,7 +90,14 @@ impl DefaultState {
         self.claims
             .last()
             .map(|(_, sink)| sink.clone())
-            .or_else(|| self.session_original.take())
+            .or_else(|| self.session_original.clone())
+    }
+
+    /// What `release` returned is the default (or the user's pick stands).
+    fn restored(&mut self) {
+        if self.claims.is_empty() {
+            self.session_original = None;
+        }
     }
 
     /// The sink hako made the default, if any.
@@ -235,7 +249,8 @@ impl AudioService {
     /// The mixer takes ChatMix over (`on`) or gives it back. Taking over
     /// stops the ChatMix loopbacks; the default-sink claim stays, so the
     /// mixer's `Hako_Game` picks up where they left off. Giving back
-    /// rebuilds them as they were.
+    /// rebuilds them as they were; if they don't come back, the claim goes
+    /// (the mixer's `Hako_Game` is gone).
     pub fn hand_over(&self, on: bool) -> Result<()> {
         let mut state = self.state();
         if state.handed_over == on {
@@ -253,14 +268,20 @@ impl AudioService {
         let mut result = Ok(());
         if let Some(sink) = state.parked_sink.take() {
             if !state.chatmix_suppressed && !state.chatmix.active() {
-                let chatmix =
-                    start_chatmix_locked(&mut state, &sink).and_then(|()| match state.dial {
-                        Some((game, chat)) => set_chatmix_volumes_now(game, chat)
-                            .map(|()| state.chatmix.volumes = Some((game, chat))),
-                        None => Ok(()),
-                    });
+                let chatmix = start_chatmix_locked(&mut state, &sink);
                 record_result(&mut state.chatmix_error, &chatmix);
                 result = chatmix;
+            }
+        }
+        if !state.chatmix.active() {
+            let released = release_default(&mut state.defaults, DefaultOwner::ChatMix);
+            match released {
+                Err(e) if result.is_ok() => {
+                    result = Err(e);
+                    record_result(&mut state.chatmix_error, &result);
+                }
+                Err(e) => warn!("giving the default output back: {e:#}"),
+                Ok(()) => {}
             }
         }
         info!("ChatMix back from the mixer");
@@ -444,7 +465,10 @@ impl AudioService {
         let mut chatmix = destroy_chatmix_locked(&mut state);
         kill_orphans_locked(&state);
         if let Some(original) = state.defaults.restore() {
-            chatmix = chatmix.and(set_default_sink(&original));
+            if let Err(e) = restore_default_sink(&original) {
+                state.defaults.session_original = Some(original);
+                chatmix = chatmix.and(Err(e));
+            }
         }
         record_result(&mut state.chatmix_error, &chatmix);
         seen(&mut state);
@@ -504,7 +528,7 @@ impl Drop for AudioService {
         // Only what this instance owns; process-wide sweeps are `kill_orphans`.
         let _ = destroy_chatmix_locked(state);
         if let Some(original) = state.defaults.restore() {
-            let _ = set_default_sink(&original);
+            let _ = restore_default_sink(&original);
         }
     }
 }
@@ -529,27 +553,45 @@ fn seen(state: &mut AudioState) {
 }
 
 fn ensure_chatmix_locked(state: &mut AudioState, sink_regexes: &[&str]) -> Result<()> {
-    let mut found = Err(anyhow!("no ChatMix sink pattern given"));
+    let mut errors = Vec::new();
     for pattern in sink_regexes {
-        found = find_sink_node_name(pattern);
-        if found.is_ok() {
-            break;
+        match find_sink_node_name(pattern) {
+            Ok(sink) => return start_chatmix_locked(state, &sink),
+            Err(error) => errors.push(format!("{error:#}")),
         }
     }
-    start_chatmix_locked(state, &found?)
+    if errors.is_empty() {
+        bail!("no ChatMix sink pattern given");
+    }
+    bail!("{}", errors.join("; "))
 }
 
-/// The loopbacks into `sink`, then the default-sink claim if wanted.
+/// The loopbacks into `sink` at the last dial position, then the
+/// default-sink claim if wanted. A failed step takes the loopbacks down
+/// again (ChatMix is retried while not up).
 fn start_chatmix_locked(state: &mut AudioState, sink: &str) -> Result<()> {
     spawn_chatmix(state, sink)?;
-    if state.chatmix_set_default {
-        if let Err(error) = claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
-        {
-            cleanup_chatmix_children(&mut state.chatmix);
-            return Err(error);
+    let ready = apply_dial(state).and_then(|()| {
+        if state.chatmix_set_default {
+            claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
+        } else {
+            Ok(())
         }
+    });
+    if let Err(error) = ready {
+        cleanup_chatmix_children(&mut state.chatmix);
+        return Err(error);
     }
     info!("ChatMix sinks ready -> {sink}");
+    Ok(())
+}
+
+/// Fresh loopbacks play at unity: give them the dial's volumes, if reported.
+fn apply_dial(state: &mut AudioState) -> Result<()> {
+    if let Some((game, chat)) = state.dial {
+        set_chatmix_volumes_now(game, chat).context("ChatMix volumes")?;
+        state.chatmix.volumes = Some((game, chat));
+    }
     Ok(())
 }
 
@@ -578,20 +620,13 @@ fn spawn_chatmix(state: &mut AudioState, sink: &str) -> Result<()> {
     Ok(())
 }
 
-/// Respawn the loopbacks on the same sink (a new latency). The default-sink
-/// claim stays; WirePlumber's configured default is `Hako_Game` all along.
+/// Respawn the loopbacks on the same sink (a new latency), with the dial's
+/// volumes and the default-sink claim made again.
 fn restart_chatmix_locked(state: &mut AudioState) -> Result<()> {
-    let (Some(sink), volumes) = (state.chatmix.sink.clone(), state.chatmix.volumes) else {
+    let Some(sink) = state.chatmix.sink.clone() else {
         return Ok(());
     };
-    spawn_chatmix(state, &sink)?;
-    if let Some((game, chat)) = volumes {
-        set_chatmix_volumes_now(game, chat)?;
-        state.chatmix.volumes = volumes;
-    }
-    if state.defaults.held() == Some(CHATMIX_GAME) {
-        set_default_sink(CHATMIX_GAME)?;
-    }
+    start_chatmix_locked(state, &sink)?;
     info!(
         "ChatMix rebuilt for latency {}",
         node_latency(state.latency)
@@ -635,14 +670,31 @@ fn cleanup_chatmix_children(chatmix: &mut ChatMixState) {
 
 /// Make `sink` the default for `owner`, remembering the session's original.
 fn claim_default(defaults: &mut DefaultState, owner: DefaultOwner, sink: &str) -> Result<()> {
-    let original = if defaults.claims.is_empty() {
-        current_default_sink().ok()
+    let original = if defaults.claims.is_empty() && defaults.session_original.is_none() {
+        session_default()
     } else {
         None
     };
     set_default_sink(sink)?;
     defaults.claim(owner, sink.to_string(), original);
     Ok(())
+}
+
+/// The session's default sink, given a moment to show in a fresh cache.
+/// Unknown, the claim still goes ahead (ChatMix should not wait on it); the
+/// server picks a fallback when hako lets go.
+fn session_default() -> Option<String> {
+    let found = engine().and_then(|engine| {
+        engine.wait_for(DEFAULT_WAIT, |graph| Ok(graph.default_sink.is_some()))?;
+        current_default_sink()
+    });
+    match found {
+        Ok(sink) => Some(sink),
+        Err(e) => {
+            warn!("default output unknown, it will not be restored: {e:#}");
+            None
+        }
+    }
 }
 
 fn release_default(defaults: &mut DefaultState, owner: DefaultOwner) -> Result<()> {
@@ -658,10 +710,19 @@ fn release_default(defaults: &mut DefaultState, owner: DefaultOwner) -> Result<(
         if moved {
             info!("default output changed by the user; not restoring {sink}");
         } else {
-            set_default_sink(&sink)?;
+            restore_default_sink(&sink)?;
         }
+        defaults.restored();
     }
     Ok(())
+}
+
+/// Make `name` the configured default again, present or not: WirePlumber
+/// keeps it by name and uses it once it is there.
+fn restore_default_sink(name: &str) -> Result<()> {
+    engine()?
+        .set_default_sink(name)
+        .with_context(|| format!("restore default output {name}"))
 }
 
 /// The user picked another output while `ours` was the default. When `ours`
@@ -740,15 +801,26 @@ fn ensure_running(child: &mut Child, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Kill `child` and reap it; one that does not exit within `STOP_WAIT`
+/// (stuck in the kernel) is an error, not a hang.
 fn stop_child(child: &mut Child) -> Result<()> {
-    if child
-        .try_wait()
-        .context("poll child before stopping")?
-        .is_none()
-    {
+    if !matches!(child.try_wait(), Ok(Some(_))) {
         child.kill().context("kill owned audio child")?;
     }
-    child.wait().context("wait for owned audio child")?;
+    let deadline = Instant::now() + STOP_WAIT;
+    while child
+        .try_wait()
+        .context("wait for owned audio child")?
+        .is_none()
+    {
+        if Instant::now() >= deadline {
+            bail!(
+                "audio child {} did not exit within {STOP_WAIT:?}",
+                child.id()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     Ok(())
 }
 
@@ -1160,16 +1232,17 @@ fn output_within(cmd: &mut Command, timeout: Duration) -> Result<Output> {
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let deadline = Instant::now() + timeout;
     let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("wait for {bin}"))?
-        {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("{bin} did not finish within {timeout:?}");
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {}
+            Ok(None) => {
+                let _ = stop_child(&mut child);
+                bail!("{bin} did not finish within {timeout:?}");
+            }
+            Err(e) => {
+                let _ = stop_child(&mut child);
+                return Err(e).with_context(|| format!("wait for {bin}"));
+            }
         }
         std::thread::sleep(Duration::from_millis(5));
     };
@@ -1932,10 +2005,54 @@ mod tests {
         defaults.claim(DefaultOwner::ChatMix, "game".into(), s("speakers"));
         assert_eq!(defaults.held(), Some("game"));
         assert_eq!(defaults.release(DefaultOwner::ChatMix), s("speakers"));
+        defaults.restored();
         assert_eq!(defaults.release(DefaultOwner::ChatMix), None);
         defaults.claim(DefaultOwner::ChatMix, "game".into(), s("hdmi"));
         assert_eq!(defaults.restore(), s("hdmi"));
         assert_eq!(defaults.held(), None);
+    }
+
+    #[test]
+    fn an_original_whose_restore_failed_is_kept() {
+        let s = |n: &str| Some(n.to_string());
+        let mut defaults = DefaultState::default();
+        defaults.claim(DefaultOwner::ChatMix, "game".into(), s("speakers"));
+        // Restoring "speakers" failed: no `restored`.
+        assert_eq!(defaults.release(DefaultOwner::ChatMix), s("speakers"));
+        assert_eq!(defaults.held(), None);
+        // A new claim does not take the fallback the server picked meanwhile.
+        defaults.claim(DefaultOwner::ChatMix, "game".into(), s("hdmi"));
+        assert_eq!(defaults.release(DefaultOwner::ChatMix), s("speakers"));
+        defaults.restored();
+        assert_eq!(defaults.restore(), None);
+    }
+
+    #[test]
+    fn chatmix_that_does_not_come_back_lets_go_of_the_default() {
+        let audio = AudioService::new();
+        audio.hand_over(true).unwrap();
+        // The mixer's `Hako_Game` held the default (original unknown: no
+        // PipeWire call is needed to let go).
+        audio
+            .state()
+            .defaults
+            .claim(DefaultOwner::ChatMix, CHATMIX_GAME.into(), None);
+        // No ChatMix sink was parked: ChatMix does not come back.
+        audio.hand_over(false).unwrap();
+        assert_eq!(audio.state().defaults.held(), None);
+    }
+
+    #[test]
+    fn every_chatmix_sink_pattern_says_why_it_failed() {
+        let audio = AudioService::new();
+        // Bad regexes fail before any PipeWire lookup.
+        let error = audio.ensure_chatmix(&["(first", "[second"]).unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("(first") && error.contains("[second"),
+            "{error}"
+        );
+        assert!(audio.ensure_chatmix(&[]).is_err());
     }
 
     #[test]

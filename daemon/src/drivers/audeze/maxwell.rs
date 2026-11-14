@@ -565,10 +565,12 @@ impl MaxwellAdapter {
             (self.battery.percent, self.battery.present) = (None, false);
             return Ok(());
         };
-        (self.battery.percent, self.battery.present) = (Some(pct), true);
+        self.battery.percent = Some(pct);
         if !was_online {
+            // Present only once this worked, so a failed read is retried.
             self.read_sidetone()?;
         }
+        self.battery.present = true;
         if let Some(m) = self.read_key(KEY_MIC_MUTE)? {
             // 00 while muted, FF otherwise.
             merge_setting(&mut self.settings, K::MicMute, SettingValue::Bool(m == 0));
@@ -648,6 +650,7 @@ impl DeviceAdapter for MaxwellAdapter {
             self.spec.pids[0],
             &self.settings,
         )
+        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn tick(&mut self) -> Result<()> {
@@ -841,11 +844,17 @@ mod tests {
         params: std::collections::HashMap<u8, u8>,
         sent: Sent,
         replies: std::collections::VecDeque<[u8; SIZE]>,
+        /// The next read of this key fails (a dropped link).
+        fail_key: Option<u8>,
     }
 
     impl Link for FakeHeadset {
         fn send(&mut self, r: &[u8]) -> Result<()> {
             let body = fragment(r)[4..].to_vec();
+            if (body[0], body[1]) == (0x01, 0x09) && self.fail_key == Some(body[2]) {
+                self.fail_key = None;
+                anyhow::bail!("link dropped");
+            }
             self.sent.lock().unwrap().push(body.clone());
             let (kind, reply) = match (body[0], body[1]) {
                 (0x01, 0x09) => {
@@ -900,6 +909,7 @@ mod tests {
             params: [(PARAM_SIDETONE_ON, sidetone_on), (PARAM_CHATMIX, 10)].into(),
             sent: sent.clone(),
             replies: Default::default(),
+            fail_key: None,
         };
         let a = MaxwellAdapter {
             spec,
@@ -974,6 +984,30 @@ mod tests {
         assert_eq!(
             get_setting(&a.settings, K::MicSideTone),
             Some(&SettingValue::Int(0))
+        );
+    }
+
+    #[test]
+    fn a_failed_sidetone_read_is_retried() {
+        let (mut a, sent) = headset(&MAXWELL, SettingsMap::new(), 1);
+        let fake = FakeHeadset {
+            keys: [(KEY_SIDETONE, 9), (KEY_SIDETONE_MAX, 31)].into(),
+            params: [(PARAM_SIDETONE_ON, 1)].into(),
+            sent,
+            replies: Default::default(),
+            fail_key: Some(KEY_SIDETONE_MAX),
+        };
+        a.link = Some(Box::new(fake));
+        assert!(a.poll().is_err());
+        assert!(!a.battery.present);
+        assert_eq!(get_setting(&a.settings, K::MicSideTone), None);
+        // The next poll reads it again, now successfully.
+        a.poll().unwrap();
+        assert!(a.battery.present);
+        assert_eq!(a.sidetone_max, 31);
+        assert_eq!(
+            get_setting(&a.settings, K::MicSideTone),
+            Some(&SettingValue::Int(9))
         );
     }
 

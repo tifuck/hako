@@ -1124,6 +1124,15 @@ pub struct UpdateOffer {
 const TOAST_W: f32 = 340.0;
 const MAX_TOASTS: usize = 4;
 
+/// Keep at most `MAX_TOASTS`, dropping the oldest non-error ones first so a
+/// burst of confirmations can't push an error out before it was read.
+pub(crate) fn trim_toasts(list: &mut Vec<Toast>) {
+    while list.len() > MAX_TOASTS {
+        let i = list.iter().position(|t| t.tone != Tone::Error).unwrap_or(0);
+        list.remove(i);
+    }
+}
+
 /// Toast stack floating over the bottom-right corner; it never moves the
 /// layout underneath. Expired or dismissed toasts are removed from `list`.
 /// Returns the answer to `offer`: `Some(true)` = update now, `Some(false)` = later.
@@ -1132,8 +1141,7 @@ pub fn toasts(
     list: &mut Vec<Toast>,
     offer: Option<&UpdateOffer>,
 ) -> Option<bool> {
-    let excess = list.len().saturating_sub(MAX_TOASTS);
-    list.drain(..excess);
+    trim_toasts(list);
     if list.is_empty() && offer.is_none() {
         return None;
     }

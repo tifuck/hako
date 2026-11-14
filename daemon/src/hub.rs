@@ -5,7 +5,7 @@ use crate::hid::HidDeviceInfo;
 use crate::mixer::{MixerService, PatchError};
 use crate::net::NetService;
 use crate::remap::RemapEngine;
-use crate::worker::{DeviceHandle, Refused};
+use crate::worker::{self, DeviceHandle, Refused};
 use anyhow::{Context, Result};
 use hako_audio::meters::MeterService;
 use hako_audio::net::NetAudio;
@@ -166,7 +166,18 @@ impl DaemonHub {
             .filter(|(_, s)| s.connected)
             .map(|(m, s)| (m, s.id))
             .collect();
-        let mut skip: Vec<&'static Model> = Vec::new();
+        // A driver that crashed its worker is reopened with backoff too.
+        let crashed: Vec<&'static Model> = self
+            .handles()
+            .iter()
+            .filter(|h| {
+                let s = h.snapshot();
+                !s.connected
+                    && worker::crashes(&s.id.key()).is_some_and(|(n, at)| now < at + backoff(n))
+            })
+            .map(|h| h.model)
+            .collect();
+        let mut skip: Vec<&'static Model> = crashed;
         {
             let mut rescanned = lock(&self.rescanned);
             for (m, _) in &connected {
@@ -204,6 +215,43 @@ impl DaemonHub {
             Default::default()
         });
 
+        // Off the runtime: a worker's first writes (driver code, HID) run
+        // before spawning returns.
+        let (events, paths, nodes) = (self.events.clone(), self.paths.clone(), present.clone());
+        let spawned: Vec<(&'static Model, Result<DeviceHandle>)> =
+            tokio::task::spawn_blocking(move || {
+                discovered
+                    .into_iter()
+                    .map(|(model, a)| {
+                        let nodes = model_nodes(model, &nodes);
+                        let handle =
+                            DeviceHandle::spawn(model, a, events.clone(), nodes, paths.clone());
+                        (model, handle)
+                    })
+                    .collect()
+            })
+            .await
+            .unwrap_or_else(|e| {
+                warn!("spawn join: {e}");
+                Vec::new()
+            });
+        let mut attempted = attempted;
+        let mut handles = Vec::new();
+        for (model, spawned) in spawned {
+            match spawned {
+                Ok(handle) => handles.push(handle),
+                // It did not open after all: back off like a failed open.
+                Err(e) => {
+                    warn!("{}: {e:#}", model.name);
+                    let failed = (model, false, Some(format!("{e:#}")));
+                    match attempted.iter_mut().find(|(m, ..)| m.same(model)) {
+                        Some(entry) => *entry = failed,
+                        None => attempted.push(failed),
+                    }
+                }
+            }
+        }
+
         {
             let mut retry = lock(&self.retry);
             for (model, ok, error) in attempted {
@@ -220,24 +268,17 @@ impl DaemonHub {
             }
         }
 
-        // Built before taking the map lock: spawning runs driver code (and
-        // may write the device), which must not happen under it.
-        let handles: Vec<DeviceHandle> = discovered
-            .into_iter()
-            .map(|(model, a)| {
-                let snap = a.snapshot();
-                if matches!(snap.kind, DeviceKind::Mouse | DeviceKind::Keyboard) && snap.connected {
-                    self.remap.attach(
-                        snap.id.clone(),
-                        snap.kind,
-                        model.remap_pids(&snap.id),
-                        &snap.name,
-                    );
-                }
-                let nodes = model_nodes(model, &present);
-                DeviceHandle::spawn(model, a, self.events.clone(), nodes, self.paths.clone())
-            })
-            .collect();
+        for h in &handles {
+            let snap = h.snapshot();
+            if matches!(snap.kind, DeviceKind::Mouse | DeviceKind::Keyboard) && snap.connected {
+                self.remap.attach(
+                    snap.id.clone(),
+                    snap.kind,
+                    h.model.remap_pids(&snap.id),
+                    &snap.name,
+                );
+            }
+        }
         let mut map = lock(&self.devices);
         // Reopened models replace their stale placeholders / dead adapters
         // (once per model: a receiver may return several devices).
@@ -304,13 +345,19 @@ impl DaemonHub {
             cfg.audio_latency = s.audio_latency.clone();
             Ok(())
         })?;
-        self.audio
-            .set_chatmix_default(cfg.chatmix_set_default_sink)
-            .context("saved, but the default sink could not follow")?;
-        self.mixer.set_latency(latency_samples(Some(&cfg)));
-        self.audio
-            .set_latency(latency_samples(Some(&cfg)))
-            .context("saved, but audio could not apply the new latency")?;
+        // Each applied even when another fails.
+        let latency = latency_samples(Some(&cfg));
+        self.mixer.set_latency(latency);
+        let mut failures = Vec::new();
+        if let Err(e) = self.audio.set_chatmix_default(cfg.chatmix_set_default_sink) {
+            failures.push(format!("the default sink could not follow: {e:#}"));
+        }
+        if let Err(e) = self.audio.set_latency(latency) {
+            failures.push(format!("audio could not apply the new latency: {e:#}"));
+        }
+        if !failures.is_empty() {
+            anyhow::bail!("saved, but {}", failures.join("; "));
+        }
         Ok(self.app_settings(&cfg))
     }
 
@@ -573,10 +620,15 @@ impl DaemonHub {
                 "invalid_value",
                 format!("{:?} is handled by the connection", req.method),
             ),
-            Method::GetMixer => match self.mixer.state() {
-                Ok(state) => IpcResponse::ok(id, state),
-                Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
-            },
+            Method::GetMixer => {
+                // Reads mixer.toml (waits for an edit in progress): off the runtime.
+                let mixer = self.mixer.clone();
+                match tokio::task::spawn_blocking(move || mixer.state()).await {
+                    Ok(Ok(state)) => IpcResponse::ok(id, state),
+                    Ok(Err(e)) => IpcResponse::err(id, "io", format!("{e:#}")),
+                    Err(e) => IpcResponse::err(id, "io", format!("mixer task: {e}")),
+                }
+            }
             Method::PatchMixer => match serde_json::from_value::<PatchMixerParams>(req.params) {
                 Ok(p) => {
                     // Waits for the graph (child processes): off the runtime.
@@ -679,6 +731,15 @@ impl DaemonHub {
                     None => Err(anyhow::anyhow!("unknown setting")),
                 };
                 if let Err(error) = result {
+                    // A worker that does not answer would make every later
+                    // key wait out its own timeout.
+                    if DeviceHandle::unresponsive(&error) {
+                        failures.push(format!(
+                            "{} {k}: {error:#} (its other settings were skipped)",
+                            m.name
+                        ));
+                        break;
+                    }
                     failures.push(format!("{} {k}: {error:#}", m.name));
                 }
             }
@@ -712,6 +773,9 @@ impl DaemonHub {
             Ok(())
         })
         .map(drop)
+        .with_context(|| {
+            format!("deleted {name:?}, but it could not be forgotten as the startup profile")
+        })
     }
 
     async fn save_profile(&self, name: &str) -> Result<()> {
@@ -737,16 +801,18 @@ impl DaemonHub {
                 devices.insert(snap.id.config_stem(), m);
             }
         }
+        // The file in memory: a fader drag not yet written counts. Unreadable,
+        // no profile is saved (it would silently lack its layout).
+        let mixer = self.mixer.clone();
+        let state = tokio::task::spawn_blocking(move || mixer.state())
+            .await
+            .context("mixer task")?
+            .context("the mixer layout could not be read")?;
         let profile = ProfileFile {
             version: 1,
             name: name.to_string(),
             devices,
-            // The file in memory: a fader drag not yet written counts.
-            mixer: self
-                .mixer
-                .state()
-                .ok()
-                .and_then(|state| profile_layout(&state.file)),
+            mixer: profile_layout(&state.file),
         };
         save_profile(&self.paths, &profile)?;
         set_last_profile(&self.paths, name)
@@ -886,7 +952,11 @@ fn all_models(present: &Present) -> impl Iterator<Item = &'static Model> + '_ {
             .iter()
             .filter(|d| d.vendor_id == v && d.product_id == p)
             .collect();
-        drivers::fallback_model(&nodes)
+        // A probe bug skips its device, not every discovery pass.
+        catch_unwind(AssertUnwindSafe(|| drivers::fallback_model(&nodes))).unwrap_or_else(|_| {
+            warn!("{v:04x}:{p:04x}: driver probe crashed");
+            None
+        })
     }))
 }
 
@@ -1138,6 +1208,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_delete_says_what_happened_and_an_unreadable_mixer_saves_no_profile() {
+        let hub = hub("profile-errors");
+        hub.save_profile("p").await.unwrap();
+        std::fs::write(&hub.paths.config_toml, "last_profile = [").unwrap();
+        let e = hub.delete_profile("p").unwrap_err();
+        assert!(format!("{e:#}").contains("deleted \"p\", but"), "{e:#}");
+        assert!(list_profiles(&hub.paths).unwrap().is_empty());
+
+        std::fs::remove_file(&hub.paths.config_toml).unwrap();
+        std::fs::write(hako_core::mixer::mixer_path(&hub.paths), "version = \"x\"").unwrap();
+        assert!(hub.save_profile("q").await.is_err());
+        assert!(list_profiles(&hub.paths).unwrap().is_empty());
+        close(hub);
+    }
+
+    /// A connected mouse with two sliders.
+    struct Plain(DeviceId);
+
+    impl DeviceAdapter for Plain {
+        fn id(&self) -> &DeviceId {
+            &self.0
+        }
+        fn snapshot(&self) -> hako_core::DeviceSnapshot {
+            hako_core::DeviceSnapshot {
+                id: self.0.clone(),
+                kind: DeviceKind::Mouse,
+                name: "Plain".into(),
+                connected: true,
+                batteries: vec![],
+                settings: Default::default(),
+                controls: vec![
+                    SettingMeta::slider(SettingKey::Dpi, "DPI", 100.0, 1000.0, 1.0),
+                    SettingMeta::slider(SettingKey::Brightness, "B", 0.0, 100.0, 1.0),
+                ],
+                last_error: None,
+            }
+        }
+        fn set(&mut self, _: SettingKey, _: SettingValue) -> Result<()> {
+            Ok(())
+        }
+        fn tick(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn shutdown(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn a_profile_stops_writing_to_a_worker_that_does_not_answer() {
+        let hub = hub("profile-stopped");
+        let model = drivers::models().next().unwrap();
+        let id = DeviceId {
+            vendor_id: model.vendor_id,
+            product_id: model.product_ids[0],
+            instance: "stopped".into(),
+        };
+        let settings = [("dpi", 800), ("brightness", 50)]
+            .map(|(k, v)| (k.to_string(), TomlSetting::Int(v)))
+            .into();
+        let profile = ProfileFile {
+            version: 1,
+            name: "p".into(),
+            devices: [(id.config_stem(), settings)].into(),
+            mixer: None,
+        };
+        save_profile(&hub.paths, &profile).unwrap();
+        let h = DeviceHandle::spawn(
+            model,
+            Box::new(Plain(id.clone())),
+            hub.events.clone(),
+            Vec::new(),
+            hub.paths.clone(),
+        )
+        .unwrap();
+        // Its worker is gone, the handle (and its snapshot) stays.
+        h.shutdown().recv().unwrap();
+        lock(&hub.devices).insert(id.key(), h);
+
+        let e = format!("{:#}", hub.apply_profile("p", false).await.unwrap_err());
+        assert!(e.contains("other settings were skipped"), "{e}");
+        assert_eq!(e.matches("worker stopped").count(), 1, "{e}");
+        close(hub);
+    }
+
+    #[tokio::test]
     async fn lan_audio_is_served_over_ipc() {
         let hub = hub("net");
         let call = |method, params| IpcRequest {
@@ -1192,7 +1346,8 @@ mod tests {
             hub.events.clone(),
             Vec::new(),
             paths.clone(),
-        );
+        )
+        .unwrap();
         lock(&hub.devices).insert(id.key(), h);
 
         hub.apply_profile("p", false).await.unwrap();

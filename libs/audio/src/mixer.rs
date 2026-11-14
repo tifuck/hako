@@ -33,7 +33,7 @@ use crate::{
     same_effect_topology, set_capture_percent, set_input_source, spawn_pipewire, stop_child,
     wpctl_volume, write_conf, DspNode, DspStage, FilterGraph, NODE_WAIT,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use hako_core::mixer::{
     AudioDevice, ChatMixSide, DeviceDirection, EffectChain, Input, InputKind, Output, OutputKind,
     Scene, Source, StripProblem,
@@ -96,6 +96,31 @@ impl Naming {
 /// this also hits another running hakod's). Startup and the kill-switch only.
 pub(crate) fn kill_orphans() {
     pkill(r"^pipewire -c .*/hako-mixer-(in|out)-[^/]*\.conf$");
+    // Unit tests run next to the user's hakod: its runtime dir is not theirs.
+    if !cfg!(test) {
+        if let Some(dir) = hako_core::default_socket_path().parent() {
+            remove_orphan_confs(dir);
+        }
+    }
+}
+
+/// The configs those strips ran from (`hako-mixer-{in,out}-<id>.conf`).
+fn remove_orphan_confs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let strip = ["hako-mixer-in-", "hako-mixer-out-"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix));
+        if strip && name.ends_with(".conf") {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                warn!("mixer: removing {}: {e}", entry.path().display());
+            }
+        }
+    }
 }
 
 /// Everything a strip's child is built from; [`same_topology`] tells which
@@ -624,21 +649,35 @@ pub fn devices(created: &[&str]) -> Result<(Vec<DeviceInfo>, Option<String>)> {
 /// A card's "Input Source" items and whether it has a capture level.
 type CardControls = (Vec<String>, bool);
 
-/// Asked once per (node, card).
+/// How long a card whose controls could not be read shows none before it is
+/// asked again (`amixer` may take seconds to fail; status reads wait on it).
+const CARD_RETRY: Duration = Duration::from_secs(30);
+
+/// Controls read, or none until the instant after a failed read.
+type CachedControls = (CardControls, Option<Instant>);
+
+/// Asked once per (node, card); after a failure, again once `CARD_RETRY`
+/// has passed.
 /// ponytail: never evicted (a few entries per device ever plugged in).
-static CARD_CONTROLS: Mutex<BTreeMap<(String, String), CardControls>> = Mutex::new(BTreeMap::new());
+static CARD_CONTROLS: Mutex<BTreeMap<(String, String), CachedControls>> =
+    Mutex::new(BTreeMap::new());
 
 fn capture_controls(node: &str, card: &str) -> CardControls {
     let mut cache = CARD_CONTROLS.lock().unwrap_or_else(|p| p.into_inner());
     let key = (node.to_string(), card.to_string());
-    if let Some(found) = cache.get(&key) {
-        return found.clone();
+    if let Some((found, retry)) = cache.get(&key) {
+        if retry.is_none_or(|at| Instant::now() < at) {
+            return found.clone();
+        }
     }
-    let found = card_capture_controls(card).unwrap_or_else(|e| {
-        warn!("mixer: ALSA card {card} ({node}): {e:#}");
-        (Vec::new(), false)
-    });
-    cache.insert(key, found.clone());
+    let (found, retry) = match card_capture_controls(card) {
+        Ok(found) => (found, None),
+        Err(e) => {
+            warn!("mixer: ALSA card {card} ({node}): {e:#}");
+            ((Vec::new(), false), Some(Instant::now() + CARD_RETRY))
+        }
+    };
+    cache.insert(key, (found.clone(), retry));
     found
 }
 
@@ -911,19 +950,21 @@ struct CardClaim {
     /// The input the source belongs to (its problems show there).
     input: String,
     card: String,
-    /// The node's PipeWire id then: a new one (a replug, the card reset)
-    /// gets the settings again.
+    /// The node's PipeWire id then: a new one (a replug, the card reset, a
+    /// PipeWire restart) gets the settings again.
     node_id: u32,
     applied: CardWant,
-    /// "Input Source" before hako changed it; restored when let go.
+    /// "Input Source" before hako changed it; restored when let go. Kept
+    /// while the node is on the same card (ALSA keeps hako's selection
+    /// across a PipeWire restart).
     previous: Option<String>,
     error: Option<String>,
 }
 
-/// Put the card's input selection back, unless the node is gone (its card
-/// number may be another device's by now).
+/// Put the card's input selection back, unless the node is gone or on
+/// another card (its card number may be another device's by now).
 fn release_card(node: &str, claim: &CardClaim, present: bool) {
-    let (Some(_), Some(previous), true) = (&claim.applied.0, &claim.previous, present) else {
+    let (Some(previous), true) = (&claim.previous, present) else {
         return;
     };
     match set_input_source(&claim.card, previous) {
@@ -978,8 +1019,9 @@ impl MixerGraph {
         &self.problems
     }
 
+    /// No strip, and no app stream left to hand back.
     pub fn is_empty(&self) -> bool {
-        self.strips.is_empty()
+        self.strips.is_empty() && self.moved.is_empty()
     }
 
     /// The post-fader node of a running strip (a meter captures its output).
@@ -1073,10 +1115,13 @@ impl MixerGraph {
                         .with_graph(|g| g.node_id(&def.capture))
                         .ok_or_else(|| anyhow::anyhow!("{} is gone", def.capture))
                         .and_then(|id| engine.set_props(id, params_pod(&params)?));
-                    if let Err(error) = result {
-                        problems.push(problem(&key.1, format!("live update: {error:#}")));
+                    // Kept as it was on failure: the next heal tries again.
+                    match result {
+                        Ok(()) => strip.def = def,
+                        Err(error) => {
+                            problems.push(problem(&key.1, format!("live update: {error:#}")))
+                        }
                     }
-                    strip.def = def;
                 }
                 (Step::Keep, Some(_)) => {}
             }
@@ -1246,12 +1291,7 @@ impl MixerGraph {
     /// Make the links the scene wants that are missing (a device appeared, a
     /// strip was rebuilt) and drop the rest.
     fn sync_links(&mut self, engine: &Engine, scene: &Scene, problems: &mut Vec<StripProblem>) {
-        let up: BTreeMap<StripKey, StripDef> = self
-            .strips
-            .iter()
-            .filter(|(_, s)| s.up())
-            .map(|(k, s)| (k.clone(), s.def.clone()))
-            .collect();
+        let up = self.linkable();
         let (wanted, missing, alive) = engine.with_graph(|graph| {
             let (links, missing) = wanted_links(scene, &up, graph);
             let resolved: Vec<_> = links
@@ -1306,6 +1346,16 @@ impl MixerGraph {
         }
     }
 
+    /// Strips that may be linked: running, with their fader written (a
+    /// fresh one plays at unity until then, whatever its fader says).
+    fn linkable(&self) -> BTreeMap<StripKey, StripDef> {
+        self.strips
+            .iter()
+            .filter(|(_, s)| s.up() && s.fader.is_some())
+            .map(|(k, s)| (k.clone(), s.def.clone()))
+            .collect()
+    }
+
     /// Point the streams of the running virtual inputs' apps at their sinks
     /// (new streams, a strip that came back); hand back the ones no input
     /// takes any more.
@@ -1327,13 +1377,18 @@ impl MixerGraph {
                 .collect();
             (wanted, release)
         });
+        let mut failed = Vec::new();
         for id in release {
             if let Err(e) = engine.set_target(id, None) {
                 warn!("mixer: handing back stream {id}: {e:#}");
+                failed.push(id);
             }
         }
-        self.moved
-            .retain(|id, m| wanted.get(id).is_some_and(|(w, _)| w == m));
+        // A stream no input takes that could not be handed back is tried again.
+        self.moved.retain(|id, m| match wanted.get(id) {
+            Some((w, _)) => w == m,
+            None => failed.contains(id),
+        });
         for (id, (moved, input)) in wanted {
             if self.moved.contains_key(&id) {
                 continue;
@@ -1347,20 +1402,25 @@ impl MixerGraph {
         }
     }
 
-    /// Give every moved stream back to WirePlumber.
+    /// Give every moved stream back to WirePlumber. The ones that could not
+    /// be are kept (`is_empty` is false), for the next teardown.
     fn release_apps(&mut self) {
-        let moved = std::mem::take(&mut self.moved);
-        if moved.is_empty() {
+        if self.moved.is_empty() {
             return;
         }
         let Ok(engine) = engine() else {
             return;
         };
+        let moved = std::mem::take(&mut self.moved);
         for (id, m) in moved {
             let there =
                 engine.with_graph(|g| g.nodes.get(&id).is_some_and(|n| serial(n) == m.serial));
-            if there {
-                let _ = engine.set_target(id, None);
+            if !there {
+                continue;
+            }
+            if let Err(e) = engine.set_target(id, None) {
+                warn!("mixer: handing back stream {id}: {e:#}");
+                self.moved.insert(id, m);
             }
         }
     }
@@ -1384,7 +1444,7 @@ impl MixerGraph {
             if let Some(claim) = self.cards.remove(&node) {
                 let there = present
                     .get(&node)
-                    .is_some_and(|(id, _)| *id == claim.node_id);
+                    .is_some_and(|(_, card)| *card == claim.card);
                 release_card(&node, &claim, there);
             }
         }
@@ -1399,28 +1459,34 @@ impl MixerGraph {
                 problems.extend(c.error.as_ref().map(|e| problem(&c.input, e.clone())));
                 continue;
             }
-            // A new node id is a reset card: nothing of ours is on it.
-            let (applied, mut previous) = self
-                .cards
-                .remove(node)
-                .filter(|c| c.node_id == *id && c.card == *card)
-                .map_or(((None, None), None), |c| (c.applied, c.previous));
+            // A new node id may be a reset card: everything is applied again.
+            // The card's own input is still the one from before hako's (a
+            // PipeWire restart leaves hako's selection on the card).
+            let (applied, mut previous) = match self.cards.remove(node) {
+                Some(c) if c.card == *card && c.node_id == *id => (c.applied, c.previous),
+                Some(c) if c.card == *card => ((None, None), c.previous),
+                _ => ((None, None), None),
+            };
             let mut errors = Vec::new();
-            if applied.0 != want.0 {
+            if applied.0 != want.0 || (want.0.is_none() && previous.is_some()) {
                 let result = match &want.0 {
-                    Some(item) => {
-                        if applied.0.is_none() {
-                            previous = current_input_source(card).ok();
-                        }
+                    // Never switched without knowing what to switch back to.
+                    Some(item) => match previous.clone() {
+                        Some(original) => Ok(original),
+                        None => current_input_source(card).context("reading its current input"),
+                    }
+                    .and_then(|original| {
+                        previous = Some(original);
                         if capture_controls(node, card).0.contains(item) {
                             set_input_source(card, item)
                         } else {
                             Err(anyhow!("the card has no input source {item:?}"))
                         }
-                    }
-                    None => previous
-                        .take()
-                        .map_or(Ok(()), |back| set_input_source(card, &back)),
+                    }),
+                    None => match previous.clone() {
+                        Some(back) => set_input_source(card, &back).map(|()| previous = None),
+                        None => Ok(()),
+                    },
                 };
                 if let Err(e) = result {
                     errors.push(format!("input source: {e:#}"));
@@ -1457,23 +1523,29 @@ impl MixerGraph {
         problems
     }
 
-    /// Give every claimed card its input selection back.
+    /// Give every claimed card its input selection back: by card number
+    /// (`amixer`), while its node is still on that card or PipeWire can't
+    /// say (the card is most likely the same one).
     fn release_cards(&mut self) {
         if self.cards.is_empty() {
             return;
         }
-        let ids: HashMap<String, u32> = engine()
-            .map(|engine| {
-                engine.with_graph(|graph| {
-                    self.cards
-                        .keys()
-                        .filter_map(|node| Some((node.clone(), graph.node_id(node)?)))
-                        .collect()
-                })
+        let cards: Option<HashMap<String, String>> = engine().ok().map(|engine| {
+            engine.with_graph(|graph| {
+                self.cards
+                    .keys()
+                    .filter_map(|node| {
+                        let id = graph.node_id(node)?;
+                        Some((node.clone(), alsa_card(&graph.nodes.get(&id)?.props)?))
+                    })
+                    .collect()
             })
-            .unwrap_or_default();
+        });
         for (node, claim) in std::mem::take(&mut self.cards) {
-            release_card(&node, &claim, ids.get(&node) == Some(&claim.node_id));
+            let there = cards
+                .as_ref()
+                .is_none_or(|cards| cards.get(&node) == Some(&claim.card));
+            release_card(&node, &claim, there);
         }
     }
 
@@ -1733,13 +1805,16 @@ mod tests {
         assert!(amixer_calls().is_empty());
         graph.sync_cards(&want(Some("Line"), Some(50)), &at(5));
         assert_eq!(amixer_calls(), ["7 sset Input Source Line"]);
-        // A replug (new node id) resets the card: applied again.
+        // A replug (new node id) resets the card: applied again. The card's
+        // own input is not read again (after a PipeWire restart it reads
+        // hako's "Line").
         graph.sync_cards(&want(Some("Line"), Some(50)), &at(6));
         let calls = amixer_calls();
         assert!(
             calls.contains(&"7 sset Input Source Line".to_string()),
             "{calls:?}"
         );
+        assert!(!calls.iter().any(|c| c.contains("sget")), "{calls:?}");
         assert!(
             calls.contains(&"7 sset Capture 50%".to_string()),
             "{calls:?}"
@@ -1749,8 +1824,9 @@ mod tests {
         assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
         graph.sync_cards(&want(Some("Line"), Some(50)), &at(6));
         amixer_calls();
-        // Removed while there: restored; removed while gone: untouched.
-        graph.sync_cards(&[], &at(6));
+        // Removed while there: restored, under a new node id too (same
+        // card); removed while gone: untouched.
+        graph.sync_cards(&[], &at(8));
         assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
         graph.sync_cards(&want(Some("Line"), None), &at(6));
         amixer_calls();
@@ -1760,6 +1836,111 @@ mod tests {
         // Not there yet: applied once it appears.
         graph.sync_cards(&want(Some("Line"), None), &HashMap::new());
         assert!(amixer_calls().is_empty() && graph.cards.is_empty());
+
+        // A card whose input can't be read is not switched (nothing to
+        // switch back to): the input's problem.
+        // Card 5 offers "Line" (cached) but fails every read.
+        CARD_CONTROLS.lock().unwrap().insert(
+            (node.clone(), "5".to_string()),
+            ((vec!["Line".into()], false), None),
+        );
+        let unreadable = HashMap::from([(node.clone(), (5, "5".to_string()))]);
+        let problems = graph.sync_cards(&want(Some("Line"), None), &unreadable);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].message.contains("current input"),
+            "{problems:?}"
+        );
+        assert_eq!(amixer_calls(), ["5 sget Input Source"]);
+        graph.sync_cards(&[], &unreadable);
+        assert!(amixer_calls().is_empty(), "nothing to give back");
+    }
+
+    #[test]
+    fn a_fresh_strip_is_linked_once_its_fader_is_written() {
+        let mut graph = MixerGraph::new(test_naming(), 256);
+        let key = (Side::Input, "game".to_string());
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let strip = Strip {
+            def: def(&scene(), Side::Input, "game"),
+            child: Some(child),
+            conf: std::env::temp_dir().join(format!("hako-test-x-{}.conf", std::process::id())),
+            fader: None,
+            started: Instant::now(),
+            failures: 0,
+            retry_at: Instant::now(),
+            error: None,
+        };
+        graph.strips.insert(key.clone(), strip);
+        assert!(graph.linkable().is_empty(), "unity until the fader is set");
+        graph.strips.get_mut(&key).unwrap().fader = Some((0.0, true));
+        assert!(graph.linkable().contains_key(&key));
+        // An app stream still to hand back keeps a stopped graph busy.
+        graph.strips.get_mut(&key).unwrap().stop();
+        graph.strips.clear();
+        assert!(graph.is_empty());
+        let moved = Moved {
+            serial: None,
+            sink: "x".into(),
+        };
+        graph.moved.insert(1, moved);
+        assert!(!graph.is_empty());
+        graph.moved.clear();
+    }
+
+    #[test]
+    fn orphan_strip_configs_are_removed() {
+        let dir = std::env::temp_dir().join(format!("hako-test-confs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = [
+            "hako-mixer-in-game.conf",
+            "hako-mixer-out-A1.conf",
+            "hako-mixer-in-game.conf.bak",
+            "hako-aux-dsp.conf",
+            "hakod.sock",
+        ];
+        for name in names {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+        remove_orphan_confs(&dir);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            left,
+            [
+                "hako-aux-dsp.conf",
+                "hako-mixer-in-game.conf.bak",
+                "hakod.sock"
+            ]
+        );
+    }
+
+    #[test]
+    fn unreadable_card_controls_are_asked_again_later() {
+        use crate::tests::amixer_calls;
+        let node = "hako-test-controls-retry";
+        amixer_calls();
+        assert_eq!(capture_controls(node, "9"), (Vec::new(), false));
+        assert_eq!(amixer_calls(), ["9 scontrols"]);
+        // Not every status read: once the retry time has come.
+        capture_controls(node, "9");
+        assert!(amixer_calls().is_empty());
+        let key = (node.to_string(), "9".to_string());
+        let mut cache = CARD_CONTROLS.lock().unwrap();
+        cache.get_mut(&key).unwrap().1 = Some(Instant::now());
+        drop(cache);
+        capture_controls(node, "9");
+        assert_eq!(amixer_calls(), ["9 scontrols"]);
     }
 
     #[test]

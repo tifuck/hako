@@ -20,9 +20,9 @@
 //!   `docs/onboard-writes/logitech.md`.
 
 use super::hidpp::{
-    self, ext_rr_supported, mouse_effect_payload, rr_supported, MouseEffectKind, EXT_RR_HZ,
-    FEAT_ADJ_DPI, FEAT_EXT_DPI, FEAT_EXT_RR, FEAT_FEATURE_SET, FEAT_ONBOARD, FEAT_PROFILE_MGMT,
-    FEAT_RGB, FEAT_ROOT, FEAT_RR,
+    self, answered, ext_rr_supported, mouse_effect_payload, rr_supported, MouseEffectKind,
+    EXT_RR_HZ, FEAT_ADJ_DPI, FEAT_EXT_DPI, FEAT_EXT_RR, FEAT_FEATURE_SET, FEAT_ONBOARD,
+    FEAT_PROFILE_MGMT, FEAT_RGB, FEAT_ROOT, FEAT_RR,
 };
 use crate::drivers::{DeviceAdapter, DriverCtx, Model, Opened};
 use crate::hid::{enumerate_hidraw, HidDeviceInfo, HidrawDevice};
@@ -117,6 +117,14 @@ pub struct LogitechMouseAdapter {
     /// Link state from the kernel hidpp battery node (`online`).
     online: bool,
     last_probe: Instant,
+    /// `device_index` answered a ping (false: a guess, rediscovered on link-up).
+    index_known: bool,
+    /// Some feature lookup got no answer: probed again while online.
+    probe_incomplete: bool,
+    /// ONBOARD_PROFILES is in host mode since the link came up.
+    host_mode: bool,
+    /// Why the last read of DPI / report rate failed, until one succeeds.
+    sync_error: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -132,7 +140,9 @@ struct FeatureMap {
 
 impl LogitechMouseAdapter {
     pub fn try_open(paths: ConfigPaths) -> Result<Self> {
-        let (info, dev, device_index) = open_hidpp_path()?;
+        let (info, dev, found) = open_hidpp_path()?;
+        // Unanswered (mouse asleep): 1 until a ping finds the real index.
+        let device_index = found.unwrap_or(1);
         let id = DeviceId {
             vendor_id: info.vendor_id,
             product_id: info.product_id,
@@ -167,6 +177,10 @@ impl LogitechMouseAdapter {
             rr_hz: Vec::new(),
             online: false,
             last_probe: Instant::now(),
+            index_known: found.is_some(),
+            probe_incomplete: true,
+            host_mode: false,
+            sync_error: None,
         };
         migrate_mouse_effect(&mut a.settings);
         a.online = read_sysfs_battery().map(|b| b.online).unwrap_or(true);
@@ -190,24 +204,44 @@ impl LogitechMouseAdapter {
     /// A sleeping/off mouse answers nothing, so this also runs on reconnect.
     fn init_link(&mut self) {
         self.last_probe = Instant::now();
-        if self.feat.dpi.is_none() && self.feat.report_rate.is_none() && self.feat.rgb.is_none() {
-            if let Err(e) = self.probe_features() {
-                warn!("hidpp probe: {e}");
-                self.last_error = Some(e.to_string());
+        // Power-up brings the onboard profile back.
+        self.host_mode = false;
+        if !self.index_known {
+            match self.dev.as_mut().context("no dev").and_then(discover_index) {
+                Ok(idx) => {
+                    self.device_index = idx;
+                    self.index_known = true;
+                }
+                Err(e) => {
+                    warn!("hidpp index: {e}");
+                    self.last_error = Some(format!("the mouse does not answer: {e}"));
+                    return;
+                }
             }
         }
-        if self.feat.rgb.is_some() && self.rgb_slots.is_empty() {
+        if self.probe_incomplete {
+            match self.probe_features() {
+                Ok(()) => {
+                    self.probe_incomplete = false;
+                    self.last_error = None;
+                }
+                Err(e) => {
+                    warn!("hidpp probe: {e}");
+                    self.last_error = Some(e.to_string());
+                }
+            }
+        }
+        if self.has_rgb && self.rgb_slots.is_empty() {
             if let Err(e) = self.probe_rgb_cluster() {
                 warn!("rgb 0x8071 probe: {e}");
+                self.last_error = Some(e.to_string());
             }
         }
         // Onboard mode stays until the user writes DPI / rate / lighting:
         // those calls take host mode themselves.
         // Read true DPI/rate from hardware. Do not push saved config —
         // that overwrote live DPI and made the UI lie.
-        if let Err(e) = self.sync_from_device() {
-            warn!("mouse sync: {e}");
-        }
+        self.sync();
         // Re-apply saved lighting (firmware falls back to its onboard effect
         // after power-up); DPI/rate stay hardware-sourced above.
         if self.has_rgb {
@@ -241,29 +275,32 @@ impl LogitechMouseAdapter {
         let hi = (feature_id >> 8) as u8;
         let lo = (feature_id & 0xff) as u8;
         let resp = self.hidpp_long(0x00, 0x00, &[hi, lo, 0x00])?;
-        // params at [4]: feature_index, type, version
-        let idx = resp[4];
-        let ver = resp[6];
-        if idx == 0 && feature_id != FEAT_ROOT {
-            // index 0 is ROOT only — missing feature returns zeros
-            if resp[5] == 0 && resp[6] == 0 {
-                return Ok(None);
-            }
-        }
-        Ok(Some((idx, ver)))
+        Ok(parse_get_feature(&resp, feature_id))
     }
 
+    /// Index of `feature_id`; a lookup without an answer is noted in `missed`.
+    fn lookup(&mut self, feature_id: u16, missed: &mut Vec<String>) -> Option<u8> {
+        answered(self.root_get_feature(feature_id), "feature lookup", missed)
+            .flatten()
+            .map(|(idx, _)| idx)
+    }
+
+    /// What is found is kept; any lookup that got no answer fails the probe,
+    /// so it is run again while the mouse is online.
     fn probe_features(&mut self) -> Result<()> {
+        let mut missed = Vec::new();
         // Ping / protocol
         let _ = self.hidpp_long(0x00, 0x01, &[0x00, 0x00, 0x88]);
 
         // Prefer FEATURE_SET enumeration when available.
-        if let Ok(Some((fs_idx, _))) = self.root_get_feature(FEAT_FEATURE_SET) {
-            if let Ok(count_r) = self.hidpp_long(fs_idx, 0x00, &[]) {
+        if let Some(fs_idx) = self.lookup(FEAT_FEATURE_SET, &mut missed) {
+            let count_r = self.hidpp_long(fs_idx, 0x00, &[]);
+            if let Some(count_r) = answered(count_r, "feature count", &mut missed) {
                 // Count excludes ROOT (index 0), so valid indices are 0..=count.
                 let count = count_r[4] as usize;
                 for i in 0..=count.min(63) {
-                    if let Ok(r) = self.hidpp_long(fs_idx, 0x01, &[i as u8]) {
+                    let r = self.hidpp_long(fs_idx, 0x01, &[i as u8]);
+                    if let Some(r) = answered(r, "feature table", &mut missed) {
                         let fid = u16::from(r[4]) << 8 | u16::from(r[5]);
                         let fidx = i as u8;
                         self.note_feature(fid, fidx);
@@ -274,54 +311,55 @@ impl LogitechMouseAdapter {
 
         // Explicit lookups for anything missed.
         if self.feat.dpi.is_none() {
-            if let Ok(Some((idx, _))) = self.root_get_feature(FEAT_EXT_DPI) {
+            if let Some(idx) = self.lookup(FEAT_EXT_DPI, &mut missed) {
                 self.feat.dpi = Some(idx);
                 self.feat.dpi_is_ext = true;
-            } else if let Ok(Some((idx, _))) = self.root_get_feature(FEAT_ADJ_DPI) {
+            } else if let Some(idx) = self.lookup(FEAT_ADJ_DPI, &mut missed) {
                 self.feat.dpi = Some(idx);
                 self.feat.dpi_is_ext = false;
             }
         }
         if self.feat.report_rate.is_none() {
-            if let Ok(Some((idx, _))) = self.root_get_feature(FEAT_EXT_RR) {
+            if let Some(idx) = self.lookup(FEAT_EXT_RR, &mut missed) {
                 self.feat.report_rate = Some(idx);
                 self.feat.rr_is_ext = true;
-            } else if let Ok(Some((idx, _))) = self.root_get_feature(FEAT_RR) {
+            } else if let Some(idx) = self.lookup(FEAT_RR, &mut missed) {
                 self.feat.report_rate = Some(idx);
                 self.feat.rr_is_ext = false;
             }
         }
         if self.feat.rgb.is_none() {
-            if let Ok(Some((idx, _))) = self.root_get_feature(FEAT_RGB) {
+            if let Some(idx) = self.lookup(FEAT_RGB, &mut missed) {
                 self.feat.rgb = Some(idx);
             }
         }
         if self.feat.onboard.is_none() {
-            if let Ok(Some((idx, _))) = self.root_get_feature(FEAT_ONBOARD) {
+            if let Some(idx) = self.lookup(FEAT_ONBOARD, &mut missed) {
                 self.feat.onboard = Some(idx);
             }
         }
         self.has_rgb = self.feat.rgb.is_some();
-        self.probe_report_rates();
+        self.probe_report_rates(&mut missed);
+        if !missed.is_empty() {
+            bail!("incomplete probe ({})", missed.join("; "));
+        }
         Ok(())
     }
 
-    fn probe_report_rates(&mut self) {
+    fn probe_report_rates(&mut self, missed: &mut Vec<String>) {
         let Some(idx) = self.feat.report_rate else {
             return;
         };
         self.rr_hz = if self.feat.rr_is_ext {
             // fn 0x10: rate flags, big-endian u16 (Solaar ExtendedReportRate).
-            match self.hidpp_long(idx, 0x01, &[]) {
-                Ok(r) => ext_rr_supported(u16::from_be_bytes([r[4], r[5]])),
-                Err(_) => Vec::new(),
-            }
+            answered(self.hidpp_long(idx, 0x01, &[]), "report rates", missed)
+                .map(|r| ext_rr_supported(u16::from_be_bytes([r[4], r[5]])))
+                .unwrap_or_default()
         } else {
             // fn 0x00: bit i set => (i+1) ms period is supported (Solaar ReportRate).
-            match self.hidpp_long(idx, 0x00, &[]) {
-                Ok(r) => rr_supported(r[4]),
-                Err(_) => Vec::new(),
-            }
+            answered(self.hidpp_long(idx, 0x00, &[]), "report rates", missed)
+                .map(|r| rr_supported(r[4]))
+                .unwrap_or_default()
         };
     }
 
@@ -350,20 +388,39 @@ impl LogitechMouseAdapter {
         }
     }
 
+    /// Without host mode the onboard profile overrides what is written, so
+    /// a failed switch fails the write.
     fn ensure_host_mode(&mut self) -> Result<()> {
-        let Some(ob) = self.feat.onboard else {
+        let (Some(ob), false) = (self.feat.onboard, self.host_mode) else {
             return Ok(());
         };
         // SET_ONBOARD_MODE 0x10, HOST_MODE = 0x02
-        let _ = self.hidpp_long(ob, 0x01, &[0x02]);
+        self.hidpp_long(ob, 0x01, &[0x02])
+            .context("switching to host mode")?;
+        self.host_mode = true;
         Ok(())
     }
 
+    /// [`Self::sync_from_device`], its failure kept in `sync_error`.
+    fn sync(&mut self) {
+        match self.sync_from_device() {
+            Ok(()) => self.sync_error = None,
+            Err(e) => {
+                warn!("mouse sync: {e}");
+                self.sync_error = Some(e.to_string());
+            }
+        }
+    }
+
     fn sync_from_device(&mut self) -> Result<()> {
+        let mut failed = Vec::new();
+        let mut read = |r: Result<[u8; 20]>, what: &str| {
+            r.map_err(|e| failed.push(format!("{what}: {e}"))).ok()
+        };
         if let Some(idx) = self.feat.dpi {
             if self.feat.dpi_is_ext {
                 // read fn 0x50
-                if let Ok(r) = self.hidpp_long(idx, 0x05, &[0x00]) {
+                if let Some(r) = read(self.hidpp_long(idx, 0x05, &[0x00]), "DPI") {
                     // params: sensor, dpi_x BE, dpi_y BE, …, lod
                     let dpi = u16::from(r[5]) << 8 | u16::from(r[6]);
                     if dpi >= 50 {
@@ -381,7 +438,7 @@ impl LogitechMouseAdapter {
                 }
             } else {
                 // classic 0x2201 get dpi fn 0x20
-                if let Ok(r) = self.hidpp_long(idx, 0x02, &[0x00]) {
+                if let Some(r) = read(self.hidpp_long(idx, 0x02, &[0x00]), "DPI") {
                     let dpi = u16::from(r[5]) << 8 | u16::from(r[6]);
                     if dpi >= 50 {
                         merge_setting(
@@ -396,7 +453,7 @@ impl LogitechMouseAdapter {
 
         if let Some(idx) = self.feat.report_rate {
             if self.feat.rr_is_ext {
-                if let Ok(r) = self.hidpp_long(idx, 0x02, &[]) {
+                if let Some(r) = read(self.hidpp_long(idx, 0x02, &[]), "report rate") {
                     let rate_idx = r[4] as usize;
                     if rate_idx < EXT_RR_HZ.len() {
                         merge_setting(
@@ -406,7 +463,7 @@ impl LogitechMouseAdapter {
                         );
                     }
                 }
-            } else if let Ok(r) = self.hidpp_long(idx, 0x01, &[0x00]) {
+            } else if let Some(r) = read(self.hidpp_long(idx, 0x01, &[0x00]), "report rate") {
                 // classic: value is ms period
                 let ms = r[4].max(1);
                 let hz = 1000u32 / u32::from(ms);
@@ -420,6 +477,9 @@ impl LogitechMouseAdapter {
 
         self.update_battery();
         self.last_sync = Instant::now();
+        if !failed.is_empty() {
+            bail!("reading the mouse failed ({})", failed.join("; "));
+        }
         Ok(())
     }
 
@@ -488,12 +548,20 @@ impl LogitechMouseAdapter {
         let cl = self.hidpp_long(idx, 0x00, &[self.rgb_cluster, 0xFF, 0x00])?;
         let num_effects = cl[8];
         // Enumerate each slot's effect id (be16 at param[2..4] = [6..8]) → slot map.
+        // An unanswered slot fails the whole list, so it is read again later.
+        let mut slots = std::collections::HashMap::new();
+        let mut missed = Vec::new();
         for slot in 0..num_effects.min(16) {
-            if let Ok(ei) = self.hidpp_long(idx, 0x00, &[self.rgb_cluster, slot, 0x00]) {
+            let ei = self.hidpp_long(idx, 0x00, &[self.rgb_cluster, slot, 0x00]);
+            if let Some(ei) = answered(ei, "effect", &mut missed) {
                 let effect_id = (u16::from(ei[6]) << 8) | u16::from(ei[7]);
-                self.rgb_slots.insert(effect_id, slot);
+                slots.insert(effect_id, slot);
             }
         }
+        if !missed.is_empty() {
+            bail!("RGB effect list incomplete ({})", missed.join("; "));
+        }
+        self.rgb_slots = slots;
         info!(
             "Logitech RGB cluster: {} effect(s) supported {:?}",
             self.rgb_slots.len(),
@@ -553,7 +621,9 @@ impl LogitechMouseAdapter {
     }
 }
 
-fn open_hidpp_path() -> Result<(HidDeviceInfo, HidrawDevice, u8)> {
+/// The node to talk to and the PRO 2's device index on it; `None` when the
+/// mouse did not answer (asleep): it is looked up again on link-up.
+fn open_hidpp_path() -> Result<(HidDeviceInfo, HidrawDevice, Option<u8>)> {
     let list = enumerate_hidraw()?;
 
     // 1) Direct PRO 2 device node (kernel logitech-hidpp-device)
@@ -562,11 +632,8 @@ fn open_hidpp_path() -> Result<(HidDeviceInfo, HidrawDevice, u8)> {
         .filter(|d| d.vendor_id == RX_VID && d.product_id == MOUSE_PID)
     {
         if let Ok(mut dev) = HidrawDevice::open(&info.path) {
-            if let Ok(idx) = discover_index(&mut dev) {
-                return Ok((info.clone(), dev, idx));
-            }
-            // Wired/device nodes often use index 1
-            return Ok((info.clone(), dev, 1));
+            let idx = discover_index(&mut dev).ok();
+            return Ok((info.clone(), dev, idx));
         }
     }
 
@@ -581,10 +648,20 @@ fn open_hidpp_path() -> Result<(HidDeviceInfo, HidrawDevice, u8)> {
     let mut last_err = None;
     for info in &rx {
         match HidrawDevice::open(&info.path) {
-            Ok(mut dev) => match discover_index(&mut dev) {
-                Ok(idx) => return Ok((info.clone(), dev, idx)),
-                Err(e) => last_err = Some(format!("{}: {e}", info.path.display())),
-            },
+            Ok(mut dev) => {
+                let short = crate::hid::report_ids(&info.report_descriptor()).contains(&0x10);
+                // The pairing registers name the PRO 2's slot (asleep or
+                // not); a receiver that does not answer them is pinged.
+                let found = match pairing_slot(&mut dev, short) {
+                    Some(Some(slot)) => Ok(slot),
+                    Some(None) => Err(anyhow::anyhow!("no PRO 2 paired to this receiver")),
+                    None => discover_index(&mut dev),
+                };
+                match found {
+                    Ok(idx) => return Ok((info.clone(), dev, Some(idx))),
+                    Err(e) => last_err = Some(format!("{}: {e}", info.path.display())),
+                }
+            }
             Err(e) => last_err = Some(e.to_string()),
         }
     }
@@ -594,6 +671,31 @@ fn open_hidpp_path() -> Result<(HidDeviceInfo, HidrawDevice, u8)> {
     )
 }
 
+/// The receiver slot paired with the PRO 2 (`Some(None)`: none is), or
+/// `None` when the node answers no pairing-register read.
+fn pairing_slot(dev: &mut HidrawDevice, short: bool) -> Option<Option<u8>> {
+    let mut answered = false;
+    for slot in 1..=6u8 {
+        let sub = hidpp::pairing_sub(false, slot);
+        match hidpp::read_long_register(dev, hidpp::REG_RECEIVER_INFO, sub, short) {
+            Ok(r) => {
+                answered = true;
+                if hidpp::parse_pairing(false, &r).map(|(wpid, _)| wpid) == Some(MOUSE_PID) {
+                    return Some(Some(slot));
+                }
+            }
+            // An empty slot is refused.
+            Err(e) if hidpp::refused(&e) => answered = true,
+            // Silence from the start: this node does not read registers.
+            Err(_) if !answered => return None,
+            Err(_) => {}
+        }
+    }
+    answered.then_some(None)
+}
+
+/// The index whose ROOT ping comes back echoed (an asleep mouse answers
+/// nothing, a receiver's error frame is not an echo).
 fn discover_index(dev: &mut HidrawDevice) -> Result<u8> {
     for idx in 1u8..=6 {
         let mut pkt = [0u8; 20];
@@ -619,14 +721,35 @@ fn discover_index(dev: &mut HidrawDevice) -> Result<u8> {
         let deadline = Instant::now() + Duration::from_millis(80);
         while Instant::now() < deadline {
             let rem = deadline.saturating_duration_since(Instant::now());
-            if let Ok(n) = dev.read_timeout(&mut buf, rem.min(Duration::from_millis(40))) {
-                if n >= 4 && (buf[0] == 0x10 || buf[0] == 0x11) && buf[1] == idx && buf[2] != 0x8f {
-                    return Ok(idx);
-                }
+            match dev.read_timeout(&mut buf, rem.min(Duration::from_millis(40))) {
+                Ok(n) if is_ping_echo(&buf[..n], idx) => return Ok(idx),
+                Ok(_) => {}
+                Err(e) if hidpp::hard_read_error(&e) => return Err(e),
+                Err(_) => {}
             }
         }
     }
     bail!("no hidpp device index")
+}
+
+/// The reply to [`discover_index`]'s ping of `idx`: ROOT (index 0) fn 1 with
+/// its software id 0xa, the ping byte 0x88 echoed at \[6\]. HID++ error frames
+/// (0x8f / 0xff at \[2\]) and notifications do not match.
+fn is_ping_echo(buf: &[u8], idx: u8) -> bool {
+    buf.len() >= 7
+        && matches!(buf[0], 0x10 | 0x11)
+        && buf[1] == idx
+        && buf[2] == 0x00
+        && buf[3] == 0x1a
+        && buf[6] == 0x88
+}
+
+/// ROOT GetFeature reply → (index, version). Index 0 is ROOT itself, so any
+/// other feature reported there is absent, whatever type/version bytes follow.
+fn parse_get_feature(resp: &[u8; 20], feature_id: u16) -> Option<(u8, u8)> {
+    // params at [4]: feature_index, type, version
+    let idx = resp[4];
+    (idx != 0 || feature_id == FEAT_ROOT).then_some((idx, resp[6]))
 }
 
 struct SysBattery {
@@ -677,10 +800,10 @@ fn is_pro2_hid(uevent: &str) -> bool {
         })
 }
 
+/// Lighting defaults only: DPI and report rate come from the mouse (a
+/// made-up value would show as live while reads fail).
 fn defaults(s: &mut SettingsMap) {
     for (k, v) in [
-        (SettingKey::Dpi, SettingValue::Int(1600)),
-        (SettingKey::ReportRate, SettingValue::Int(1000)),
         (SettingKey::Effect, SettingValue::Text("static".into())),
         (SettingKey::Speed, SettingValue::Text("medium".into())),
         (SettingKey::ColorR, SettingValue::Int(0)),
@@ -775,11 +898,17 @@ impl DeviceAdapter for LogitechMouseAdapter {
                 &self.rgb_slots,
                 &self.rr_hz,
             ),
-            last_error: self.last_error.clone(),
+            last_error: self.last_error.clone().or_else(|| self.sync_error.clone()),
         }
     }
 
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+        if !self.online {
+            bail!("Logitech PRO 2 is asleep or switched off");
+        }
+        if !self.index_known {
+            bail!("Logitech PRO 2 has not answered yet (asleep?)");
+        }
         let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value.clone());
         let result = match key {
@@ -812,6 +941,7 @@ impl DeviceAdapter for LogitechMouseAdapter {
         }
         self.last_error = None;
         self.persist()
+            .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
@@ -823,9 +953,11 @@ impl DeviceAdapter for LogitechMouseAdapter {
         let online = read_sysfs_battery().map(|b| b.online).unwrap_or(true);
         let came_up = online && !self.online;
         self.online = online;
-        let no_features =
-            self.feat.dpi.is_none() && self.feat.report_rate.is_none() && self.feat.rgb.is_none();
-        if came_up || (online && no_features && self.last_probe.elapsed() > Duration::from_secs(30))
+        // Anything still unknown is looked up again, at most every 30 s.
+        let incomplete = !self.index_known
+            || self.probe_incomplete
+            || (self.has_rgb && self.rgb_slots.is_empty());
+        if came_up || (online && incomplete && self.last_probe.elapsed() > Duration::from_secs(30))
         {
             info!("Logitech PRO 2 link up; re-initialising");
             self.init_link();
@@ -833,8 +965,8 @@ impl DeviceAdapter for LogitechMouseAdapter {
         if self.last_bat.elapsed() > Duration::from_secs(15) {
             self.update_battery();
         }
-        if online && self.last_sync.elapsed() > Duration::from_secs(8) {
-            let _ = self.sync_from_device();
+        if online && self.index_known && self.last_sync.elapsed() > Duration::from_secs(8) {
+            self.sync();
         }
         Ok(())
     }
@@ -911,6 +1043,61 @@ mod effect_tests {
         assert!(save.persistent && save.blocked.is_some());
         // Nothing the owner can turn on, so the worker adds no opt-in toggle.
         assert!(!c.iter().any(|m| m.persistent && m.blocked.is_none()));
+    }
+
+    #[test]
+    fn index_discovery_takes_only_the_ping_echo() {
+        // 11 02 00 1a <protocol 4.2> 88: slot 2's echo.
+        let echo = [0x11, 0x02, 0x00, 0x1a, 0x04, 0x02, 0x88, 0, 0, 0];
+        assert!(is_ping_echo(&echo, 2));
+        assert!(!is_ping_echo(&echo, 1));
+        // HID++ 1.0 error from the receiver (slot empty / device offline).
+        assert!(!is_ping_echo(
+            &[0x10, 0x02, 0x8f, 0x00, 0x1a, 0x09, 0x00],
+            2
+        ));
+        // HID++ 2.0 error frame.
+        assert!(!is_ping_echo(
+            &[0x11, 0x02, 0xff, 0x00, 0x1a, 0x05, 0x00],
+            2
+        ));
+        // Another feature's notification on the same index.
+        assert!(!is_ping_echo(
+            &[0x11, 0x02, 0x04, 0x00, 0x01, 0x02, 0x88],
+            2
+        ));
+        // Someone else's ping (other software id) or a short frame.
+        assert!(!is_ping_echo(
+            &[0x11, 0x02, 0x00, 0x11, 0x04, 0x02, 0x88],
+            2
+        ));
+        assert!(!is_ping_echo(&[0x11, 0x02, 0x00, 0x1a], 2));
+    }
+
+    #[test]
+    fn feature_at_index_zero_is_absent() {
+        let reply = |idx: u8, ty: u8, ver: u8| {
+            let mut r = [0u8; 20];
+            r[..7].copy_from_slice(&[0x11, 1, 0x00, 0x0a, idx, ty, ver]);
+            r
+        };
+        assert_eq!(
+            parse_get_feature(&reply(0x0a, 0, 1), FEAT_EXT_DPI),
+            Some((0x0a, 1))
+        );
+        assert_eq!(parse_get_feature(&reply(0, 0, 0), FEAT_EXT_DPI), None);
+        // Nonzero type/version bytes do not turn index 0 (ROOT) into the feature.
+        assert_eq!(parse_get_feature(&reply(0, 0x20, 2), FEAT_ONBOARD), None);
+        assert_eq!(parse_get_feature(&reply(0, 0, 2), FEAT_ROOT), Some((0, 2)));
+    }
+
+    #[test]
+    fn dpi_and_rate_are_never_made_up() {
+        let mut s = SettingsMap::new();
+        defaults(&mut s);
+        assert_eq!(get_setting(&s, SettingKey::Dpi), None);
+        assert_eq!(get_setting(&s, SettingKey::ReportRate), None);
+        assert!(get_setting(&s, SettingKey::Effect).is_some());
     }
 
     /// The pre-refactor inline packet builder of `hidpp_long`, kept verbatim

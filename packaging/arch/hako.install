@@ -1,0 +1,24 @@
+# pacman's own hooks reload udev rules and the systemd managers.
+
+# Each logged-in user's systemd manager (ignored where unavailable).
+for_users() {
+    for user in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
+        systemctl --user -M "$user@" "$@" >/dev/null 2>&1 || true
+    done
+}
+
+post_install() {
+    systemctl --global enable hakod.service >/dev/null 2>&1 || true
+    for_users daemon-reload
+    for_users restart hakod.service
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    # Stopping the daemon removes its audio nodes and restores the default output.
+    for_users stop hakod.service
+    systemctl --global disable hakod.service >/dev/null 2>&1 || true
+}

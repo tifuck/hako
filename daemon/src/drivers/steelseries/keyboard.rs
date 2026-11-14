@@ -38,7 +38,7 @@
 use super::{instance, int, pad, request, VID};
 use crate::drivers::{DeviceAdapter, DriverCtx, Opened};
 use crate::hid::{enumerate_hidraw, find_hidraw, HidDeviceInfo, HidrawDevice};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
@@ -491,11 +491,29 @@ impl DeviceAdapter for KeyboardAdapter {
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
         let mut proposed = self.settings.clone();
         merge_setting(&mut proposed, key, value);
-        self.apply(&proposed, key)?;
-        hako_core::config::save_device_settings(&self.paths, VID, self.id.product_id, &proposed)?;
+        if let Err(e) = self.apply(&proposed, key) {
+            // Actuation (3 reports), rapid tap (2) and zone lighting (2) may
+            // stop midway: send the old value back when there is one.
+            if get_setting(&self.settings, key).is_some() {
+                let old = self.settings.clone();
+                if let Err(re) = self.apply(&old, key) {
+                    return Err(anyhow!(
+                        "{e:#}; restoring the previous value also failed ({re:#}), the keyboard may hold part of the change"
+                    ));
+                }
+            }
+            return Err(e);
+        }
+        // The board has the value: keep it even if the file cannot be written.
         self.settings = proposed;
         self.last_error = None;
-        Ok(())
+        hako_core::config::save_device_settings(
+            &self.paths,
+            VID,
+            self.id.product_id,
+            &self.settings,
+        )
+        .map_err(|e| anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {

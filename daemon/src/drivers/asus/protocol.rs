@@ -181,12 +181,28 @@ impl Transport {
     }
 
     /// Write and give the device 20 ms to answer, as OpenRGB does for
-    /// keyboards; their replies carry nothing we use.
+    /// keyboards. Their echo carries nothing we use and not every board is
+    /// known to send one, so only a refusal (`FF AA`) fails the write.
     pub fn send(&mut self, cmd: &[u8]) -> Result<()> {
+        let req = packet(cmd);
         self.dev.drain(Duration::from_millis(1));
-        self.dev.write(&frame(self.report_id, &packet(cmd)))?;
+        self.dev.write(&frame(self.report_id, &req))?;
+        let deadline = Instant::now() + Duration::from_millis(20);
         let mut buf = [0u8; PACKET + 1];
-        let _ = self.dev.read_timeout(&mut buf, Duration::from_millis(20));
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Ok(n) = self.dev.read_timeout(&mut buf, left) else {
+                break;
+            };
+            match unframe(self.report_id, &buf[..n]).map(|resp| classify(&req, &resp)) {
+                Some(Reply::Ok) => break,
+                Some(Reply::Rejected) => bail!(
+                    "device rejected {:02x} {:02x} (unsupported, asleep or out of range)",
+                    req[0],
+                    req[1]
+                ),
+                Some(Reply::Other) | None => {}
+            }
+        }
         Ok(())
     }
 }
@@ -273,8 +289,11 @@ pub fn set_field(field: u8, value: u8) -> [u8; 5] {
 
 /// `51 31 09 00 <stage>`: make `stage` (1-based) the active DPI stage
 /// (G-Helper `GetChangeDPIProfilePacket2`; TUF M3 Gen II counts from 0).
-pub fn set_active_stage(stage: u8, zero_based: bool) -> [u8; 5] {
-    set_field(0x09, stage - u8::from(zero_based))
+pub fn set_active_stage(stage: u8, zero_based: bool) -> Result<[u8; 5]> {
+    if stage == 0 {
+        bail!("DPI stages count from 1");
+    }
+    Ok(set_field(0x09, stage - u8::from(zero_based)))
 }
 
 /// Debounce times in ms both sources accept: wire index `i` is `4 + 4i` ms
@@ -866,8 +885,17 @@ mod tests {
     #[test]
     fn stages_and_debounce() {
         // G-Helper GetChangeDPIProfilePacket2: 51 31 09 00 <profile>; TUF M3 Gen II: profile - 1.
-        assert_eq!(set_active_stage(3, false), [0x51, 0x31, 0x09, 0x00, 0x03]);
-        assert_eq!(set_active_stage(3, true), [0x51, 0x31, 0x09, 0x00, 0x02]);
+        assert_eq!(
+            set_active_stage(3, false).unwrap(),
+            [0x51, 0x31, 0x09, 0x00, 0x03]
+        );
+        assert_eq!(
+            set_active_stage(3, true).unwrap(),
+            [0x51, 0x31, 0x09, 0x00, 0x02]
+        );
+        // Stage 0 is no stage (and would wrap to 255 on a zero-based mouse).
+        assert!(set_active_stage(0, true).is_err());
+        assert!(set_active_stage(0, false).is_err());
         // G-Helper GetUpdateDebouncePacket: 51 31 05 00 <i> on 4-stage mice
         // (libratbag dpi_count + ASUS_FIELD_RESPONSE), 51 31 03 on 2-stage ones.
         assert_eq!(

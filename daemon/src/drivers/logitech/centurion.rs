@@ -190,7 +190,9 @@ enum BridgeReply {
     Error,
 }
 
-fn classify_bridge(reply: &[u8], bridge: u8, index: u8) -> BridgeReply {
+/// `function` is the request's (`fn << 4`): an answer must echo it with our
+/// software id after the feature index.
+fn classify_bridge(reply: &[u8], bridge: u8, index: u8, function: u8) -> BridgeReply {
     if reply.len() >= 4 && reply[0] == 0xff && reply[1] == bridge && reply[2] == 0x10 | SWID {
         return BridgeReply::Rejected;
     }
@@ -206,7 +208,7 @@ fn classify_bridge(reply: &[u8], bridge: u8, index: u8) -> BridgeReply {
     match reply[1] & 0x0f {
         SWID => BridgeReply::Ack,
         0 if reply.len() >= 7 && reply[4] == 0x00 => {
-            if reply[5] == index {
+            if reply[5] == index && reply[6] == (function & 0xf0) | SWID {
                 BridgeReply::Answer(reply[7..].to_vec())
             } else if reply[5] == 0xff && reply[6] == index {
                 BridgeReply::Error
@@ -331,6 +333,9 @@ impl CenturionHeadset {
             last_poll: Instant::now(),
             last_error: None,
         };
+        let controls = a.controls();
+        crate::drivers::sanitize_saved(&mut a.chosen, &controls);
+        a.settings = a.chosen.clone();
         a.poll();
         info!("{} open online={}", a.name, a.online);
         Ok(a)
@@ -349,10 +354,13 @@ impl CenturionHeadset {
             if left.is_zero() {
                 bail!("Centurion timeout");
             }
-            if let Ok(n) = dev.read_timeout(&mut buf, left) {
-                if let Some(p) = payload(&prefix, &buf[..n]) {
-                    return Ok(p.to_vec());
-                }
+            let n = match dev.read_timeout(&mut buf, left) {
+                Ok(n) => n,
+                Err(e) if super::hidpp::hard_read_error(&e) => return Err(e),
+                Err(_) => continue,
+            };
+            if let Some(p) = payload(&prefix, &buf[..n]) {
+                return Ok(p.to_vec());
             }
         }
     }
@@ -385,7 +393,7 @@ impl CenturionHeadset {
         dev.write(&f)?;
         let deadline = Instant::now() + Duration::from_millis(800);
         loop {
-            match classify_bridge(&self.read(deadline)?, bridge, index) {
+            match classify_bridge(&self.read(deadline)?, bridge, index, function) {
                 BridgeReply::Answer(params) => return Ok(params),
                 BridgeReply::Connection(false) => {
                     self.online = false;
@@ -510,7 +518,8 @@ impl CenturionHeadset {
         let n = value
             .as_int()
             .or_else(|| value.as_bool().map(i64::from))
-            .context("expected a number")? as u8;
+            .context("expected a number")?;
+        let n = u8::try_from(n).with_context(|| format!("{} {n} is out of range", key.as_str()))?;
         match key {
             SettingKey::MicSideTone => {
                 let v2 = if self.spec.pid == 0x0af7 {
@@ -609,6 +618,7 @@ impl DeviceAdapter for CenturionHeadset {
         merge_setting(&mut self.settings, key, value.clone());
         merge_setting(&mut self.chosen, key, value);
         hako_core::config::save_device_settings(&self.paths, VID, self.id.product_id, &self.chosen)
+            .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn tick(&mut self) -> Result<()> {
@@ -663,34 +673,55 @@ mod tests {
     #[test]
     fn bridge_replies() {
         // Ack of our send (swid 1), then the answer event (swid 0).
-        assert_eq!(classify_bridge(&[0x02, 0x11, 0, 3], 2, 4), BridgeReply::Ack);
         assert_eq!(
-            classify_bridge(&[0x02, 0x10, 0x00, 0x06, 0x00, 0x04, 0x01, 87, 0, 1], 2, 4),
+            classify_bridge(&[0x02, 0x11, 0, 3], 2, 4, 0x00),
+            BridgeReply::Ack
+        );
+        assert_eq!(
+            classify_bridge(
+                &[0x02, 0x10, 0x00, 0x06, 0x00, 0x04, 0x01, 87, 0, 1],
+                2,
+                4,
+                0x00
+            ),
             BridgeReply::Answer(vec![87, 0, 1])
+        );
+        // The same feature's answer to another function is not ours.
+        assert_eq!(
+            classify_bridge(
+                &[0x02, 0x10, 0x00, 0x06, 0x00, 0x04, 0x11, 87, 0, 1],
+                2,
+                4,
+                0x00
+            ),
+            BridgeReply::Other
         );
         // Answer for another feature; headset error; bridge refusal.
         assert_eq!(
-            classify_bridge(&[0x02, 0x10, 0, 6, 0, 0x05, 1, 9], 2, 4),
+            classify_bridge(&[0x02, 0x10, 0, 6, 0, 0x05, 1, 9], 2, 4, 0x00),
             BridgeReply::Other
         );
         assert_eq!(
-            classify_bridge(&[0x02, 0x10, 0, 6, 0, 0xff, 0x04, 9], 2, 4),
+            classify_bridge(&[0x02, 0x10, 0, 6, 0, 0xff, 0x04, 9], 2, 4, 0x00),
             BridgeReply::Error
         );
         assert_eq!(
-            classify_bridge(&[0xff, 0x02, 0x11, 0x00], 2, 4),
+            classify_bridge(&[0xff, 0x02, 0x11, 0x00], 2, 4, 0x00),
             BridgeReply::Rejected
         );
         // Connection events: [bridge, 0, 0, connected].
         assert_eq!(
-            classify_bridge(&[0x02, 0x00, 0x00, 0x00], 2, 4),
+            classify_bridge(&[0x02, 0x00, 0x00, 0x00], 2, 4, 0x00),
             BridgeReply::Connection(false)
         );
         assert_eq!(
-            classify_bridge(&[0x02, 0x00, 0x00, 0x01], 2, 4),
+            classify_bridge(&[0x02, 0x00, 0x00, 0x01], 2, 4, 0x00),
             BridgeReply::Connection(true)
         );
-        assert_eq!(classify_bridge(&[0x07, 0x10], 2, 4), BridgeReply::Other);
+        assert_eq!(
+            classify_bridge(&[0x07, 0x10], 2, 4, 0x00),
+            BridgeReply::Other
+        );
     }
 
     #[test]

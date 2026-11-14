@@ -33,6 +33,18 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often an open UI looks for a new release.
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
+/// First retry after a failed background update check; it doubles up to
+/// `UPDATE_EVERY`.
+const UPDATE_RETRY: Duration = Duration::from_secs(10 * 60);
+
+/// Wait before reconnecting after a lost connection; it doubles up to
+/// `RECONNECT_MAX` until a connection answers again.
+const RECONNECT_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(16);
+
+/// Told when a change is not sent because hakod is unavailable.
+const OFFLINE_NOTICE: &str = "hakod is unavailable; the change was not applied";
+
 /// A meter stream closes once no frame has asked for it this long (the
 /// window is hidden and no longer drawn).
 const METER_STALE: Duration = Duration::from_secs(1);
@@ -58,6 +70,8 @@ struct App {
     mixer_rev: u64,
     /// `ClientState::net_rev` the UI has seen.
     net_rev: u64,
+    /// `ClientState::settings_rev` the UI has adopted.
+    settings_rev: u64,
     rt: Handle,
     /// `(owner/repo, installed binary)` when this build can update itself.
     updater: Option<(&'static str, PathBuf)>,
@@ -87,7 +101,10 @@ impl Meters {
 #[derive(Default)]
 struct ClientState {
     hub: Option<HubState>,
+    /// Settings as hakod last reported them; `settings_rev` counts every
+    /// `GetConfig` / `SetConfig` answer (a refused one too).
     settings: Option<AppSettings>,
+    settings_rev: u64,
     error: Option<String>,
     /// Command outcomes waiting to be shown as toasts.
     notices: Vec<(Tone, String)>,
@@ -123,6 +140,33 @@ impl ClientState {
         self.net = Some(n);
         self.net_rev += 1;
     }
+
+    /// A call for `method` is on its way.
+    fn start(&mut self, method: Method) {
+        self.pending += 1;
+        if method == Method::PatchMixer {
+            self.mixer_pending += 1;
+        }
+        if method == Method::PatchNet {
+            self.net_pending += 1;
+        }
+    }
+
+    /// A call for `method` was answered, failed or dropped.
+    fn finish(&mut self, method: Method) {
+        self.pending -= 1;
+        if method == Method::PatchMixer {
+            self.mixer_pending -= 1;
+        }
+        if method == Method::PatchNet {
+            self.net_pending -= 1;
+        }
+    }
+}
+
+/// Calls that only read: losing one changes nothing worth telling.
+fn read_only(method: Method) -> bool {
+    matches!(method, Method::GetState | Method::GetMixer | Method::GetNet)
 }
 
 /// What to tell the user when a command finishes.
@@ -151,7 +195,6 @@ impl Feedback {
 
 enum ClientCmd {
     Call(Method, serde_json::Value, Feedback),
-    OpenPath(String),
 }
 
 fn main() -> Result<()> {
@@ -193,113 +236,24 @@ fn main() -> Result<()> {
     let meter_socket = socket.clone();
     let state_bg = state.clone();
     rt.spawn(async move {
+        let mut backoff = RECONNECT_MIN;
         loop {
             match UnixStream::connect(&socket).await {
                 Ok(mut stream) => {
-                    refresh(&mut stream, &state_bg).await;
-                    if let Some(resp) = call(&mut stream, Method::GetConfig, serde_json::Value::Null).await {
-                        if let Some(cfg) = resp.result.and_then(|r| serde_json::from_value(r).ok()) {
-                            state_bg.lock().unwrap().settings = Some(cfg);
-                        }
+                    let mut answered = false;
+                    let lost =
+                        session(&mut stream, &socket, &state_bg, &mut cmd_rx, &mut answered).await;
+                    let Err(e) = lost else { return };
+                    if answered {
+                        backoff = RECONNECT_MIN;
                     }
-                    fetch_mixer(&mut stream, &state_bg).await;
-                    fetch_net(&mut stream, &state_bg).await;
-                    let mut events = tokio::spawn(subscribe(socket.clone(), state_bg.clone()));
-
-                    // Commands on this connection; a slow poll keeps health,
-                    // audio and profile info fresh between events.
-                    loop {
-                        tokio::select! {
-                            cmd = cmd_rx.recv() => {
-                                let Some(cmd) = cmd else { return };
-                                let (method, params, feedback) = match cmd {
-                                    ClientCmd::OpenPath(path) => {
-                                        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
-                                        continue;
-                                    }
-                                    ClientCmd::Call(m, p, f) => (m, p, f),
-                                };
-                                let mixer_call = matches!(method, Method::GetMixer | Method::PatchMixer);
-                                let net_call = matches!(method, Method::GetNet | Method::PatchNet);
-                                let alive = match call(&mut stream, method, params).await {
-                                    Some(resp) if mixer_call => {
-                                        // A refused patch: show why, then reload what the daemon has.
-                                        let refused = method == Method::PatchMixer && !resp.ok;
-                                        if refused {
-                                            let why = resp.error.map_or_else(|| "no reason given".into(), |e| e.message);
-                                            state_bg.lock().unwrap().notices.push((Tone::Error, format!("{}: {why}", feedback.failed)));
-                                            fetch_mixer(&mut stream, &state_bg).await
-                                        } else {
-                                            state_bg.lock().unwrap().set_mixer(mixer_result(resp));
-                                            true
-                                        }
-                                    }
-                                    Some(resp) if net_call => {
-                                        if method == Method::PatchNet && !resp.ok {
-                                            let why = resp.error.map_or_else(|| "no reason given".into(), |e| e.message);
-                                            state_bg.lock().unwrap().notices.push((Tone::Error, format!("{}: {why}", feedback.failed)));
-                                            fetch_net(&mut stream, &state_bg).await
-                                        } else {
-                                            state_bg.lock().unwrap().set_net(net_result(resp));
-                                            true
-                                        }
-                                    }
-                                    Some(resp) => {
-                                        {
-                                            let mut s = state_bg.lock().unwrap();
-                                            if resp.ok {
-                                                if let Some(done) = feedback.done {
-                                                    s.notices.push((Tone::Ok, done));
-                                                }
-                                                if method == Method::SetConfig {
-                                                    if let Some(cfg) = resp.result.and_then(|r| serde_json::from_value(r).ok()) {
-                                                        s.settings = Some(cfg);
-                                                    }
-                                                }
-                                            } else {
-                                                let why = resp.error.map_or_else(|| "no reason given".into(), |e| e.message);
-                                                s.notices.push((Tone::Error, format!("{}: {why}", feedback.failed)));
-                                            }
-                                        }
-                                        // A profile carries a mixer layout: show it even if
-                                        // the `MixerUpdated` event is missed.
-                                        refresh(&mut stream, &state_bg).await
-                                            && (method != Method::ApplyProfile
-                                                || fetch_mixer(&mut stream, &state_bg).await)
-                                    }
-                                    None => false,
-                                };
-                                {
-                                    let mut s = state_bg.lock().unwrap();
-                                    s.pending -= 1;
-                                    if method == Method::PatchMixer {
-                                        s.mixer_pending -= 1;
-                                    }
-                                    if method == Method::PatchNet {
-                                        s.net_pending -= 1;
-                                    }
-                                }
-                                if !alive {
-                                    break;
-                                }
-                            }
-                            _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                                if !refresh(&mut stream, &state_bg).await {
-                                    break;
-                                }
-                                if events.is_finished() {
-                                    events = tokio::spawn(subscribe(socket.clone(), state_bg.clone()));
-                                }
-                            }
-                        }
-                    }
-                    events.abort();
-                    state_bg.lock().unwrap().error =
-                        Some("Disconnected from hakod. Reconnecting…".into());
+                    go_offline(&state_bg, &mut cmd_rx, format!("{e}. Reconnecting…"));
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(RECONNECT_MAX);
                 }
                 Err(e) => {
-                    state_bg.lock().unwrap().error =
-                        Some(format!("Cannot connect to hakod ({e})."));
+                    let why = format!("Cannot connect to hakod ({e}).");
+                    go_offline(&state_bg, &mut cmd_rx, why);
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
@@ -314,6 +268,7 @@ fn main() -> Result<()> {
         lost: false,
         mixer_rev: 0,
         net_rev: 0,
+        settings_rev: 0,
         rt: rt.handle().clone(),
         updater,
         meters: meters.clone(),
@@ -374,9 +329,11 @@ impl eframe::App for App {
                     None => {}
                 }
             }
-            // Adopt server settings until the user starts editing, so a late
-            // GetConfig doesn't clobber an in-progress edit.
-            if self.ui.settings.is_none() || st.error.is_some() {
+            // Adopt server settings once every call is answered, so a
+            // refused edit flips back but a reply doesn't clobber a newer edit.
+            let answered = st.settings_rev != self.settings_rev && st.pending == 0;
+            if self.ui.settings.is_none() || st.error.is_some() || answered {
+                self.settings_rev = st.settings_rev;
                 self.ui.settings = st.settings.clone();
             }
             {
@@ -490,7 +447,10 @@ impl eframe::App for App {
                     to(serde_json::to_value(cfg)),
                     Feedback::quiet("Couldn't save settings"),
                 ),
-                UiCommand::OpenPath(p) => ClientCmd::OpenPath(p),
+                UiCommand::OpenPath(p) => {
+                    self.open_path(p);
+                    continue;
+                }
                 UiCommand::StartCapture {
                     device_id,
                     role,
@@ -555,16 +515,17 @@ impl eframe::App for App {
                     Feedback::quiet("Couldn't change network audio"),
                 ),
             };
-            if let ClientCmd::Call(method, ..) = &cmd {
-                let mut s = self.state.lock().unwrap();
-                s.pending += 1;
-                if *method == Method::PatchMixer {
-                    s.mixer_pending += 1;
+            let ClientCmd::Call(method, ..) = &cmd;
+            // Sent under the lock `go_offline` drains in, so a command never
+            // waits in the queue for the next connection.
+            let mut s = self.state.lock().unwrap();
+            if s.error.is_some() {
+                if !read_only(*method) {
+                    s.notices.push((Tone::Warn, OFFLINE_NOTICE.into()));
                 }
-                if *method == Method::PatchNet {
-                    s.net_pending += 1;
-                }
+                continue;
             }
+            s.start(*method);
             let _ = self.cmd_tx.send(cmd);
         }
         ctx.request_repaint_after(Duration::from_millis(250));
@@ -604,19 +565,32 @@ impl App {
         };
         let rel = {
             let mut s = self.state.lock().unwrap();
-            let Some(rel) = s.update.clone().filter(|_| !s.updating && !s.checking) else {
+            let Some(rel) = s.update.clone() else {
                 return;
             };
+            if s.updating || s.checking {
+                let busy = if s.updating {
+                    "The update is already being installed"
+                } else {
+                    "Still checking for updates; try again in a moment"
+                };
+                s.notices.push((Tone::Warn, busy.into()));
+                return;
+            }
             s.updating = true;
             rel
         };
         let state = self.state.clone();
         self.rt.spawn_blocking(move || {
             let msg = match update::install(&rel) {
-                Ok(warn) => format!(
-                    "Updated, but couldn't restart ({}). Reopen hako.",
-                    update::restart(&bin, warn)
-                ),
+                Ok(warn) => {
+                    let err = update::restart(&bin, warn.clone());
+                    let msg = format!("Updated, but couldn't restart ({err}). Reopen hako.");
+                    match warn {
+                        Some(w) => format!("{msg} {w}"),
+                        None => msg,
+                    }
+                }
                 Err(e) => format!("Update failed: {e:#}"),
             };
             let mut s = state.lock().unwrap();
@@ -625,6 +599,24 @@ impl App {
                 s.update = None;
             }
             s.notices.push((Tone::Error, msg));
+        });
+    }
+
+    /// Open `path` in the file manager. Waited for on a blocking thread, so
+    /// the child is reaped and a failure is reported.
+    fn open_path(&self, path: String) {
+        let state = self.state.clone();
+        self.rt.spawn_blocking(move || {
+            let why = match std::process::Command::new("xdg-open").arg(&path).status() {
+                Ok(s) if s.success() => return,
+                Ok(s) => format!("xdg-open {s}"),
+                Err(e) => format!("cannot run xdg-open: {e}"),
+            };
+            state
+                .lock()
+                .unwrap()
+                .notices
+                .push((Tone::Error, format!("Couldn't open {path}: {why}")));
         });
     }
 }
@@ -673,7 +665,8 @@ fn fetch_update(repo: &str, state: &Mutex<ClientState>, loud: bool) -> anyhow::R
 /// a newer release is downloaded, then offered. "Later" only hides the
 /// offer, so the next check brings it back.
 async fn update_checks(repo: &'static str, state: Arc<Mutex<ClientState>>) {
-    let mut last: Option<Instant> = None;
+    let mut next = Instant::now();
+    let mut failures = 0;
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
         // Settings come from the daemon; until it answers, don't assume consent.
@@ -683,13 +676,44 @@ async fn update_checks(repo: &'static str, state: Arc<Mutex<ClientState>>) {
             .settings
             .as_ref()
             .map(|s| s.check_updates);
-        if allowed != Some(true) || last.is_some_and(|t| t.elapsed() < UPDATE_EVERY) {
+        if allowed != Some(true) || Instant::now() < next {
             continue;
         }
-        last = Some(Instant::now());
-        let state = state.clone();
-        let _ = tokio::task::spawn_blocking(move || fetch_update(repo, &state, false)).await;
+        let bg = state.clone();
+        let res = tokio::task::spawn_blocking(move || fetch_update(repo, &bg, false))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("update check crashed: {e}")));
+        next = Instant::now()
+            + match res {
+                Ok(_) => {
+                    failures = 0;
+                    UPDATE_EVERY
+                }
+                // A release that fails verification won't pass on a retry.
+                Err(e) if update::rejected(&e) => {
+                    eprintln!("hako: update rejected: {e:#}");
+                    state
+                        .lock()
+                        .unwrap()
+                        .notices
+                        .push((Tone::Error, format!("Update not installed: {e:#}")));
+                    UPDATE_EVERY
+                }
+                Err(e) => {
+                    eprintln!("hako: update check failed: {e:#}");
+                    failures += 1;
+                    retry_after(failures)
+                }
+            };
     }
+}
+
+/// Wait after `failures` failed update checks in a row: `UPDATE_RETRY`,
+/// doubling, at most `UPDATE_EVERY`.
+fn retry_after(failures: u32) -> Duration {
+    UPDATE_RETRY
+        .saturating_mul(2u32.saturating_pow(failures.saturating_sub(1)))
+        .min(UPDATE_EVERY)
 }
 
 /// Writes to onboard memory are announced; ordinary changes speak for themselves.
@@ -725,34 +749,192 @@ fn set_feedback(
     }
 }
 
-/// One request/response round trip. `None` means the connection is gone (or
-/// the daemon stopped answering: the caller reconnects, so a late reply can
-/// never be read as the answer to a later request).
+/// Serve one daemon connection: the UI's commands, and a slow poll that keeps
+/// health, audio, profile, mixer and network state fresh between events (and
+/// covers events missed while the event stream was down). Returns `Ok` when
+/// the UI is gone, else why the connection was lost. `answered` is set once
+/// hakod answered on it.
+async fn session(
+    stream: &mut UnixStream,
+    socket: &std::path::Path,
+    state: &Arc<Mutex<ClientState>>,
+    cmd_rx: &mut mpsc::UnboundedReceiver<ClientCmd>,
+    answered: &mut bool,
+) -> Result<(), String> {
+    refresh(stream, state).await?;
+    *answered = true;
+    let resp = call(stream, Method::GetConfig, serde_json::Value::Null).await?;
+    if let Some(cfg) = resp.result.and_then(|r| serde_json::from_value(r).ok()) {
+        let mut s = state.lock().unwrap();
+        s.settings = Some(cfg);
+        s.settings_rev += 1;
+    }
+    fetch_mixer(stream, state).await?;
+    fetch_net(stream, state).await?;
+    let mut events = tokio::spawn(subscribe(socket.to_path_buf(), state.clone()));
+    let lost = loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                let Some(ClientCmd::Call(method, params, feedback)) = cmd else { break Ok(()) };
+                let done = command(stream, state, method, params, feedback).await;
+                state.lock().unwrap().finish(method);
+                if let Err(e) = done {
+                    break Err(e);
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                let polled = async {
+                    refresh(stream, state).await?;
+                    fetch_mixer(stream, state).await?;
+                    fetch_net(stream, state).await
+                };
+                if let Err(e) = polled.await {
+                    break Err(e);
+                }
+                if events.is_finished() {
+                    events = tokio::spawn(subscribe(socket.to_path_buf(), state.clone()));
+                }
+            }
+        }
+    };
+    events.abort();
+    lost
+}
+
+/// Send one UI command and show its outcome. Fails when the connection is
+/// unusable; then the change may or may not have been applied, and the user
+/// is told so.
+async fn command(
+    stream: &mut UnixStream,
+    state: &Arc<Mutex<ClientState>>,
+    method: Method,
+    params: serde_json::Value,
+    feedback: Feedback,
+) -> Result<(), String> {
+    let resp = match call(stream, method, params).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            if !read_only(method) {
+                state.lock().unwrap().notices.push((
+                    Tone::Error,
+                    format!(
+                        "{}: {e}. The change may not have been applied.",
+                        feedback.failed
+                    ),
+                ));
+            }
+            return Err(e);
+        }
+    };
+    let why = |resp: IpcResponse| {
+        resp.error
+            .map_or_else(|| "no reason given".into(), |e| e.message)
+    };
+    match method {
+        // A refused patch: show why, then reload what the daemon has.
+        Method::PatchMixer if !resp.ok => {
+            let msg = format!("{}: {}", feedback.failed, why(resp));
+            state.lock().unwrap().notices.push((Tone::Error, msg));
+            fetch_mixer(stream, state).await
+        }
+        Method::GetMixer | Method::PatchMixer => {
+            state.lock().unwrap().set_mixer(mixer_result(resp));
+            Ok(())
+        }
+        Method::PatchNet if !resp.ok => {
+            let msg = format!("{}: {}", feedback.failed, why(resp));
+            state.lock().unwrap().notices.push((Tone::Error, msg));
+            fetch_net(stream, state).await
+        }
+        Method::GetNet | Method::PatchNet => {
+            state.lock().unwrap().set_net(net_result(resp));
+            Ok(())
+        }
+        _ => {
+            {
+                let mut s = state.lock().unwrap();
+                if method == Method::SetConfig {
+                    // A refused draft is replaced by what the daemon kept.
+                    s.settings_rev += 1;
+                }
+                if resp.ok {
+                    if let Some(done) = feedback.done {
+                        s.notices.push((Tone::Ok, done));
+                    }
+                    if method == Method::SetConfig {
+                        if let Some(cfg) = resp.result.and_then(|r| serde_json::from_value(r).ok())
+                        {
+                            s.settings = Some(cfg);
+                        }
+                    }
+                } else {
+                    let msg = format!("{}: {}", feedback.failed, why(resp));
+                    s.notices.push((Tone::Error, msg));
+                }
+            }
+            refresh(stream, state).await?;
+            // A profile carries a mixer layout: show it even if the
+            // `MixerUpdated` event is missed.
+            if method == Method::ApplyProfile {
+                fetch_mixer(stream, state).await?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The connection is gone: show `why`, and drop commands still queued (with
+/// one notice), so nothing clicked before the UI noticed runs when hakod is
+/// back. New commands are not queued while `error` is set.
+fn go_offline(
+    state: &Mutex<ClientState>,
+    cmd_rx: &mut mpsc::UnboundedReceiver<ClientCmd>,
+    why: String,
+) {
+    let mut s = state.lock().unwrap();
+    s.error = Some(why);
+    let mut dropped = 0;
+    while let Ok(ClientCmd::Call(method, ..)) = cmd_rx.try_recv() {
+        s.finish(method);
+        dropped += usize::from(!read_only(method));
+    }
+    if dropped > 0 {
+        s.notices.push((
+            Tone::Warn,
+            format!("hakod is unavailable; {dropped} queued change(s) were not applied"),
+        ));
+    }
+}
+
+/// One request/response round trip. An error means the connection is
+/// unusable (gone, silent, or answering in a form this UI cannot read): the
+/// caller reconnects, so a late reply can never be read as the answer to a
+/// later request.
 async fn call(
     stream: &mut UnixStream,
     method: Method,
     params: serde_json::Value,
-) -> Option<IpcResponse> {
+) -> Result<IpcResponse, String> {
     let req = IpcRequest {
-        id: serde_json::to_value(method).ok()?,
+        id: serde_json::to_value(method).map_err(|e| e.to_string())?,
         method,
         params,
     };
     let round_trip = async {
-        write_json_frame(stream, &req).await.ok()?;
-        read_json_frame(stream).await.ok()
+        write_json_frame(stream, &req).await?;
+        read_json_frame(stream).await
     };
     let v = tokio::time::timeout(CALL_TIMEOUT, round_trip)
         .await
-        .ok()??;
-    serde_json::from_value(v).ok()
+        .map_err(|_| format!("hakod did not answer within {}s", CALL_TIMEOUT.as_secs()))?
+        .map_err(|e| format!("Disconnected from hakod ({e:#})"))?;
+    serde_json::from_value(v)
+        .map_err(|e| format!("hakod sent a reply this UI cannot read ({e}); update both"))
 }
 
-/// Pull the full hub state. Returns false when the connection dropped.
-async fn refresh(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> bool {
-    let Some(resp) = call(stream, Method::GetState, serde_json::Value::Null).await else {
-        return false;
-    };
+/// Pull the full hub state. Fails when the connection is unusable.
+async fn refresh(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> Result<(), String> {
+    let resp = call(stream, Method::GetState, serde_json::Value::Null).await?;
     let hub = match (resp.result, resp.error) {
         (Some(r), _) => serde_json::from_value::<HubState>(r)
             .map_err(|e| format!("hakod sent a state this UI cannot read ({e}); update both")),
@@ -769,7 +951,7 @@ async fn refresh(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> bo
         }
         Err(e) => s.error = Some(e),
     }
-    true
+    Ok(())
 }
 
 /// A `GetMixer` / `PatchMixer` answer: the mixer, or why there is none
@@ -785,13 +967,14 @@ fn mixer_result(resp: IpcResponse) -> Result<MixerState, String> {
     }
 }
 
-/// Reload the mixer. Returns false when the connection dropped.
-async fn fetch_mixer(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> bool {
-    let Some(resp) = call(stream, Method::GetMixer, serde_json::Value::Null).await else {
-        return false;
-    };
+/// Reload the mixer. Fails when the connection is unusable.
+async fn fetch_mixer(
+    stream: &mut UnixStream,
+    state: &Arc<Mutex<ClientState>>,
+) -> Result<(), String> {
+    let resp = call(stream, Method::GetMixer, serde_json::Value::Null).await?;
     state.lock().unwrap().set_mixer(mixer_result(resp));
-    true
+    Ok(())
 }
 
 /// A `GetNet` / `PatchNet` answer: the state, or why there is none (an
@@ -808,16 +991,16 @@ fn net_result(resp: IpcResponse) -> Result<NetState, String> {
     }
 }
 
-/// Reload network audio. Returns false when the connection dropped.
-async fn fetch_net(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> bool {
-    let Some(resp) = call(stream, Method::GetNet, serde_json::Value::Null).await else {
-        return false;
-    };
+/// Reload network audio. Fails when the connection is unusable.
+async fn fetch_net(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> Result<(), String> {
+    let resp = call(stream, Method::GetNet, serde_json::Value::Null).await?;
     state.lock().unwrap().set_net(net_result(resp));
-    true
+    Ok(())
 }
 
 /// Event stream on its own connection; snapshots are applied in place.
+/// Events missed around it (before it subscribed, while it was down, or
+/// dropped by a lagging daemon) are caught up by the session's poll.
 async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
     let Ok(mut stream) = UnixStream::connect(&socket).await else {
         return;
@@ -828,7 +1011,7 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
         serde_json::Value::Null,
     )
     .await
-    .is_none()
+    .is_err()
     {
         return;
     }
@@ -856,6 +1039,12 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
             }
             continue;
         }
+        if ev.kind == EventKind::Error {
+            if let Some(msg) = ev.payload.get("message").and_then(|m| m.as_str()) {
+                s.notices.push((Tone::Error, msg.to_string()));
+            }
+            continue;
+        }
         let Some(hub) = s.hub.as_mut() else { continue };
         match ev.kind {
             EventKind::DeviceUpdated | EventKind::DeviceConnected => {
@@ -879,12 +1068,8 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
                     }
                 }
             }
-            EventKind::Error => {
-                if let Some(msg) = ev.payload.get("message").and_then(|m| m.as_str()) {
-                    s.notices.push((Tone::Error, msg.to_string()));
-                }
-            }
             EventKind::RemapCaptured
+            | EventKind::Error
             | EventKind::DaemonShuttingDown
             | EventKind::Meters
             | EventKind::MixerUpdated
@@ -914,7 +1099,7 @@ async fn stream_meters(socket: PathBuf, meters: Arc<Mutex<Meters>>, ctx: egui::C
             }
         };
         let subscribed = call(&mut stream, Method::SubscribeMeters, params).await;
-        if !subscribed.is_some_and(|r| r.ok) {
+        if !subscribed.is_ok_and(|r| r.ok) {
             // A daemon without meters: the page stays silent.
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
@@ -943,5 +1128,37 @@ async fn stream_meters(socket: PathBuf, meters: Arc<Mutex<Meters>>, ctx: egui::C
         let mut m = meters.lock().unwrap();
         m.streaming.clear();
         m.levels.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn going_offline_drops_queued_commands_with_one_notice() {
+        let state = Mutex::new(ClientState::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for method in [Method::ResetAudio, Method::PatchMixer, Method::GetMixer] {
+            state.lock().unwrap().start(method);
+            let feedback = Feedback::quiet("failed");
+            tx.send(ClientCmd::Call(method, serde_json::Value::Null, feedback))
+                .unwrap();
+        }
+        go_offline(&state, &mut rx, "gone".into());
+        let s = state.lock().unwrap();
+        assert!(rx.try_recv().is_err(), "nothing left to replay");
+        assert_eq!((s.pending, s.mixer_pending), (0, 0));
+        assert_eq!(s.error.as_deref(), Some("gone"));
+        assert_eq!(s.notices.len(), 1);
+        assert!(s.notices[0].1.contains("2 queued"), "{:?}", s.notices);
+    }
+
+    #[test]
+    fn failed_update_checks_retry_sooner_with_backoff() {
+        assert_eq!(retry_after(1), UPDATE_RETRY);
+        assert_eq!(retry_after(2), UPDATE_RETRY * 2);
+        assert_eq!(retry_after(7), UPDATE_EVERY);
+        assert_eq!(retry_after(u32::MAX), UPDATE_EVERY);
     }
 }

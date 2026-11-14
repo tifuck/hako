@@ -59,7 +59,8 @@ pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
     nodes.sort_by_key(|d| d.interface);
     let info = nodes.first().context("no G930 vendor (0xFF00) interface")?;
     let dev = HidrawDevice::open(&info.path)?;
-    let settings = hako_core::config::load_device_settings(&ctx.paths, VID, pid)?;
+    let mut settings = hako_core::config::load_device_settings(&ctx.paths, VID, pid)?;
+    crate::drivers::sanitize_saved(&mut settings, &controls());
     let mut a = G930 {
         id: DeviceId {
             vendor_id: VID,
@@ -78,13 +79,24 @@ pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         last_poll: Instant::now(),
         last_error: None,
     };
-    if let Some(v) = get_setting(&a.settings, SettingKey::MicSideTone).and_then(|v| v.as_int()) {
-        if let Err(e) = a.send(&mut sidetone_request(v as u8)) {
+    let saved = get_setting(&a.settings, SettingKey::MicSideTone).and_then(|v| v.as_int());
+    if let Some(v) = saved.and_then(|v| u8::try_from(v).ok()) {
+        if let Err(e) = a.send(&mut sidetone_request(v)) {
             warn!("G930: restore sidetone: {e}");
         }
     }
     a.poll_battery();
     Ok(vec![Box::new(a)])
+}
+
+fn controls() -> Vec<SettingMeta> {
+    vec![SettingMeta::slider(
+        SettingKey::MicSideTone,
+        "Sidetone",
+        0.0,
+        128.0,
+        1.0,
+    )]
 }
 
 struct G930 {
@@ -137,13 +149,7 @@ impl DeviceAdapter for G930 {
             connected: self.dev.is_some(),
             batteries: vec![self.battery.clone()],
             settings: self.settings.clone(),
-            controls: vec![SettingMeta::slider(
-                SettingKey::MicSideTone,
-                "Sidetone",
-                0.0,
-                128.0,
-                1.0,
-            )],
+            controls: controls(),
             last_error: self.last_error.clone(),
         }
     }
@@ -152,7 +158,9 @@ impl DeviceAdapter for G930 {
         let SettingKey::MicSideTone = key else {
             bail!("Logitech G930 has no {} control", key.as_str());
         };
-        let level = value.as_int().context("expected a number")? as u8;
+        let level = value.as_int().context("expected a number")?;
+        let level =
+            u8::try_from(level).with_context(|| format!("sidetone {level} is out of range"))?;
         if let Err(e) = self.send(&mut sidetone_request(level)) {
             self.last_error = Some(e.to_string());
             return Err(e);
@@ -165,6 +173,7 @@ impl DeviceAdapter for G930 {
             self.id.product_id,
             &self.settings,
         )
+        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn tick(&mut self) -> Result<()> {

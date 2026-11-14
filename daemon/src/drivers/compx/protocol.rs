@@ -166,7 +166,8 @@ pub fn v2_reply(raw: &[u8], cmd: u8) -> Option<Result<u8>> {
 /// Output / input reports, so the exchanges can run against a fake mouse.
 pub trait Link {
     fn send(&mut self, report: &[u8]) -> Result<()>;
-    /// One input report, or an error once `timeout` passes.
+    /// One input report, or an error once `timeout` passes (any error but
+    /// an [`std::io::Error`] counts as that timeout).
     fn recv(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize>;
 }
 
@@ -184,7 +185,7 @@ impl Link for crate::hid::HidrawDevice {
 pub const TIMEOUT: Duration = Duration::from_millis(400);
 
 /// Sends `report`, returns what `accept` makes of the first matching reply,
-/// `None` if nothing matched in time.
+/// `None` if nothing matched in time. A failed read is an error.
 pub fn exchange<T>(
     link: &mut impl Link,
     report: &[u8],
@@ -196,8 +197,10 @@ pub fn exchange<T>(
     let mut buf = [0u8; 128];
     loop {
         let left = end.saturating_duration_since(Instant::now());
-        let Ok(n) = link.recv(&mut buf, left) else {
-            return Ok(None);
+        let n = match link.recv(&mut buf, left) {
+            Ok(n) => n,
+            Err(e) if e.downcast_ref::<std::io::Error>().is_some() => return Err(e),
+            Err(_) => return Ok(None),
         };
         if let Some(r) = accept(&buf[..n]) {
             return r.map(Some);
@@ -496,5 +499,18 @@ mod tests {
         }
         let e = read_battery(&mut Silent).unwrap_err();
         assert!(e.to_string().contains("asleep"), "{e}");
+        // Unplugged: the read fails, which is not "asleep".
+        struct Gone;
+        impl Link for Gone {
+            fn send(&mut self, _: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn recv(&mut self, _: &mut [u8], _: Duration) -> Result<usize> {
+                Err(std::io::Error::from_raw_os_error(libc::ENODEV).into())
+            }
+        }
+        let e = read_battery(&mut Gone).unwrap_err();
+        assert!(!e.to_string().contains("asleep"), "{e}");
+        assert!(read_v2_battery(&mut Gone, V2_LOCAL).is_err());
     }
 }

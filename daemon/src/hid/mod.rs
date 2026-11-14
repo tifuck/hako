@@ -7,7 +7,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tracing::debug;
+use tracing::{debug, warn};
 
 const O_NONBLOCK: i32 = libc::O_NONBLOCK;
 
@@ -197,6 +197,12 @@ impl HidrawDevice {
 
     /// HIDIOCGFEATURE. Set `buf[0]` to the report id; data comes back in `buf[1..]`.
     pub fn get_feature(&self, buf: &mut [u8]) -> Result<()> {
+        self.get_feature_len(buf).map(|_| ())
+    }
+
+    /// [`Self::get_feature`] that returns how many bytes (report id included)
+    /// the device sent; the rest of `buf` is left as it was.
+    pub fn get_feature_len(&self, buf: &mut [u8]) -> Result<usize> {
         let ret = unsafe {
             libc::ioctl(
                 self.file.as_raw_fd(),
@@ -207,7 +213,7 @@ impl HidrawDevice {
         if ret < 0 {
             bail!("HIDIOCGFEATURE: {}", std::io::Error::last_os_error());
         }
-        Ok(())
+        Ok(ret as usize)
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -229,15 +235,22 @@ impl HidrawDevice {
         })
     }
 
+    /// One report per call: hidraw sends every `write` as a report of its
+    /// own, so a short write is an error, never completed by a second write.
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         let start = Instant::now();
         loop {
-            match self.file.write_all(data) {
-                Ok(()) => {
-                    let _ = self.file.flush();
+            match self.file.write(data) {
+                Ok(n) if n == data.len() => {
                     debug!("hid write {} bytes to {}", data.len(), self.path.display());
                     return Ok(());
                 }
+                Ok(n) => bail!(
+                    "short hid write to {}: {n} of {} bytes",
+                    self.path.display(),
+                    data.len()
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         && start.elapsed() < Duration::from_millis(200) =>
@@ -500,14 +513,27 @@ impl Drop for UsbDevice {
         if let Some(iface) = self.claimed {
             let fd = self.file.as_raw_fd();
             let mut ifno: libc::c_uint = iface as libc::c_uint;
-            unsafe {
-                libc::ioctl(fd, usbdevfs_releaseinterface_ioctl(), &mut ifno as *mut _);
-                let mut reconnect = UsbdevfsIoctl {
-                    ifno: iface as libc::c_int,
-                    ioctl_code: usbdevfs_connect_code(),
-                    data: std::ptr::null_mut(),
-                };
-                libc::ioctl(fd, usbdevfs_ioctl_ioctl(), &mut reconnect as *mut _);
+            let ret =
+                unsafe { libc::ioctl(fd, usbdevfs_releaseinterface_ioctl(), &mut ifno as *mut _) };
+            if ret < 0 {
+                warn!(
+                    "{}: release USB iface={iface}: {}",
+                    self.path.display(),
+                    std::io::Error::last_os_error()
+                );
+            }
+            let mut reconnect = UsbdevfsIoctl {
+                ifno: iface as libc::c_int,
+                ioctl_code: usbdevfs_connect_code(),
+                data: std::ptr::null_mut(),
+            };
+            let ret = unsafe { libc::ioctl(fd, usbdevfs_ioctl_ioctl(), &mut reconnect as *mut _) };
+            if ret < 0 {
+                warn!(
+                    "{}: give USB iface={iface} back to the kernel driver: {}",
+                    self.path.display(),
+                    std::io::Error::last_os_error()
+                );
             }
         }
     }

@@ -230,9 +230,12 @@ pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     written?;
-    // The rename itself is only durable once the directory is synced.
+    // The rename itself is only durable once the directory is synced. The
+    // new file is in place either way, so a failed sync is not a failed write.
     if let Some(dir) = path.parent() {
-        fs::File::open(dir)?.sync_all()?;
+        if let Err(e) = fs::File::open(dir).and_then(|d| d.sync_all()) {
+            eprintln!("warning: fsync {}: {e}", dir.display());
+        }
     }
     Ok(())
 }

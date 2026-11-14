@@ -12,14 +12,16 @@ use pw::spa;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 /// How often a missing target, a failed stream or a lost PipeWire
 /// connection is retried while subscribed.
 const RETRY: Duration = Duration::from_secs(1);
+/// Longest wait before restarting a meter thread that keeps dying.
+const MAX_RESTART: Duration = Duration::from_secs(60);
 
 /// A node to meter, by `node.name`. `monitor_sink` meters what a sink
 /// plays (its monitor ports) instead of capturing from a source.
@@ -58,6 +60,42 @@ enum Cmd {
 struct Worker {
     tx: pw::channel::Sender<Cmd>,
     subscriptions: usize,
+    /// Every subscription's targets, for a restarted thread.
+    meters: Vec<(MeterTarget, Arc<Peaks>)>,
+    /// Cleared when the thread ends (it failed to start, or panicked).
+    alive: Arc<AtomicBool>,
+    /// A dead thread is restarted from then on, the wait doubling each time.
+    retry_at: Instant,
+    retry: Duration,
+}
+
+impl Worker {
+    fn spawn() -> Self {
+        let (tx, alive) = spawn_thread();
+        Self {
+            tx,
+            subscriptions: 0,
+            meters: Vec::new(),
+            alive,
+            retry_at: Instant::now() + RETRY,
+            retry: RETRY,
+        }
+    }
+
+    /// A dead thread leaves every subscription reading 0: start another
+    /// with all of them (with backoff).
+    fn revive(&mut self) {
+        if self.alive.load(Ordering::Relaxed) || Instant::now() < self.retry_at {
+            return;
+        }
+        warn!("meters: thread ended; restarting it");
+        (self.tx, self.alive) = spawn_thread();
+        self.retry = (self.retry * 2).min(MAX_RESTART);
+        self.retry_at = Instant::now() + self.retry;
+        for (target, peaks) in &self.meters {
+            let _ = self.tx.send(Cmd::Add(target.clone(), peaks.clone()));
+        }
+    }
 }
 
 /// Meter streams for any number of subscribers. Free until the first
@@ -77,9 +115,11 @@ impl MeterService {
     pub fn subscribe(&self, targets: Vec<MeterTarget>) -> MeterSubscription {
         let peaks: Vec<Arc<Peaks>> = targets.iter().map(|_| Arc::default()).collect();
         let mut worker = lock(&self.worker);
-        let w = worker.get_or_insert_with(spawn_worker);
+        let w = worker.get_or_insert_with(Worker::spawn);
+        w.revive();
         w.subscriptions += 1;
         for (target, peaks) in targets.iter().zip(&peaks) {
+            w.meters.push((target.clone(), peaks.clone()));
             let _ = w.tx.send(Cmd::Add(target.clone(), peaks.clone()));
         }
         MeterSubscription {
@@ -102,6 +142,9 @@ impl MeterSubscription {
     /// for an unclipped signal; L/R) since the previous read. Silence and
     /// targets not metered right now read 0.
     pub fn read(&self) -> Vec<[f32; 2]> {
+        if let Some(w) = lock(&self.worker).as_mut() {
+            w.revive();
+        }
         self.peaks.iter().map(|p| p.take()).collect()
     }
 }
@@ -113,6 +156,7 @@ impl Drop for MeterSubscription {
             return;
         };
         for (target, peaks) in self.targets.drain(..).zip(self.peaks.drain(..)) {
+            w.meters.retain(|(_, p)| !Arc::ptr_eq(p, &peaks));
             let _ = w.tx.send(Cmd::Remove(target, peaks));
         }
         w.subscriptions -= 1;
@@ -129,11 +173,23 @@ fn lock(worker: &Mutex<Option<Worker>>) -> MutexGuard<'_, Option<Worker>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn spawn_worker() -> Worker {
+/// Clears its flag when dropped: the thread ended, however it did.
+struct Alive(Arc<AtomicBool>);
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+fn spawn_thread() -> (pw::channel::Sender<Cmd>, Arc<AtomicBool>) {
     let (tx, rx) = pw::channel::channel();
+    let alive = Arc::new(AtomicBool::new(true));
+    let guard = Alive(alive.clone());
     let spawned = std::thread::Builder::new()
         .name("hako-meters".into())
         .spawn(move || {
+            let _guard = guard;
             if let Err(e) = run(rx) {
                 warn!("meters: {e}");
             }
@@ -141,10 +197,7 @@ fn spawn_worker() -> Worker {
     if let Err(e) = spawned {
         warn!("meters: cannot start thread: {e}");
     }
-    Worker {
-        tx,
-        subscriptions: 0,
-    }
+    (tx, alive)
 }
 
 /// One stream and everyone reading it.
@@ -152,6 +205,8 @@ fn spawn_worker() -> Worker {
 struct Meter {
     readers: Rc<RefCell<Vec<Arc<Peaks>>>>,
     live: Option<Live>,
+    /// A failure to open its stream was logged (once until one opens).
+    warned: bool,
 }
 
 /// Fields drop in order: the listener is unhooked before the stream goes.
@@ -287,8 +342,17 @@ fn sync(e: &mut Engine) {
             meter.live = None;
         } else if meter.live.is_none() {
             match open_stream(&conn.core, target, &meter.readers) {
-                Ok(live) => meter.live = Some(live),
-                Err(err) => warn!("meters: stream for {}: {err}", target.node_name),
+                Ok(live) => {
+                    meter.live = Some(live);
+                    meter.warned = false;
+                }
+                Err(err) if meter.warned => {
+                    debug!("meters: stream for {}: {err}", target.node_name)
+                }
+                Err(err) => {
+                    warn!("meters: stream for {}: {err}", target.node_name);
+                    meter.warned = true;
+                }
             }
         }
     }
@@ -489,6 +553,33 @@ pub(crate) mod tests {
         assert_eq!(stereo_peak(&bytes), [0.4, 0.9]);
         // A torn trailing frame is ignored.
         assert_eq!(stereo_peak(&bytes[..12]), [0.1, 0.9]);
+    }
+
+    #[test]
+    fn a_dead_meter_thread_is_restarted_with_backoff() {
+        let (tx, rx) = pw::channel::channel();
+        drop(rx);
+        let mut w = Worker {
+            tx,
+            subscriptions: 1,
+            meters: Vec::new(),
+            alive: Arc::new(AtomicBool::new(false)),
+            retry_at: Instant::now() + Duration::from_secs(60),
+            retry: RETRY,
+        };
+        w.revive();
+        assert_eq!(w.retry, RETRY, "not before its time");
+        w.retry_at = Instant::now();
+        w.revive();
+        assert_eq!(w.retry, RETRY * 2);
+        assert!(w.retry_at > Instant::now() + RETRY);
+        // A live thread is left alone.
+        w.alive.store(true, Ordering::Relaxed);
+        w.retry_at = Instant::now();
+        w.revive();
+        assert_eq!(w.retry, RETRY * 2);
+        // The restarted thread (no meters: no PipeWire connection) ends.
+        let _ = w.tx.send(Cmd::Quit);
     }
 
     fn meter_nodes() -> usize {

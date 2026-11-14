@@ -24,7 +24,7 @@ mod gamma;
 
 use crate::drivers::{DeviceAdapter, DriverCtx, Model, Opened};
 use crate::hid::{enumerate_hidraw, usage_pages, HidrawDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
@@ -314,6 +314,9 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
     };
     let dev = HidrawDevice::open(&info.path)?;
     let mut settings = hako_core::config::load_device_settings(&ctx.paths, vid, canonical)?;
+    let effect = get_setting(&settings, SettingKey::Effect).and_then(|v| v.as_str());
+    let known = controls(effect.unwrap_or("onboard"));
+    crate::drivers::sanitize_saved(&mut settings, &known);
     defaults(&mut settings);
     let mut a = Wooting {
         name: model.name,
@@ -430,18 +433,28 @@ impl DeviceAdapter for Wooting {
         let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value);
         if let Err(e) = self.apply() {
-            // The keyboard kept its old look; so do the UI and the file.
+            // Some of the frames may have gone out: send the old look again.
             self.settings = before;
-            self.last_error = Some(e.to_string());
+            let e = match self.apply() {
+                Ok(()) => e,
+                Err(r) => anyhow!("{e:#}; restoring the previous look failed too: {r:#}"),
+            };
+            self.last_error = Some(format!("{e:#}"));
             return Err(e);
         }
         self.last_error = None;
-        hako_core::config::save_device_settings(
+        let saved = hako_core::config::save_device_settings(
             &self.paths,
             self.vid,
             self.canonical,
             &self.settings,
-        )
+        );
+        if let Err(e) = saved {
+            let e = e.context("applied, but not saved");
+            self.last_error = Some(format!("{e:#}"));
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
@@ -477,6 +490,48 @@ mod tests {
                 assert_eq!(m.product_ids, [base, base | 1, base | 2], "{}", m.name);
             }
         }
+    }
+
+    #[test]
+    fn failed_write_rolls_back_and_reports_the_failed_restore() {
+        let dir = std::env::temp_dir().join(format!("hako-wooting-test-{}", std::process::id()));
+        let mut settings = SettingsMap::new();
+        merge_setting(
+            &mut settings,
+            SettingKey::Effect,
+            SettingValue::Text("static".into()),
+        );
+        defaults(&mut settings);
+        let mut a = Wooting {
+            name: "Test",
+            vid: VID,
+            canonical: 0x1300,
+            proto: Proto::V2 { small: true },
+            cols: 14,
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: 0x1300,
+                instance: "t".into(),
+            },
+            dev: None,
+            direct: false,
+            settings: settings.clone(),
+            last_error: None,
+            paths: ConfigPaths {
+                root: dir.clone(),
+                config_toml: dir.join("config.toml"),
+                devices_dir: dir.join("devices"),
+                profiles_dir: dir.join("profiles"),
+                remaps_dir: dir.join("remaps"),
+            },
+        };
+        let e = a
+            .set(SettingKey::Brightness, SettingValue::Int(10))
+            .unwrap_err();
+        assert!(e.to_string().contains("failed too"), "{e}");
+        assert_eq!(a.settings, settings);
+        assert!(a.last_error.is_some());
+        assert!(!dir.exists(), "nothing saved");
     }
 
     #[test]

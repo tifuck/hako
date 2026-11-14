@@ -156,7 +156,8 @@ fn request(cmd: u8, target: u8, len: u8) -> [u8; 64] {
 }
 
 /// Sends `req` and reads the reply (report `a0` for the configuration
-/// block): the status and the whole reply. Pending replies are re-read.
+/// block): the status and the whole reply. Pending replies are re-read; one
+/// still pending after the last round is an error, not a status.
 fn transact(dev: &impl Feature, req: &mut [u8; 64], pace: Duration) -> Result<(u8, Vec<u8>)> {
     let bulk = req[1] == CMD_CONFIG;
     dev.set(req)?;
@@ -168,12 +169,18 @@ fn transact(dev: &impl Feature, req: &mut [u8; 64], pace: Duration) -> Result<(u
         dev.get(&mut buf)?;
         // Both reports answer with `a1` in byte 0 (vole §2).
         ensure!(buf[0] == REPORT, "unexpected reply report {:#04x}", buf[0]);
-        if !PENDING.contains(&buf[1]) || round == 4 {
-            break;
+        if !PENDING.contains(&buf[1]) {
+            return Ok((buf[1], buf));
         }
-        std::thread::sleep(pace * 200 * round);
+        if round < 4 {
+            std::thread::sleep(pace * 200 * round);
+        }
     }
-    Ok((buf[1], buf))
+    bail!(
+        "the mouse is still busy with command {:#04x} (status {:#04x}); try again",
+        req[1],
+        buf[1]
+    )
 }
 
 fn probe(dev: &impl Feature, pace: Duration) -> Result<()> {
@@ -913,6 +920,17 @@ mod tests {
         let s = read_status(&dev, XM2W_V1, Duration::ZERO).unwrap();
         assert_eq!(s.battery, Some(battery(None, true)));
         assert!(dev.sent.borrow().iter().all(|r| r[1] != CMD_PROBE));
+    }
+
+    #[test]
+    fn still_pending_after_the_last_round_is_busy() {
+        let dev = Fake::new(true);
+        dev.busy.set(3);
+        let (status, _) = transact(&dev, &mut request(CMD_BATTERY, 0, 0), Duration::ZERO).unwrap();
+        assert_eq!(status, OK);
+        dev.busy.set(4);
+        let e = transact(&dev, &mut request(CMD_BATTERY, 0, 0), Duration::ZERO).unwrap_err();
+        assert!(e.to_string().contains("still busy"), "{e}");
     }
 
     #[test]

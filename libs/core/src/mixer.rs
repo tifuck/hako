@@ -284,8 +284,9 @@ impl MixerFile {
     pub fn apply(&mut self, op: &MixerOp) -> Result<(), String> {
         let mut next = self.clone();
         next.apply_unchecked(op)?;
-        next.live.normalize();
+        // Checked as given: normalising would hide a bad trim or gain.
         next.validate()?;
+        next.live.normalize();
         *self = next;
         Ok(())
     }
@@ -559,6 +560,17 @@ impl Scene {
                 }
             }
         }
+        // Nor played into one (a virtual input's sink).
+        for o in &self.outputs {
+            if let OutputKind::Hardware { sink, .. } = &o.kind {
+                if created.contains(sink.as_str()) {
+                    return Err(format!(
+                        "output {} cannot play into {sink:?}: hako makes that node (feedback loop)",
+                        o.id
+                    ));
+                }
+            }
+        }
         for i in &self.inputs {
             if let InputKind::Hardware { sources } = &i.kind {
                 if let Some(s) = sources.iter().find(|s| created.contains(s.node.as_str())) {
@@ -705,13 +717,13 @@ fn read_mixer(paths: &crate::ConfigPaths) -> Result<(MixerFile, bool)> {
     };
     let raw: MixerFile =
         toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    if let Err(e) = raw.validate() {
+        bail!("{}: {e}", path.display());
+    }
     let mut file = raw.clone();
     file.live.normalize();
     for s in &mut file.scenes {
         s.scene.normalize();
-    }
-    if let Err(e) = file.validate() {
-        bail!("{}: {e}", path.display());
     }
     let changed = file != raw;
     Ok((file, changed))
@@ -924,6 +936,69 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.contains("feedback"), "{err}");
+    }
+
+    #[test]
+    fn an_output_cannot_play_into_a_virtual_input() {
+        let game = || Input {
+            kind: InputKind::Virtual {
+                node_name: "Hako_Game".into(),
+                apps: Vec::new(),
+            },
+            ..hw("game", &[], &[])
+        };
+        let looped = || {
+            out(
+                "A2",
+                OutputKind::Hardware {
+                    sink: "Hako_Game".into(),
+                    description: String::new(),
+                },
+            )
+        };
+        let mut m = sample();
+        m.apply(&MixerOp::PutOutput { output: looped() }).unwrap();
+        let err = m.apply(&MixerOp::PutInput { input: game() }).unwrap_err();
+        assert!(err.contains("feedback"), "{err}");
+
+        let mut m = sample();
+        m.apply(&MixerOp::PutInput { input: game() }).unwrap();
+        let err = m
+            .apply(&MixerOp::PutOutput { output: looped() })
+            .unwrap_err();
+        assert!(err.contains("feedback"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_single_source_trim_is_refused_not_folded() {
+        let with_trim = |trim_db| {
+            let mut input = hw("voice", &["alsa_input.usb-mic.mono-fallback"], &["B1"]);
+            if let InputKind::Hardware { sources } = &mut input.kind {
+                sources[0].trim_db = trim_db;
+            }
+            input
+        };
+        let mut m = sample();
+        for trim_db in [f32::NAN, f32::INFINITY, TRIM_MAX_DB + 1.0] {
+            let input = with_trim(trim_db);
+            assert!(m.apply(&MixerOp::PutInput { input }).is_err(), "{trim_db}");
+        }
+        assert_eq!(m, sample());
+
+        let root = std::env::temp_dir().join(format!("hako-mixer-badtrim-{}", std::process::id()));
+        let paths = crate::ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        paths.ensure().unwrap();
+        let mut bad = sample();
+        bad.live.inputs[0] = with_trim(f32::NAN);
+        std::fs::write(mixer_path(&paths), toml::to_string_pretty(&bad).unwrap()).unwrap();
+        assert!(load_mixer(&paths).is_err(), "a NaN trim is an error, not 0");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

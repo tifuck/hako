@@ -21,7 +21,7 @@ use super::{
 };
 use crate::drivers::{DriverCtx, Opened};
 use crate::hid::HidrawDevice;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use hako_core::catalog::SettingMeta;
 use hako_core::device::DeviceKind;
 use std::time::Duration;
@@ -267,12 +267,13 @@ pub(super) fn open(spec: &'static Spec<Family>, pid: u16, ctx: &DriverCtx) -> Op
     let lights: Box<dyn Lights> = match spec.family {
         Family::Vulcan(v) => {
             let (led, _) = open_iface(spec.vid, pid, v.led_iface)?;
-            let firmware = firmware(&ctrl, v.v2);
+            // The frame length's byte order depends on the firmware: no guess.
+            let big_endian = !v.le_only && big_endian(v, firmware(&ctrl, v.v2)?);
             Box::new(Keyboard {
                 ctrl,
                 led,
                 v,
-                big_endian: big_endian(v, firmware),
+                big_endian,
                 direct: false,
             })
         }
@@ -284,14 +285,13 @@ pub(super) fn open(spec: &'static Spec<Family>, pid: u16, ctx: &DriverCtx) -> Op
     Adapter::open(spec, DeviceKind::Keyboard, pid, instance, lights, ctx)
 }
 
-/// Firmware version byte (103 = v1.03) from the info report; 0 if unreadable.
-fn firmware(ctrl: &HidrawDevice, v2: bool) -> u8 {
+/// Firmware version byte (103 = v1.03) from the info report.
+fn firmware(ctrl: &HidrawDevice, v2: bool) -> Result<u8> {
     let mut buf = if v2 { vec![0u8; 9] } else { vec![0u8; 8] };
     buf[0] = if v2 { 0x09 } else { 0x0f };
-    match ctrl.get_feature(&mut buf) {
-        Ok(()) => buf[2],
-        Err(_) => 0,
-    }
+    ctrl.get_feature(&mut buf)
+        .context("read the firmware version")?;
+    Ok(buf[2])
 }
 
 /// Firmware 1.16 and later expect the frame length big-endian. The test is
@@ -415,10 +415,11 @@ impl Lights for Keyboard {
         vec![save_blocked(OPENRGB_ONLY)]
     }
 
-    fn release(&mut self) {
+    fn release(&mut self) -> Result<()> {
         if self.direct {
-            let _ = self.set_direct(false);
+            self.set_direct(false)?;
         }
+        Ok(())
     }
 }
 

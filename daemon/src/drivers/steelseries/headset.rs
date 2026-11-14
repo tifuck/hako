@@ -52,7 +52,7 @@
 use super::{instance, pad, request, VID};
 use crate::drivers::{DeviceAdapter, DriverCtx, Opened};
 use crate::hid::{find_hidraw, HidrawDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use hako_audio::AudioService;
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
@@ -748,6 +748,47 @@ pub(super) fn packets(
     }
 }
 
+/// The packets that re-send every stored setting, in control order (one EQ
+/// frame: the stored gains, else the stored preset's), and why each stored
+/// setting that cannot be encoded was left out.
+fn stored_packets(spec: &HeadsetSpec, settings: &SettingsMap) -> (Vec<Vec<Packet>>, Vec<String>) {
+    let (mut all, mut skipped) = (Vec::new(), Vec::new());
+    let mut eq_sent = false;
+    for meta in controls(spec) {
+        if meta.read_only || meta.persistent || get_setting(settings, meta.key).is_none() {
+            continue;
+        }
+        let eq = meta.key == SettingKey::EqPreset || EQ_KEYS.contains(&meta.key);
+        if eq && std::mem::replace(&mut eq_sent, true) {
+            continue;
+        }
+        let key = if eq {
+            EQ_KEYS
+                .into_iter()
+                .find(|&k| get_setting(settings, k).is_some())
+                .unwrap_or(SettingKey::EqPreset)
+        } else {
+            meta.key
+        };
+        match packets(spec, &mut settings.clone(), key) {
+            Ok(p) => all.push(p),
+            Err(e) => {
+                warn!("stored {} not re-applied: {e:#}", key.as_str());
+                skipped.push(format!("{}: {e:#}", key.as_str()));
+            }
+        }
+    }
+    (all, skipped)
+}
+
+/// `apply_stored`'s skipped settings as an error, if any.
+fn not_reapplied(skipped: Vec<String>) -> Result<()> {
+    if skipped.is_empty() {
+        return Ok(());
+    }
+    bail!("not re-applied: {}", skipped.join("; "))
+}
+
 pub(super) fn open(
     pid: u16,
     name: &'static str,
@@ -857,31 +898,15 @@ impl HeadsetAdapter {
 
     /// Re-send every stored setting (they are volatile on the headset).
     /// Never saves: memory writes only happen for a user change in `set`.
-    fn apply_stored(&mut self) -> Result<()> {
-        let mut eq_sent = false;
-        for meta in controls(self.spec) {
-            if meta.read_only || meta.persistent || get_setting(&self.settings, meta.key).is_none()
-            {
-                continue;
-            }
-            let eq = meta.key == SettingKey::EqPreset || EQ_KEYS.contains(&meta.key);
-            if eq && std::mem::replace(&mut eq_sent, true) {
-                continue;
-            }
-            // One EQ frame: the stored gains, else the stored preset's.
-            let key = if eq {
-                EQ_KEYS
-                    .into_iter()
-                    .find(|&k| get_setting(&self.settings, k).is_some())
-                    .unwrap_or(SettingKey::EqPreset)
-            } else {
-                meta.key
-            };
-            let p = packets(self.spec, &mut self.settings.clone(), key)?;
+    /// A failed send aborts (the caller retries it all); a setting that
+    /// cannot be encoded is skipped and returned.
+    fn apply_stored(&mut self) -> Result<Vec<String>> {
+        let (all, skipped) = stored_packets(self.spec, &self.settings);
+        for p in all {
             self.send(p)?;
             std::thread::sleep(Duration::from_millis(5));
         }
-        Ok(())
+        Ok(skipped)
     }
 
     fn poll(&mut self) -> Result<()> {
@@ -890,8 +915,9 @@ impl HeadsetAdapter {
         let Some(req) = status_request(family) else {
             // Wired, nothing to poll: always reachable.
             if !self.online {
+                let skipped = self.apply_stored()?;
                 self.online = true;
-                self.apply_stored()?;
+                return not_reapplied(skipped);
             }
             return Ok(());
         };
@@ -953,12 +979,15 @@ impl HeadsetAdapter {
             }
             _ => {}
         }
-        let came_up = st.online && !self.online;
+        // Online only once the stored settings went out: a failed re-apply is
+        // tried again on the next poll.
+        let skipped = if st.online && !self.online {
+            self.apply_stored()?
+        } else {
+            Vec::new()
+        };
         self.online = st.online;
-        if came_up {
-            self.apply_stored()?;
-        }
-        Ok(())
+        not_reapplied(skipped)
     }
 
     fn persist(&self, settings: &SettingsMap) -> Result<()> {
@@ -1016,22 +1045,28 @@ impl DeviceAdapter for HeadsetAdapter {
             if value.as_bool() == Some(true) {
                 self.store(None)?;
             }
-            self.persist(&proposed)?;
             self.settings = proposed;
-            return Ok(());
+            return self
+                .persist(&self.settings)
+                .map_err(|e| anyhow!("applied, but not saved: {e:#}"));
         }
         let p = packets(self.spec, &mut proposed, key)?;
         self.send(p)?;
-        self.persist(&proposed)?;
+        // The headset has the value: keep it even if the file cannot be written.
         self.settings = proposed;
-        if self.saving() {
+        let file = self
+            .persist(&self.settings)
+            .map_err(|e| anyhow!("applied, but not saved: {e:#}"));
+        let stored = if self.saving() {
             let device_value = match value {
                 SettingValue::Bool(b) => Some(u8::from(b)),
                 v => v.as_int().and_then(|n| u8::try_from(n).ok()),
             };
-            self.store(device_value.map(|v| (key, v)))?;
-        }
-        Ok(())
+            self.store(device_value.map(|v| (key, v)))
+        } else {
+            Ok(())
+        };
+        file.and(stored)
     }
 
     fn tick(&mut self) -> Result<()> {
@@ -1106,6 +1141,22 @@ mod tests {
         bt_call: true,
         save: Save::NovaGen2,
     };
+
+    /// A stored value that cannot be encoded is skipped and reported; the
+    /// other stored settings are still re-sent.
+    #[test]
+    fn reapply_skips_a_bad_stored_value() {
+        let mut s = SettingsMap::new();
+        s.insert("mic_volume".into(), SettingValue::Text("loud".into()));
+        s.insert("mic_side_tone".into(), SettingValue::Int(2));
+        s.insert("volume_limiter".into(), SettingValue::Bool(true));
+        let (all, skipped) = stored_packets(&NOVA7_SPEC, &s);
+        assert_eq!(all.len(), 2);
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].starts_with("mic_volume"), "{skipped:?}");
+        assert!(not_reapplied(skipped).is_err());
+        assert!(not_reapplied(Vec::new()).is_ok());
+    }
 
     #[test]
     fn legacy_packets_match_headsetcontrol() {

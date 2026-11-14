@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use hako_audio::net::{NET_CHANNELS, NET_MAX_FRAMES};
 use hako_core::net::{peer_id, validate_key, MAX_NAME};
 use serde_json::{json, Value};
+use snow::resolvers::{CryptoResolver, DefaultResolver};
 use snow::StatelessTransportState;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -64,6 +65,7 @@ impl Identity {
     }
 
     /// The key file: private key hex, then public key hex, one per line.
+    /// A public key that is not the private key's is refused.
     pub fn parse(text: &str) -> Result<Self> {
         let mut lines = text.lines().map(str::trim);
         let (Some(private), Some(public)) = (lines.next(), lines.next()) else {
@@ -71,8 +73,17 @@ impl Identity {
         };
         validate_key(private).map_err(anyhow::Error::msg)?;
         validate_key(public).map_err(anyhow::Error::msg)?;
+        let private = unhex(private).context("private key")?;
+        let params: snow::params::NoiseParams = NOISE.parse()?;
+        let mut dh = DefaultResolver
+            .resolve_dh(&params.dh)
+            .context("no X25519")?;
+        dh.set(&private);
+        if hex(dh.pubkey()) != public {
+            bail!("the public key is not the private key's");
+        }
         Ok(Self {
-            private: unhex(private).context("private key")?,
+            private,
             public: public.to_string(),
         })
     }
@@ -183,7 +194,9 @@ impl Control {
             "hello" => Self::Hello {
                 name: v["name"].as_str()?.into(),
                 version: v["version"].as_str()?.into(),
-                port: u16::try_from(v["port"].as_u64()?).ok()?,
+                port: u16::try_from(v["port"].as_u64()?)
+                    .ok()
+                    .filter(|&p| p != 0)?,
                 pair: v["pair"].as_bool()?,
             },
             "accepted" => Self::Accepted,
@@ -413,6 +426,12 @@ pub(super) mod tests {
             (id.private.clone(), id.public.clone())
         );
         assert!(Identity::parse("zz\n").is_err());
+        let other = Identity::generate().unwrap();
+        let mismatched = format!("{}\n{}\n", hex(&id.private), other.public);
+        assert!(
+            Identity::parse(&mismatched).is_err(),
+            "public key of another"
+        );
         assert_eq!(unhex(&hex(&[0, 0xab, 0xff])), Some(vec![0, 0xab, 0xff]));
         assert_eq!(unhex("+f"), None);
     }
@@ -448,6 +467,15 @@ pub(super) mod tests {
             read_control(&mut &frame[..], &b.cipher, &mut last).unwrap(),
             hello
         );
+        // A Hello naming port 0 (no audio port) is unreadable.
+        let no_port = Control::Hello {
+            name: "Desk".into(),
+            version: "1".into(),
+            port: 0,
+            pair: true,
+        };
+        let frame = a.cipher.seal_control(&no_port).unwrap();
+        assert!(read_control(&mut &frame[..], &b.cipher, &mut last).is_err());
     }
 
     #[test]

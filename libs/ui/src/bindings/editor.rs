@@ -409,10 +409,6 @@ pub(super) fn panel(ui: &mut Ui, cx: &mut Cx, selected: &mut Option<EvdevKey>) {
                 }
             }
         }
-        if let Some(err) = &cx.remaps.last_error {
-            ui.add_space(theme::SPACE_SM);
-            ui.colored_label(theme::pal().warn, err);
-        }
     });
     ui.add_space(theme::SPACE_MD);
     store(ui.ctx(), cx, source, draft);

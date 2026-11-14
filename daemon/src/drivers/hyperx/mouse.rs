@@ -466,6 +466,8 @@ fn saved_by(key: SettingKey) -> bool {
 
 const REPLY_WAIT: Duration = Duration::from_millis(300);
 const POLL: Duration = Duration::from_secs(30);
+/// How often a failed re-apply after link-up is tried again.
+const RESYNC_RETRY: Duration = Duration::from_secs(10);
 
 struct UniversalMouse {
     spec: &'static Spec<Family>,
@@ -480,7 +482,11 @@ struct UniversalMouse {
     settings: SettingsMap,
     battery: BatteryState,
     online: bool,
+    /// The user's choices still have to be re-applied (cleared once done).
     sync: bool,
+    last_resync: Option<Instant>,
+    /// Why the last re-apply failed, shown until one succeeds.
+    resync_error: Option<String>,
     /// Enabled DPI stages from the last table read (0 = not read yet).
     mask: u8,
     last_poll: Option<Instant>,
@@ -505,7 +511,11 @@ impl UniversalMouse {
             .with_context(|| format!("{} has no PID {pid:04x}", spec.name))?;
         let (dev, instance) = open_node(spec.vid, pid, Node::Iface(iface))?;
         info!("{} open via {}", spec.name, dev.path.display());
-        let user = hako_core::config::load_device_settings(&paths, spec.vid, spec.pids[0])?;
+        let mut user = hako_core::config::load_device_settings(&paths, spec.vid, spec.pids[0])?;
+        let rates = if cabled { rates.min(4) } else { rates };
+        // Every stage until the table is read, as `snapshot` offers them.
+        let offered = universal_controls(text(&user, SettingKey::Effect, ""), rates, presets, 0x1f);
+        crate::drivers::sanitize_saved(&mut user, &offered);
         Ok(Self {
             spec,
             id: DeviceId {
@@ -516,7 +526,7 @@ impl UniversalMouse {
             dev: Some(dev),
             cabled,
             // A cable caps the rate at 1000 Hz (Saga Control).
-            rates: if cabled { rates.min(4) } else { rates },
+            rates,
             presets,
             settings: user.clone(),
             user,
@@ -528,6 +538,8 @@ impl UniversalMouse {
             },
             online: cabled,
             sync: true,
+            last_resync: None,
+            resync_error: None,
             mask: 0,
             last_poll: None,
             failures: 0,
@@ -554,6 +566,7 @@ impl UniversalMouse {
                 // The mouse sends 51 02 by itself after waking.
                 if online && !self.online {
                     self.sync = true;
+                    self.last_resync = None;
                 }
                 self.online = online;
                 self.battery.present = online;
@@ -613,7 +626,12 @@ impl UniversalMouse {
             _ => bail!("unsupported setting {}", key.as_str()),
         };
         // Wait for the mouse's own reply (e.g. 43 02) so RF does not drop the next packet.
-        self.query(&packet)?;
+        let reply = self.query(&packet)?;
+        // A preset write is answered by the mouse itself (universal.md §5.3);
+        // other writes may get only the dongle's ack.
+        if packet.starts_with(&[0x42, 0x02]) && reply.is_none() {
+            bail!("the mouse did not answer the lighting write");
+        }
         Ok(())
     }
 
@@ -707,9 +725,20 @@ impl UniversalMouse {
                 self.query(&uni(0x50, 0x02, &[]))?;
             }
         }
-        if self.online && self.sync {
-            self.sync = false;
-            self.resync()?;
+        if self.online && self.sync && self.last_resync.is_none_or(|t| t.elapsed() >= RESYNC_RETRY)
+        {
+            self.last_resync = Some(Instant::now());
+            // Done only once it worked: a failed re-apply is tried again.
+            match self.resync() {
+                Ok(()) => {
+                    self.sync = false;
+                    self.resync_error = None;
+                }
+                Err(e) => {
+                    warn!("{}: re-apply settings: {e}", self.spec.name);
+                    self.resync_error = Some(format!("re-applying settings: {e}"));
+                }
+            }
         }
         Ok(())
     }
@@ -749,6 +778,7 @@ impl DeviceAdapter for UniversalMouse {
             }
             self.store(None)?;
         }
+        let before = (self.user.clone(), self.settings.clone());
         for s in [&mut self.user, &mut self.settings] {
             // Chosen stages imply the DPI; a stale one would land in the active stage.
             if key == SettingKey::DpiStageActive || STAGES.contains(&key) {
@@ -757,24 +787,36 @@ impl DeviceAdapter for UniversalMouse {
             merge_setting(s, key, value.clone());
             link_dpi(s, key);
         }
+        // An asleep mouse gets everything on its next link-up instead.
+        let applied = key != SettingKey::SaveToDevice && self.online;
+        if applied {
+            if let Err(e) = self.apply_key(key) {
+                // The mouse kept its old value; so do the UI and the file.
+                (self.user, self.settings) = before;
+                return Err(e);
+            }
+        }
         hako_core::config::save_device_settings(
             &self.paths,
             self.spec.vid,
             self.spec.pids[0],
             &self.user,
-        )?;
+        )
+        .map_err(|e| match applied {
+            true => anyhow::anyhow!("applied, but not saved: {e:#}"),
+            false => e,
+        })?;
         if key == SettingKey::SaveToDevice {
             return Ok(());
         }
         let store = self.saving() && saved_by(key);
         if !self.online {
-            // An asleep mouse gets everything on its next link-up, which never saves.
+            // The link-up re-apply never saves.
             if store {
                 bail!("the mouse is asleep: changed when it wakes, but not saved to its memory");
             }
             return Ok(());
         }
-        self.apply_key(key)?;
         if store {
             self.store(Some(key))
                 .context("changed, but not saved to device memory")?;
@@ -793,7 +835,7 @@ impl DeviceAdapter for UniversalMouse {
         match self.poll() {
             Ok(()) => {
                 self.failures = 0;
-                self.last_error = None;
+                self.last_error = self.resync_error.clone();
                 Ok(())
             }
             Err(e) => {
@@ -935,6 +977,9 @@ impl DartMouse {
         let iface = if pid == spec.pids[0] { 2 } else { 1 };
         let (dev, instance) = open_node(spec.vid, pid, Node::Iface(iface))?;
         info!("{} open via {}", spec.name, dev.path.display());
+        let mut settings = hako_core::config::load_device_settings(&paths, spec.vid, spec.pids[0])?;
+        let offered = dart_controls(text(&settings, SettingKey::Effect, "static"));
+        crate::drivers::sanitize_saved(&mut settings, &offered);
         let mut a = Self {
             spec,
             id: DeviceId {
@@ -943,7 +988,7 @@ impl DartMouse {
                 instance,
             },
             dev: Some(dev),
-            settings: hako_core::config::load_device_settings(&paths, spec.vid, spec.pids[0])?,
+            settings,
             battery: BatteryState {
                 label: "Mouse".into(),
                 percent: None,
@@ -954,21 +999,33 @@ impl DartMouse {
             last_error: None,
             paths,
         };
-        // Everything is volatile: restore the saved choices on every connect.
+        a.restore();
+        Ok(a)
+    }
+
+    /// Everything is volatile: the saved choices are sent on open and
+    /// whenever the heartbeat finds the mouse again.
+    fn restore(&mut self) {
         let keys = STAGES.into_iter().chain([
             SettingKey::DpiStageActive,
             SettingKey::ReportRate,
             SettingKey::Effect,
         ]);
+        let mut errors = Vec::new();
         for key in keys {
-            if get_setting(&a.settings, key).is_some() {
-                if let Err(e) = a.apply(key) {
-                    warn!("{} restore {}: {e}", spec.name, key.as_str());
-                    a.last_error = Some(e.to_string());
+            if get_setting(&self.settings, key).is_some() {
+                if let Err(e) = self.apply(key) {
+                    warn!("{} restore {}: {e}", self.spec.name, key.as_str());
+                    errors.push(format!("{}: {e}", key.as_str()));
                 }
             }
         }
-        Ok(a)
+        self.last_error = (!errors.is_empty()).then(|| errors.join("; "));
+    }
+
+    /// Lighting goes out as several packets (one per LED).
+    fn is_lighting(key: SettingKey) -> bool {
+        key != SettingKey::ReportRate && key != SettingKey::DpiStageActive && !STAGES.contains(&key)
     }
 
     fn apply(&mut self, key: SettingKey) -> Result<()> {
@@ -1021,16 +1078,26 @@ impl DeviceAdapter for DartMouse {
     }
 
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+        let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value);
-        let result = self.apply(key);
-        self.last_error = result.as_ref().err().map(|e| e.to_string());
+        if let Err(e) = self.apply(key) {
+            // The mouse kept its old value; so do the UI and the file.
+            self.settings = before;
+            self.last_error = Some(e.to_string());
+            if Self::is_lighting(key) {
+                // An LED written before the failure gets the old lighting back.
+                let _ = self.apply(key);
+            }
+            return Err(e);
+        }
+        self.last_error = None;
         hako_core::config::save_device_settings(
             &self.paths,
             self.spec.vid,
             self.spec.pids[0],
             &self.settings,
-        )?;
-        result
+        )
+        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     /// Heartbeat every [`POLL`]; silence means the mouse is off or asleep.
@@ -1050,11 +1117,16 @@ impl DeviceAdapter for DartMouse {
             parse_heartbeat(r).is_some()
         })?;
         let b = &mut self.battery;
+        let was_present = b.present;
         match reports.iter().find_map(|r| parse_heartbeat(r)) {
             Some((level, charging)) => {
                 (b.present, b.percent, b.charging) = (true, Some(level), charging)
             }
             None => (b.present, b.percent, b.charging) = (false, None, false),
+        }
+        if self.battery.present && !was_present {
+            // Back from off or asleep: its volatile settings are lost.
+            self.restore();
         }
         Ok(())
     }
@@ -1408,6 +1480,31 @@ mod tests {
             .find(|m| m.key == SettingKey::DpiStageActive)
             .unwrap();
         assert!(active.validate(&SettingValue::Int(5)).is_ok());
+    }
+
+    #[test]
+    fn saved_values_are_sanitized_before_they_are_sent() {
+        let mut s = SettingsMap::new();
+        merge_setting(&mut s, SettingKey::DpiStage1, SettingValue::Int(40_000));
+        merge_setting(&mut s, SettingKey::DpiStageActive, SettingValue::Int(9));
+        merge_setting(&mut s, SettingKey::ReportRate, SettingValue::Int(8000));
+        crate::drivers::sanitize_saved(&mut s, &dart_controls("static"));
+        assert_eq!(
+            get_setting(&s, SettingKey::DpiStage1),
+            Some(&SettingValue::Int(16_000))
+        );
+        assert_eq!(get_setting(&s, SettingKey::DpiStageActive), None);
+        assert_eq!(get_setting(&s, SettingKey::ReportRate), None);
+        // Universal mice: checked against every stage until the table is read.
+        let mut s = SettingsMap::new();
+        merge_setting(&mut s, SettingKey::LiftOffDistance, SettingValue::Int(7));
+        merge_setting(&mut s, SettingKey::DpiStageActive, SettingValue::Int(5));
+        crate::drivers::sanitize_saved(&mut s, &universal_controls("", 4, true, 0x1f));
+        assert_eq!(get_setting(&s, SettingKey::LiftOffDistance), None);
+        assert_eq!(
+            get_setting(&s, SettingKey::DpiStageActive),
+            Some(&SettingValue::Int(5))
+        );
     }
 
     /// Read-only probe: connection, battery and the live DPI table.

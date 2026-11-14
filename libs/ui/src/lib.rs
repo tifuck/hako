@@ -163,6 +163,9 @@ impl HakoAppUi {
         self.top_bar(ctx, out);
         self.rail(ctx, out);
         let mixer_page = self.show_mixer && !self.show_settings;
+        // Controls act on what hakod last reported: while it is unreachable
+        // they stay visible but disabled.
+        let online = self.daemon_error.is_none();
 
         egui::CentralPanel::default()
             .frame(
@@ -184,12 +187,12 @@ impl HakoAppUi {
                         }
                         if mixer_page {
                             widgets::page_transition(ui, "mixer");
-                            self.mixer_page(ui, out);
+                            ui.add_enabled_ui(online, |ui| self.mixer_page(ui, out));
                             return;
                         }
                         if self.show_net {
                             widgets::page_transition(ui, "net");
-                            self.net_page(ui, out);
+                            ui.add_enabled_ui(online, |ui| self.net_page(ui, out));
                             return;
                         }
                         let device = self.selected.as_ref().and_then(|id| {
@@ -200,7 +203,9 @@ impl HakoAppUi {
                         match device {
                             Some(d) => {
                                 let remaps = self.remaps_for(&d.id).unwrap_or_default();
-                                self.device_page(ui, &d, &remaps, out);
+                                ui.add_enabled_ui(online, |ui| {
+                                    self.device_page(ui, &d, &remaps, out)
+                                });
                             }
                             None => empty_state(ui, self.state.is_some(), &self.daemon_error),
                         }
@@ -743,7 +748,9 @@ impl HakoAppUi {
         ui.label(egui::RichText::new("Settings").heading().color(pal().text));
         ui.add_space(theme::SPACE_LG);
 
-        let have = self.settings.is_some();
+        let online = self.daemon_error.is_none();
+        // Editable: known, and hakod is there to save the change.
+        let have = self.settings.is_some() && online;
         let mut draft = self.settings.clone().unwrap_or_default();
         let before = draft.clone();
         widgets::section(
@@ -876,7 +883,11 @@ impl HakoAppUi {
                     "Reset audio graph",
                     Some("Removes hako's sinks and mixer, restores the default output"),
                     |ui| {
-                        if widgets::button(ui, "Reset").clicked() {
+                        if ui
+                            .add_enabled_ui(online, |ui| widgets::button(ui, "Reset"))
+                            .inner
+                            .clicked()
+                        {
                             out.push(UiCommand::ResetAudio);
                         }
                     },
@@ -903,7 +914,11 @@ impl HakoAppUi {
                 );
                 widgets::divider(ui);
                 widgets::row(ui, "Reload device state", None, |ui| {
-                    if widgets::button(ui, "Refresh").clicked() {
+                    if ui
+                        .add_enabled_ui(online, |ui| widgets::button(ui, "Refresh"))
+                        .inner
+                        .clicked()
+                    {
                         out.push(UiCommand::Refresh);
                     }
                 });

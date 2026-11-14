@@ -19,6 +19,7 @@ fn peer(id: &str, name: &str, connected: bool) -> PeerState {
             sending: false,
             rtt_ms: 0.4,
         }),
+        problem: None,
     }
 }
 

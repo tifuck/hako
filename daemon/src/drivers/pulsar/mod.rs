@@ -237,7 +237,9 @@ fn sonix_read(dev: &HidrawDevice, cat: u8, reg: u8, sub: u8) -> Result<Option<[u
         let mut buf = [0u8; 65];
         dev.get_feature(&mut buf)?;
         match sonix_status(&buf[1..], &req) {
-            Some(STATUS_ANSWERED) => return Ok(buf[1..].try_into().ok()),
+            // ponytail: the reply's `[62..64]` sum is not checked: no source
+            // confirms the dongles fill it in answers. Check it once seen on hardware.
+            Some(STATUS_ANSWERED) => return Ok(Some(buf[1..].try_into()?)),
             Some(STATUS_NO_LINK) => return Ok(None),
             _ if Instant::now() >= deadline => {
                 bail!("no answer to {cat:#04x}/{reg:#04x}/{sub:#04x}")
@@ -317,8 +319,11 @@ fn nordic_command(dev: &mut HidrawDevice, req: &[u8; 17]) -> Result<Option<[u8; 
     let deadline = Instant::now() + NORDIC_REPLY;
     let mut buf = [0u8; 64];
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-        let Ok(n) = dev.read_timeout(&mut buf, left) else {
-            break;
+        let n = match dev.read_timeout(&mut buf, left) {
+            Ok(n) => n,
+            // A timeout is a plain error, a failed read an I/O one.
+            Err(e) if e.downcast_ref::<std::io::Error>().is_some() => return Err(e),
+            Err(_) => break,
         };
         if nordic_reply(&buf[..n], req[1]) {
             return Ok(buf[..17].try_into().ok());
@@ -427,8 +432,7 @@ fn open(name: &'static str, vid: u16, pid: u16, spec: &'static Spec) -> Opened {
     let mut shown = name.to_string();
     if let (true, Some(d)) = (spec.identify, dev.as_mut()) {
         let ids = nordic_command(d, &identity_request())
-            .ok()
-            .flatten()
+            .context("Pulsar identity query")?
             .and_then(|r| parse_identity(&r));
         let Some((cid, mid)) = ids else {
             info!("{vid:04x}:{pid:04x} did not answer the Pulsar identity query; not claimed");

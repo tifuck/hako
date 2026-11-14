@@ -33,6 +33,8 @@ const KEY_ESC: u16 = 1;
 const IDLE_WAIT: Duration = Duration::from_millis(100);
 /// Retry when a key is held at grab time.
 const GRAB_RETRY: Duration = Duration::from_millis(250);
+/// Held-key retries before the wait is reported and slows to [`OPEN_RETRY`].
+const HELD_REPORT_AFTER: u32 = 20;
 const OPEN_RETRY: Duration = Duration::from_secs(2);
 /// A capture / record session that nobody ends is dropped after this.
 const SESSION_LIMIT: Duration = Duration::from_secs(120);
@@ -127,6 +129,9 @@ impl EngineInner {
 
 pub struct RemapEngine {
     inner: Arc<Mutex<EngineInner>>,
+    /// Serialises binding edits, so a remap file is written outside `inner`
+    /// (which the remap thread takes while forwarding). Taken before `inner`.
+    edits: Arc<Mutex<()>>,
     tx: mpsc::UnboundedSender<Cmd>,
     events: broadcast::Sender<AdapterEvent>,
 }
@@ -137,9 +142,11 @@ impl RemapEngine {
             paths,
             devices: Vec::new(),
         }));
+        let edits = Arc::new(Mutex::new(()));
         let (tx, rx) = mpsc::unbounded_channel();
         let worker = Worker {
             inner: inner.clone(),
+            edits: edits.clone(),
             events: events.clone(),
             slots: Vec::new(),
             virt: None,
@@ -147,11 +154,20 @@ impl RemapEngine {
             mapper: Mapper::default(),
             session: None,
         };
-        std::thread::Builder::new()
+        // Without the thread `rx` is dropped: every request then fails with
+        // "remap engine stopped" instead of the daemon going down.
+        if let Err(e) = std::thread::Builder::new()
             .name("hako-remap".into())
             .spawn(move || worker.run(rx))
-            .expect("spawn remap thread");
-        Self { inner, tx, events }
+        {
+            error!("cannot start the remap thread: {e}");
+        }
+        Self {
+            inner,
+            edits,
+            tx,
+            events,
+        }
     }
 
     /// Register a mouse or keyboard (idempotent; a reconnect keeps its bindings).
@@ -165,7 +181,11 @@ impl RemapEngine {
             .position(|d| claims(d.id.vendor_id, &d.pids, &id))
         {
             Some(i) => {
-                g.devices[i].id = id.clone();
+                let d = &mut g.devices[i];
+                d.id = id.clone();
+                if d.load_error.is_some() && retry_load(&g.paths, d) {
+                    let _ = self.events.send(AdapterEvent::RemapsUpdated(d.snapshot()));
+                }
                 i
             }
             None => {
@@ -214,9 +234,15 @@ impl RemapEngine {
     /// Hand `cmd` to the worker thread; an error when it is gone (it would
     /// otherwise look like success while nothing is applied).
     fn send(&self, cmd: Cmd) -> Result<()> {
-        self.tx
-            .send(cmd)
-            .map_err(|_| anyhow::anyhow!("remap engine stopped; restart hakod"))
+        self.tx.send(cmd).map_err(|_| stopped())
+    }
+
+    /// Checked before a request changes state, so state and reply agree.
+    fn alive(&self) -> Result<()> {
+        if self.tx.is_closed() {
+            return Err(stopped());
+        }
+        Ok(())
     }
 
     pub fn snapshots(&self) -> Vec<DeviceRemaps> {
@@ -247,13 +273,20 @@ impl RemapEngine {
         id: &DeviceId,
         edit: impl FnOnce(&mut HashMap<u16, RemapBinding>),
     ) -> Result<DeviceRemaps> {
+        self.alive()?;
+        let _edits = lock_edits(&self.edits);
+        let (idx, next, list, paths, vid, pid) = {
+            let g = lock(&self.inner);
+            let idx = g.find(id)?;
+            let d = &g.devices[idx];
+            let mut next = d.bindings.clone();
+            edit(&mut next);
+            let list = saved_list(d, &next)?;
+            (idx, next, list, g.paths.clone(), d.id.vendor_id, d.pids[0])
+        };
+        save_remap_bindings(&paths, vid, pid, &list)?;
         let mut guard = lock(&self.inner);
-        let g = &mut *guard;
-        let idx = g.find(id)?;
-        let d = &mut g.devices[idx];
-        let mut next = d.bindings.clone();
-        edit(&mut next);
-        persist(&g.paths, d, &next)?;
+        let d = &mut guard.devices[idx];
         d.bindings = next;
         if d.capturing.take().is_some() {
             d.capture_source = None;
@@ -275,8 +308,18 @@ impl RemapEngine {
         if role == CaptureRole::Target && source.is_none() {
             anyhow::bail!("target capture needs a source button");
         }
+        self.alive()?;
         let mut g = lock(&self.inner);
         let idx = g.find(&device_id)?;
+        // Listening to a device whose input nodes are all unreadable would
+        // only ever time out.
+        let nodes = event_nodes(g.devices[idx].id.vendor_id, &g.devices[idx].pids);
+        let blocked: Vec<PathBuf> = nodes.iter().filter(|p| !readable(p)).cloned().collect();
+        if blocked.len() == nodes.len() {
+            if let Some(msg) = unreadable_message(&blocked) {
+                anyhow::bail!(msg);
+            }
+        }
         // One listening session at a time: others stop (and say so).
         for (i, d) in g.devices.iter_mut().enumerate() {
             if i != idx && d.capturing.take().is_some() {
@@ -329,6 +372,14 @@ fn lock(inner: &Mutex<EngineInner>) -> MutexGuard<'_, EngineInner> {
     inner.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+fn lock_edits(edits: &Mutex<()>) -> MutexGuard<'_, ()> {
+    edits.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn stopped() -> anyhow::Error {
+    anyhow::anyhow!("remap engine stopped; restart hakod")
+}
+
 /// `id` is the same physical device as a model with these PIDs (instance and
 /// receiver-vs-wired PID may differ across reconnects).
 fn claims(vid: u16, pids: &[u16], id: &DeviceId) -> bool {
@@ -368,8 +419,29 @@ fn load_bindings(paths: &ConfigPaths, vid: u16, pids: &[u16]) -> Result<Loaded, 
     Ok(Default::default())
 }
 
+/// Read a remap file that failed to load again (on reconnect); true when it
+/// loaded, which makes the device's remaps editable again.
+fn retry_load(paths: &ConfigPaths, d: &mut DevState) -> bool {
+    let Ok((bindings, invalid)) = load_bindings(paths, d.id.vendor_id, &d.pids) else {
+        return false;
+    };
+    info!("remap file of {} is readable again", d.id.key());
+    if d.last_error == d.load_error {
+        d.last_error = None;
+    }
+    d.bindings = bindings;
+    d.invalid = invalid;
+    d.load_error = None;
+    true
+}
+
 /// Write `bindings` plus the rejected ones they don't replace.
 fn persist(paths: &ConfigPaths, d: &DevState, bindings: &HashMap<u16, RemapBinding>) -> Result<()> {
+    save_remap_bindings(paths, d.id.vendor_id, d.pids[0], &saved_list(d, bindings)?)
+}
+
+/// What [`persist`] writes; an error while the file could not be read.
+fn saved_list(d: &DevState, bindings: &HashMap<u16, RemapBinding>) -> Result<Vec<RemapBinding>> {
     if let Some(e) = &d.load_error {
         anyhow::bail!("{e}");
     }
@@ -383,7 +455,7 @@ fn persist(paths: &ConfigPaths, d: &DevState, bindings: &HashMap<u16, RemapBindi
         .cloned()
         .collect();
     list.sort_by_key(|b| b.source.0);
-    save_remap_bindings(paths, d.id.vendor_id, d.pids[0], &list)
+    Ok(list)
 }
 
 struct Slot {
@@ -396,6 +468,19 @@ struct Slot {
     /// Device paths of `nodes`.
     paths: Vec<PathBuf>,
     retry: Instant,
+    /// Grab attempts in a row that found a key held down.
+    held_retries: u32,
+}
+
+impl Slot {
+    /// A key was down at grab time: retry soon, then (a key that never comes
+    /// up) every [`OPEN_RETRY`]. True once the wait should be reported.
+    fn key_held(&mut self, now: Instant) -> bool {
+        self.held_retries = self.held_retries.saturating_add(1);
+        let report = self.held_retries >= HELD_REPORT_AFTER;
+        self.retry = now + if report { OPEN_RETRY } else { GRAB_RETRY };
+        report
+    }
 }
 
 /// A capture / record session. Listening nodes stay open for its whole
@@ -409,8 +494,10 @@ struct Session {
 }
 
 impl Session {
-    fn open(idx: usize, slot: &Slot) -> Self {
-        let nodes = evdev::enumerate()
+    /// An error when none of the device's own nodes could be opened because
+    /// this user cannot read them.
+    fn open(idx: usize, slot: &Slot) -> Result<Self, String> {
+        let nodes: Vec<(Device, bool)> = evdev::enumerate()
             .filter_map(|(_, dev)| {
                 if dev.name() == Some(VIRTUAL_NAME) {
                     return None;
@@ -426,17 +513,24 @@ impl Session {
                 Some((dev, own))
             })
             .collect();
-        Self {
+        if !nodes.iter().any(|(_, own)| *own) {
+            if let Some(msg) = unreadable_message(&unreadable_nodes(slot.id.vendor_id, &slot.pids))
+            {
+                return Err(msg);
+            }
+        }
+        Ok(Self {
             idx,
             nodes,
             rec: Recorder::default(),
             started: Instant::now(),
-        }
+        })
     }
 }
 
 struct Worker {
     inner: Arc<Mutex<EngineInner>>,
+    edits: Arc<Mutex<()>>,
     events: broadcast::Sender<AdapterEvent>,
     slots: Vec<Slot>,
     virt: Option<VirtualDevice>,
@@ -508,6 +602,7 @@ impl Worker {
                             nodes: Vec::new(),
                             paths: Vec::new(),
                             retry: Instant::now(),
+                            held_retries: 0,
                         });
                     } else if self.slots[idx].id != id || self.slots[idx].kind != kind {
                         self.ungrab(idx);
@@ -521,7 +616,15 @@ impl Worker {
                 Cmd::StartCapture { idx } => {
                     // Never steal input while the user is choosing keys.
                     self.ungrab_all();
-                    self.session = Some(Session::open(idx, &self.slots[idx]));
+                    self.session = None;
+                    match Session::open(idx, &self.slots[idx]) {
+                        Ok(sess) => self.session = Some(sess),
+                        Err(e) => self.update(idx, |d| {
+                            d.capturing = None;
+                            d.capture_source = None;
+                            d.last_error = Some(e);
+                        }),
+                    }
                 }
                 Cmd::CancelCapture { idx } => {
                     if self.session.as_ref().is_some_and(|s| s.idx == idx) {
@@ -544,6 +647,8 @@ impl Worker {
     fn set_bindings(&mut self, idx: usize, bindings: HashMap<u16, RemapBinding>) {
         let slot = &mut self.slots[idx];
         self.mapper.stop_device(idx);
+        self.mapper
+            .release_forwarded(idx, |code| bindings.contains_key(&code));
         slot.bindings = bindings;
         if slot.bindings.is_empty() {
             self.ungrab(idx);
@@ -595,34 +700,38 @@ impl Worker {
     }
 
     fn try_grab(&mut self, idx: usize, now: Instant) {
+        let mut excluded = 0;
         let nodes: Vec<(PathBuf, Device)> = evdev::enumerate()
-            .filter(|(_, dev)| node_matches(&self.slots[idx], dev))
+            .filter(|(_, dev)| {
+                let own = own_node(&self.slots[idx], dev);
+                let ok = own && forwards_all(dev);
+                excluded += usize::from(own && !ok);
+                ok
+            })
             .collect();
-        let slot = &mut self.slots[idx];
         if nodes.is_empty() {
+            let slot = &mut self.slots[idx];
             slot.retry = now + OPEN_RETRY;
-            // Present but unreadable (no udev rule for this device): say so.
-            let blocked = unreadable_nodes(slot.id.vendor_id, &slot.pids);
-            if let Some(first) = blocked.first() {
-                let msg = format!(
-                    "Cannot read {} ({} input node(s)): add your user to the `input` group, or install the hako udev rules if this device is listed.",
-                    first.display(),
-                    blocked.len()
-                );
-                let changed =
-                    lock(&self.inner).devices[idx].last_error.as_deref() != Some(msg.as_str());
-                if changed {
-                    self.update(idx, |d| d.last_error = Some(msg));
-                }
+            // Present but unreadable (no udev rule for this device), or
+            // never grabbed: say so, or the bindings silently do nothing.
+            let msg = unreadable_message(&unreadable_nodes(slot.id.vendor_id, &slot.pids)).or_else(
+                || {
+                    (excluded > 0).then(|| {
+                        "Remaps cannot apply: this device's input also carries joystick, \
+                         gamepad or tablet codes the virtual device cannot forward, so it \
+                         is never grabbed."
+                            .to_string()
+                    })
+                },
+            );
+            if let Some(msg) = msg {
+                self.report(idx, msg);
             }
             return;
         }
         // Grabbing mid-press would leave that key stuck down in the compositor.
-        if nodes
-            .iter()
-            .any(|(_, d)| d.get_key_state().is_ok_and(|k| k.iter().next().is_some()))
-        {
-            slot.retry = now + GRAB_RETRY;
+        if let Some(code) = held_key(nodes.iter().map(|(_, d)| d)) {
+            self.wait_for_release(idx, code, now);
             return;
         }
         if !self.ensure_virtual(idx, &nodes) {
@@ -630,33 +739,74 @@ impl Worker {
             return;
         }
         let slot = &mut self.slots[idx];
+        slot.retry = now + OPEN_RETRY;
+        let mut grabbed = Vec::new();
         let mut err = None;
         for (path, mut dev) in nodes {
             match dev.grab() {
-                Ok(()) => {
-                    let _ = dev.set_nonblocking(true);
-                    slot.nodes.push(dev);
-                    slot.paths.push(path);
-                }
+                Ok(()) => grabbed.push((path, dev)),
                 Err(e) => {
-                    warn!("grab {}: {e}", slot.id.key());
-                    err = Some(format!("grab: {e}"));
+                    warn!("grab {} ({}): {e}", slot.id.key(), path.display());
+                    err = Some(format!("grab {}: {e}", path.display()));
                 }
             }
         }
-        slot.retry = now + OPEN_RETRY;
-        let grabbed = !slot.nodes.is_empty();
-        if grabbed {
-            info!(
-                "grabbed {} evdev node(s) of {} for remaps",
-                slot.nodes.len(),
-                slot.id.key()
-            );
+        // All or nothing: a node left out would bypass the remaps, and a
+        // device that counts as grabbed is never retried. A key pressed
+        // while the virtual device was built reached the compositor as down:
+        // its release must too.
+        let held = held_key(grabbed.iter().map(|(_, d)| d));
+        if err.is_some() || held.is_some() {
+            for (_, dev) in &mut grabbed {
+                let _ = dev.ungrab();
+            }
+            match (err, held) {
+                (Some(e), _) => self.report(idx, e),
+                (None, Some(code)) => self.wait_for_release(idx, code, now),
+                (None, None) => {}
+            }
+            return;
         }
+        for (path, mut dev) in grabbed {
+            let _ = dev.set_nonblocking(true);
+            // Queued since the node was opened, so the compositor saw it.
+            for _ in 0..64 {
+                if !dev.fetch_events().is_ok_and(|evs| evs.count() > 0) {
+                    break;
+                }
+            }
+            slot.nodes.push(dev);
+            slot.paths.push(path);
+        }
+        slot.held_retries = 0;
+        info!(
+            "grabbed {} evdev node(s) of {} for remaps",
+            slot.nodes.len(),
+            slot.id.key()
+        );
         self.update(idx, |d| {
-            d.grabbed = grabbed;
-            d.last_error = err;
+            d.grabbed = true;
+            d.last_error = None;
         });
+    }
+
+    /// A key is down on the device: grab later (see [`Slot::key_held`]).
+    fn wait_for_release(&mut self, idx: usize, code: u16, now: Instant) {
+        if self.slots[idx].key_held(now) {
+            let msg = format!(
+                "Waiting for {} to be released before remapping (it reports held down).",
+                EvdevKey(code).label()
+            );
+            self.report(idx, msg);
+        }
+    }
+
+    /// Set `last_error` unless it already says `msg` (each retry repeats it).
+    fn report(&self, idx: usize, msg: String) {
+        let changed = lock(&self.inner).devices[idx].last_error.as_deref() != Some(msg.as_str());
+        if changed {
+            self.update(idx, |d| d.last_error = Some(msg));
+        }
     }
 
     /// A virtual device that declares every axis of `nodes` (uinput drops
@@ -689,10 +839,11 @@ impl Worker {
                 // The old device is gone: so is every grab forwarding into it.
                 for i in 0..self.slots.len() {
                     self.drop_nodes(i);
+                    self.slots[i].retry = Instant::now() + OPEN_RETRY;
                 }
                 self.update(idx, |d| {
                     d.last_error = Some(format!(
-                        "Cannot create virtual device ({e}). Need write access to /dev/uinput (group input)."
+                        "Cannot create virtual device ({e}). Need write access to /dev/uinput: install the hako udev rules (udev/70-hako.rules gives the logged-in user access)."
                     ))
                 });
                 false
@@ -791,7 +942,7 @@ impl Worker {
                             };
                             match bind {
                                 Some(b) => self.mapper.key(idx, b, ev.value(), now),
-                                None => self.mapper.forward(ev),
+                                None => self.mapper.forward(idx, ev),
                             }
                         }
                     }
@@ -844,7 +995,9 @@ impl Worker {
         let idx = sess.idx;
         let kind = self.slots[idx].kind;
         let key = EvdevKey(code);
-        let inner = self.inner.clone();
+        let (inner, edits) = (self.inner.clone(), self.edits.clone());
+        // A captured target is saved here; no input is grabbed meanwhile.
+        let _edits = lock_edits(&edits);
         let mut guard = lock(&inner);
         let g = &mut *guard;
         let d = &mut g.devices[idx];
@@ -864,17 +1017,7 @@ impl Worker {
             false
         } else {
             match role {
-                CaptureRole::Record => {
-                    if d.recorded.len() < MAX_MACRO_STEPS {
-                        let delay_ms = sess.rec.delay(at);
-                        d.recorded.push(MacroStep {
-                            key,
-                            down,
-                            delay_ms,
-                        });
-                    }
-                    true
-                }
+                CaptureRole::Record => record_step(d, &mut sess.rec, at, key, down),
                 CaptureRole::Source => {
                     if down && own && source_allowed(kind, code) {
                         d.capturing = Some(CaptureRole::Target);
@@ -958,6 +1101,7 @@ impl Worker {
             for idx in 0..self.slots.len() {
                 if !self.slots[idx].nodes.is_empty() {
                     self.drop_nodes(idx);
+                    self.slots[idx].retry = Instant::now() + OPEN_RETRY;
                     self.update(idx, |d| d.last_error = Some(format!("uinput: {e}")));
                 }
             }
@@ -978,6 +1122,24 @@ fn source_allowed(kind: DeviceKind, code: u16) -> bool {
 
 /// `/dev/input/event*` nodes of `vendor` + one of `pids` this user cannot read.
 fn unreadable_nodes(vendor: u16, pids: &[u16]) -> Vec<PathBuf> {
+    event_nodes(vendor, pids)
+        .into_iter()
+        .filter(|dev| !readable(dev))
+        .collect()
+}
+
+/// What to tell the user about `blocked` input nodes (none: `None`).
+fn unreadable_message(blocked: &[PathBuf]) -> Option<String> {
+    let first = blocked.first()?;
+    Some(format!(
+        "Cannot read {} ({} input node(s)): add your user to the `input` group, or install the hako udev rules if this device is listed.",
+        first.display(),
+        blocked.len()
+    ))
+}
+
+/// `/dev/input/event*` nodes of `vendor` + one of `pids` (sysfs).
+fn event_nodes(vendor: u16, pids: &[u16]) -> Vec<PathBuf> {
     let Ok(dir) = std::fs::read_dir("/sys/class/input") else {
         return Vec::new();
     };
@@ -993,7 +1155,6 @@ fn unreadable_nodes(vendor: u16, pids: &[u16]) -> Vec<PathBuf> {
                 && id(&e.path(), "product").is_some_and(|p| pids.contains(&p))
         })
         .map(|e| Path::new("/dev/input").join(e.file_name()))
-        .filter(|dev| !readable(dev))
         .collect()
 }
 
@@ -1005,7 +1166,27 @@ fn readable(path: &Path) -> bool {
         .is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::R_OK) } == 0)
 }
 
+/// A key or button `nodes` report held down.
+fn held_key<'a>(nodes: impl IntoIterator<Item = &'a Device>) -> Option<u16> {
+    nodes
+        .into_iter()
+        .find_map(|d| d.get_key_state().ok()?.iter().next().map(|k| k.code()))
+}
+
+/// One of `slot`'s nodes that may be grabbed.
 fn node_matches(slot: &Slot, dev: &Device) -> bool {
+    own_node(slot, dev) && forwards_all(dev)
+}
+
+/// A node with a key the virtual device cannot repeat (touchpad, joystick,
+/// gamepad) is never grabbed: those events would be lost.
+fn forwards_all(dev: &Device) -> bool {
+    dev.supported_keys()
+        .is_some_and(|keys| keys.iter().all(|k| forwardable(k.code())))
+}
+
+/// A node of `slot`'s device that carries its buttons / keys.
+fn own_node(slot: &Slot, dev: &Device) -> bool {
     if dev.name() == Some(VIRTUAL_NAME) {
         return false;
     }
@@ -1013,11 +1194,7 @@ fn node_matches(slot: &Slot, dev: &Device) -> bool {
         return false;
     };
     let iid = dev.input_id();
-    // A node with a key the virtual device cannot repeat (touchpad, joystick,
-    // gamepad) is never grabbed: those events would be lost.
-    let same = iid.vendor() == slot.id.vendor_id
-        && slot.pids.contains(&iid.product())
-        && keys.iter().all(|k| forwardable(k.code()));
+    let same = iid.vendor() == slot.id.vendor_id && slot.pids.contains(&iid.product());
     match slot.kind {
         DeviceKind::Mouse => {
             same && (keys.contains(KeyCode::BTN_LEFT) || keys.contains(KeyCode::BTN_SIDE))
@@ -1166,12 +1343,14 @@ struct Mapper {
     /// Keys the virtual device holds, with how many owners (a physical key,
     /// a tap, a runner) hold each.
     held: BTreeMap<u16, u32>,
+    /// Unbound physical keys forwarded down: (slot index, code) -> presses.
+    forwarded: BTreeMap<(usize, u16), u32>,
     out: Vec<InputEvent>,
 }
 
 /// Count one owner's key edge; true when the virtual device must see it
 /// (first press, last release, autorepeat).
-fn hold(held: &mut BTreeMap<u16, u32>, code: u16, value: i32) -> bool {
+fn hold<K: Ord>(held: &mut BTreeMap<K, u32>, code: K, value: i32) -> bool {
     match value {
         1 => {
             let n = held.entry(code).or_insert(0);
@@ -1199,12 +1378,31 @@ fn push_key(out: &mut Vec<InputEvent>, held: &mut BTreeMap<u16, u32>, code: u16,
 }
 
 impl Mapper {
-    /// Pass an unbound event through unchanged.
-    fn forward(&mut self, ev: InputEvent) {
-        if ev.event_type() == EventType::KEY && !hold(&mut self.held, ev.code(), ev.value()) {
-            return;
+    /// Pass an unbound event of slot `dev` through unchanged.
+    fn forward(&mut self, dev: usize, ev: InputEvent) {
+        if ev.event_type() == EventType::KEY {
+            hold(&mut self.forwarded, (dev, ev.code()), ev.value());
+            if !hold(&mut self.held, ev.code(), ev.value()) {
+                return;
+            }
         }
         self.out.push(ev);
+    }
+
+    /// Release the keys slot `dev` forwarded down that are `bound` now:
+    /// their physical release goes to the binding, which never pressed them.
+    fn release_forwarded(&mut self, dev: usize, bound: impl Fn(u16) -> bool) {
+        let ids: Vec<_> = self
+            .forwarded
+            .keys()
+            .filter(|k| k.0 == dev && bound(k.1))
+            .copied()
+            .collect();
+        for id in ids {
+            for _ in 0..self.forwarded.remove(&id).unwrap_or(0) {
+                push_key(&mut self.out, &mut self.held, id.1, 0);
+            }
+        }
     }
 
     /// A tap source's edge, sent as its target's.
@@ -1286,6 +1484,7 @@ impl Mapper {
     fn release_all(&mut self) {
         self.runners.clear();
         self.taps.clear();
+        self.forwarded.clear();
         for k in std::mem::take(&mut self.held).into_keys() {
             self.out.push(InputEvent::new(EventType::KEY.0, k, 0));
         }
@@ -1356,6 +1555,33 @@ impl Recorder {
         self.last = Some(at);
         delay
     }
+}
+
+/// Add one edge to a record take; false (the take is finished and the limit
+/// reported) once it holds [`MAX_MACRO_STEPS`].
+fn record_step(
+    d: &mut DevState,
+    rec: &mut Recorder,
+    at: SystemTime,
+    key: EvdevKey,
+    down: bool,
+) -> bool {
+    let delay_ms = rec.delay(at);
+    d.recorded.push(MacroStep {
+        key,
+        down,
+        delay_ms,
+    });
+    if d.recorded.len() < MAX_MACRO_STEPS {
+        return true;
+    }
+    d.recorded = finish_recording(std::mem::take(&mut d.recorded), false);
+    d.capturing = None;
+    d.capture_source = None;
+    d.last_error = Some(format!(
+        "Recording stopped: a macro holds at most {MAX_MACRO_STEPS} steps"
+    ));
+    false
 }
 
 /// Clean a raw take: drop releases of keys held before recording began
@@ -1553,7 +1779,7 @@ mod tests {
     fn release_all_frees_every_held_key() {
         let t0 = Instant::now();
         let mut m = Mapper::default();
-        m.forward(InputEvent::new(EventType::KEY.0, A.0, 1));
+        m.forward(0, InputEvent::new(EventType::KEY.0, A.0, 1));
         m.key(0, &RemapBinding::tap(EvdevKey::BTN_SIDE, B), 1, t0);
         let mac = macro_binding(
             vec![step(C, true, 0), step(C, false, 500)],
@@ -1572,7 +1798,7 @@ mod tests {
     fn stop_device_only_touches_its_keys() {
         let t0 = Instant::now();
         let mut m = Mapper::default();
-        m.forward(InputEvent::new(EventType::KEY.0, A.0, 1));
+        m.forward(0, InputEvent::new(EventType::KEY.0, A.0, 1));
         m.key(0, &RemapBinding::tap(EvdevKey::BTN_SIDE, B), 1, t0);
         let mac = macro_binding(
             vec![step(C, true, 0), step(C, false, 500)],
@@ -1588,6 +1814,115 @@ mod tests {
         m.stop_device(0);
         assert_eq!(keys(&mut m), vec![(48, 0)]);
         assert_eq!(m.held.keys().copied().collect::<Vec<_>>(), vec![30]);
+    }
+
+    #[test]
+    fn binding_a_held_key_releases_it() {
+        let t0 = Instant::now();
+        let mut m = Mapper::default();
+        let down = |k: EvdevKey| InputEvent::new(EventType::KEY.0, k.0, 1);
+        m.forward(0, down(A));
+        m.forward(1, down(B));
+        m.take();
+        // SetRemap binds A and B on slot 0: only slot 0's A was forwarded.
+        m.release_forwarded(0, |c| c == A.0 || c == B.0);
+        assert_eq!(keys(&mut m), vec![(30, 0)]);
+        // A's physical release now reaches the binding, which holds nothing.
+        m.key(0, &RemapBinding::tap(A, C), 0, t0);
+        assert!(keys(&mut m).is_empty());
+        assert_eq!(m.held.keys().copied().collect::<Vec<_>>(), vec![48]);
+        assert_eq!(
+            m.forwarded.keys().copied().collect::<Vec<_>>(),
+            vec![(1, 48)]
+        );
+    }
+
+    fn dev_state() -> DevState {
+        DevState {
+            id: DeviceId {
+                vendor_id: 0x046d,
+                product_id: 0x40a8,
+                instance: "x".into(),
+            },
+            name: "Mouse".into(),
+            pids: vec![0x40a8],
+            bindings: HashMap::new(),
+            capturing: None,
+            capture_source: None,
+            last_error: None,
+            grabbed: false,
+            recorded: Vec::new(),
+            invalid: Vec::new(),
+            load_error: None,
+        }
+    }
+
+    #[test]
+    fn a_key_that_stays_down_is_reported_and_retried_slower() {
+        let t0 = Instant::now();
+        let mut slot = Slot {
+            id: dev_state().id,
+            kind: DeviceKind::Keyboard,
+            pids: vec![0x40a8],
+            bindings: HashMap::new(),
+            nodes: Vec::new(),
+            paths: Vec::new(),
+            retry: t0,
+            held_retries: 0,
+        };
+        for _ in 1..HELD_REPORT_AFTER {
+            assert!(!slot.key_held(t0));
+            assert_eq!(slot.retry, t0 + GRAB_RETRY);
+        }
+        assert!(slot.key_held(t0));
+        assert_eq!(slot.retry, t0 + OPEN_RETRY);
+    }
+
+    #[test]
+    fn recording_stops_at_the_step_limit() {
+        let mut d = dev_state();
+        d.capturing = Some(CaptureRole::Record);
+        let mut rec = Recorder::default();
+        let t0 = SystemTime::UNIX_EPOCH;
+        for i in 0..MAX_MACRO_STEPS - 1 {
+            assert!(record_step(&mut d, &mut rec, t0, A, i % 2 == 0));
+        }
+        assert!(!record_step(&mut d, &mut rec, t0, A, false));
+        assert_eq!(d.recorded.len(), MAX_MACRO_STEPS);
+        assert!(d.capturing.is_none());
+        assert!(d.last_error.as_deref().is_some_and(|e| e.contains("256")));
+    }
+
+    #[test]
+    fn unreadable_remap_file_is_reloaded_on_reattach() {
+        let root = std::env::temp_dir().join(format!("hako-remap-reload-{}", std::process::id()));
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        paths.ensure().unwrap();
+        let file = remap_config_path(&paths, 0x046d, 0x40a8);
+        std::fs::write(&file, "version = [").unwrap();
+        let err = load_bindings(&paths, 0x046d, &[0x40a8]).unwrap_err();
+        let mut d = dev_state();
+        d.load_error = Some(err.clone());
+        d.last_error = Some(err);
+        assert!(!retry_load(&paths, &mut d));
+        assert!(d.load_error.is_some() && d.last_error.is_some());
+
+        std::fs::write(
+            &file,
+            "version = 1\n[[bindings]]\nsource = 276\ntarget = 30\nmode = \"tap\"\n",
+        )
+        .unwrap();
+        assert!(retry_load(&paths, &mut d));
+        assert!(d.load_error.is_none() && d.last_error.is_none());
+        assert!(d.bindings.contains_key(&276));
+        persist(&paths, &d, &d.bindings).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1609,7 +1944,7 @@ mod tests {
         assert_eq!(keys(&mut m), vec![(29, 0)]);
 
         // A macro pressing a physically held key does not release it.
-        m.forward(InputEvent::new(EventType::KEY.0, 29, 1));
+        m.forward(0, InputEvent::new(EventType::KEY.0, 29, 1));
         let mac = macro_binding(
             vec![step(ctrl, true, 0), step(ctrl, false, 10)],
             MacroRepeat::Once,
@@ -1618,7 +1953,7 @@ mod tests {
         m.key(1, &mac, 1, t0);
         m.tick(at(t0, 10));
         assert_eq!(keys(&mut m), vec![(29, 1)]);
-        m.forward(InputEvent::new(EventType::KEY.0, 29, 0));
+        m.forward(0, InputEvent::new(EventType::KEY.0, 29, 0));
         assert_eq!(keys(&mut m), vec![(29, 0)]);
         assert!(m.held.is_empty());
     }

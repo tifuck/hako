@@ -37,12 +37,12 @@ mod profile;
 
 use crate::drivers::{DeviceAdapter, DriverCtx, Model, Opened};
 use crate::hid::{enumerate_hidraw, HidDeviceInfo, HidrawDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{BatteryState, DeviceId, DeviceKind, DeviceSnapshot};
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{info, warn};
 
 const ROCCAT: u16 = 0x1e7d;
 const TURTLE_BEACH: u16 = 0x10f5;
@@ -195,14 +195,16 @@ trait Lights: Send {
         bail!("{} is not supported", key.as_str())
     }
     /// Hand lighting back to the firmware when the protocol allows it.
-    fn release(&mut self) {}
+    fn release(&mut self) -> Result<()> {
+        Ok(())
+    }
     /// The battery's label, for devices whose [`Lights::battery`] reads one.
     fn battery_label(&self) -> Option<&'static str> {
         None
     }
     /// Battery percentage; `None` when the device does not answer.
-    fn battery(&mut self) -> Option<u8> {
-        None
+    fn battery(&mut self) -> Result<Option<u8>> {
+        Ok(None)
     }
 }
 
@@ -252,7 +254,12 @@ impl Adapter {
         lights: Box<dyn Lights>,
         ctx: &DriverCtx,
     ) -> Opened {
-        let settings = hako_core::config::load_device_settings(&ctx.paths, spec.vid, spec.pids[0])?;
+        let mut settings =
+            hako_core::config::load_device_settings(&ctx.paths, spec.vid, spec.pids[0])?;
+        let effect = text(&settings, SettingKey::Effect, lights.effects()[0].0);
+        let mut known = lighting_controls(lights.effects(), effect);
+        known.extend(lights.extra_controls());
+        crate::drivers::sanitize_saved(&mut settings, &known);
         let battery = lights.battery_label().map(|label| BatteryState {
             label: label.into(),
             percent: None,
@@ -359,8 +366,17 @@ impl DeviceAdapter for Adapter {
         use SettingKey::*;
         let result = match key {
             Effect | Brightness | ColorR | ColorG | ColorB => {
+                let before = self.settings.clone();
                 merge_setting(&mut self.settings, key, value);
-                self.apply_lighting()
+                self.apply_lighting().map_err(|e| {
+                    // Some of the reports may have gone out: send the old
+                    // look again.
+                    self.settings = before;
+                    match self.apply_lighting() {
+                        Ok(()) => e,
+                        Err(r) => anyhow!("{e:#}; restoring the previous look failed too: {r:#}"),
+                    }
+                })
             }
             _ => {
                 let r = self
@@ -374,14 +390,20 @@ impl DeviceAdapter for Adapter {
                 r
             }
         };
-        self.last_error = result.as_ref().err().map(|e| e.to_string());
-        hako_core::config::save_device_settings(
+        self.last_error = result.as_ref().err().map(|e| format!("{e:#}"));
+        result?;
+        let saved = hako_core::config::save_device_settings(
             &self.paths,
             self.file.0,
             self.file.1,
             &self.settings,
-        )?;
-        result
+        );
+        if let Err(e) = saved {
+            let e = e.context("applied, but not saved");
+            self.last_error = Some(format!("{e:#}"));
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
@@ -396,36 +418,41 @@ impl DeviceAdapter for Adapter {
             return Ok(());
         }
         self.last_poll = Some(Instant::now());
-        b.percent = l.battery();
+        let reading = l.battery();
+        b.percent = reading.as_ref().ok().copied().flatten();
         b.present = b.percent.is_some();
-        Ok(())
+        reading.map(|_| ())
     }
 
     fn shutdown(&mut self) {
         if let Some(mut l) = self.lights.take() {
-            l.release();
+            if let Err(e) = l.release() {
+                warn!("{}: hand lighting back: {e:#}", self.name);
+            }
         }
     }
 }
 
-/// Reads input reports until `stop` matches (returning that report) or
-/// `timeout` passes.
+/// Reads input reports until `stop` matches (returning that report);
+/// `None` when `timeout` passes first.
 fn read_until(
     dev: &mut HidrawDevice,
     timeout: Duration,
     stop: impl Fn(&[u8]) -> bool,
-) -> Option<Vec<u8>> {
+) -> Result<Option<Vec<u8>>> {
     let deadline = Instant::now() + timeout;
     let mut buf = [0u8; 64];
     for _ in 0..32 {
         let left = deadline.saturating_duration_since(Instant::now());
         match dev.read_timeout(&mut buf, left) {
-            Ok(n) if stop(&buf[..n]) => return Some(buf[..n].to_vec()),
+            Ok(n) if stop(&buf[..n]) => return Ok(Some(buf[..n].to_vec())),
             Ok(_) => {}
-            Err(_) => return None,
+            // A timeout is a plain error, a failed read an I/O one.
+            Err(e) if e.downcast_ref::<std::io::Error>().is_some() => return Err(e),
+            Err(_) => return Ok(None),
         }
     }
-    None
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -468,6 +495,86 @@ mod tests {
         let mut b = [0x18, 0x18, 0xff, 0xff, 0, 0];
         checksum(&mut b);
         assert_eq!(b[4..], [0x2e, 0x02]);
+    }
+
+    /// Lights whose next `fail` applies fail; logs every effect applied.
+    struct Flaky {
+        fail: usize,
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Lights for Flaky {
+        fn effects(&self) -> &'static [(&'static str, &'static str)] {
+            ONBOARD_STATIC
+        }
+        fn apply(&mut self, effect: &str, _: [u8; 3]) -> Result<()> {
+            self.log.lock().unwrap().push(effect.into());
+            if self.fail > 0 {
+                self.fail -= 1;
+                bail!("write failed");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_lighting_is_rolled_back_resent_and_not_saved() {
+        let dir = std::env::temp_dir().join(format!("hako-roccat-test-{}", std::process::id()));
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut settings = SettingsMap::new();
+        merge_setting(
+            &mut settings,
+            SettingKey::Effect,
+            SettingValue::Text("onboard".into()),
+        );
+        let mut a = Adapter {
+            id: DeviceId {
+                vendor_id: ROCCAT,
+                product_id: 1,
+                instance: "t".into(),
+            },
+            kind: DeviceKind::Mouse,
+            name: "Test",
+            file: (ROCCAT, 1),
+            lights: Some(Box::new(Flaky {
+                fail: 1,
+                log: log.clone(),
+            })),
+            settings,
+            paths: ConfigPaths {
+                root: dir.clone(),
+                config_toml: dir.join("config.toml"),
+                devices_dir: dir.join("devices"),
+                profiles_dir: dir.join("profiles"),
+                remaps_dir: dir.join("remaps"),
+            },
+            last_error: None,
+            battery: None,
+            last_poll: None,
+        };
+        let stat = SettingValue::Text("static".into());
+        assert!(a.set(SettingKey::Effect, stat.clone()).is_err());
+        assert_eq!(a.effect(), "onboard");
+        assert_eq!(*log.lock().unwrap(), ["static", "onboard"]);
+        assert!(a.last_error.is_some());
+        assert!(!a.paths.devices_dir.exists(), "nothing saved");
+
+        // Restoring fails too: both errors are reported.
+        a.lights = Some(Box::new(Flaky {
+            fail: 2,
+            log: log.clone(),
+        }));
+        let e = a.set(SettingKey::Effect, stat.clone()).unwrap_err();
+        assert!(e.to_string().contains("failed too"), "{e}");
+
+        // Applied, but the file cannot be written: kept, and said so.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("blocker"), "").unwrap();
+        a.paths.devices_dir = dir.join("blocker").join("devices");
+        let e = a.set(SettingKey::Effect, stat).unwrap_err();
+        assert!(e.to_string().contains("applied, but not saved"), "{e}");
+        assert_eq!(a.effect(), "static");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

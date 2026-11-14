@@ -43,7 +43,7 @@ mod protocol;
 
 use crate::drivers::{DeviceAdapter, Model};
 use crate::hid::{find_hidraw, find_usb_device_path, HidrawDevice, UsbDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
@@ -69,6 +69,8 @@ const POLL_RATES: [u32; 7] = [125, 250, 500, 1000, 2000, 4000, 8000];
 
 /// HID feature buffer = report id 0 + 90-byte Razer report.
 const FEATURE_LEN: usize = 91;
+/// Waits before each re-read of a read answered busy.
+const BUSY_REREAD_MS: [u64; 3] = [5, 10, 20];
 
 const HUNTSMAN_V2_TKL: Model = Model {
     vendor_id: VID,
@@ -159,11 +161,19 @@ impl Transport {
     }
 
     /// OpenRazer razer_send_payload: SET request, short wait, GET response,
-    /// then require matching class/cmd and status busy (0x01) or ok (0x02).
+    /// then require matching class/cmd and status busy (0x01) or ok (0x02);
+    /// a read answered busy is read again a few times (`check_response`).
     fn transact(&mut self, report: &[u8; 90]) -> Result<[u8; 90]> {
         self.set_feature(report)?;
         std::thread::sleep(std::time::Duration::from_millis(1));
-        let resp = self.get_feature()?;
+        let mut resp = self.get_feature()?;
+        for ms in BUSY_REREAD_MS {
+            if !protocol::busy_read(report, &resp) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            resp = self.get_feature()?;
+        }
         check_response(report, &resp)?;
         Ok(resp)
     }
@@ -191,6 +201,12 @@ impl RazerKeyboardAdapter {
             instance,
         };
         let mut settings = hako_core::config::load_device_settings(&paths, VID, PID)?;
+        let effect = KbEffectKind::from_str(
+            get_setting(&settings, SettingKey::Effect)
+                .and_then(|v| v.as_str())
+                .unwrap_or("static"),
+        );
+        crate::drivers::sanitize_saved(&mut settings, &controls(effect));
         defaults(&mut settings);
         let mut a = Self {
             id,
@@ -498,17 +514,30 @@ impl DeviceAdapter for RazerKeyboardAdapter {
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
         let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value.clone());
+        let store = if self.saving() { VARSTORE } else { NOSTORE };
         let result = match key {
             SettingKey::ReportRate | SettingKey::GameMode => self.write_misc(key, &value),
             // Turning it on stores the current lighting once; off sends nothing.
             SettingKey::SaveToDevice if !self.saving() => Ok(()),
-            _ if self.saving() => self.apply_all(VARSTORE),
-            _ => self.apply_all(NOSTORE),
+            _ => self.apply_all(store),
         };
-        if let Err(e) = result {
+        if let Err(mut e) = result {
             // Not applied: keep the UI and the file on the old value.
             self.settings = before;
-            self.last_error = Some(e.to_string());
+            // Brightness may already be written (or stored) before the effect
+            // or the read-back failed: send the old lighting back.
+            let lighting = !matches!(
+                key,
+                SettingKey::ReportRate | SettingKey::GameMode | SettingKey::SaveToDevice
+            );
+            if lighting {
+                if let Err(re) = self.apply_all(store) {
+                    e = anyhow!(
+                        "{e:#}; restoring the previous lighting also failed ({re:#}), the keyboard may show part of the change"
+                    );
+                }
+            }
+            self.last_error = Some(format!("{e:#}"));
             return Err(e);
         }
         self.last_error = None;
@@ -668,8 +697,12 @@ mod tests {
         let mut resp = r;
         resp[0] = 0x02;
         assert!(check_response(&r, &resp).is_ok());
-        resp[0] = 0x01; // busy counts as success upstream
-        assert!(check_response(&r, &resp).is_ok());
+        resp[0] = 0x01; // a busy read has no data yet; a busy write is done
+        assert!(check_response(&r, &resp).is_err());
+        let w = make_report(TXN_LED, 0x0f, 0x04, &[VARSTORE, BACKLIGHT_LED, 0xcc]);
+        let mut wresp = w;
+        wresp[0] = 0x01;
+        assert!(check_response(&w, &wresp).is_ok());
         resp[0] = 0x05;
         assert!(check_response(&r, &resp).is_err());
         resp[0] = 0x02;

@@ -326,6 +326,9 @@ pub struct PeerState {
     /// While connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<LinkStats>,
+    /// Why it does not connect, or has no audio nodes while connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -463,6 +466,7 @@ mod tests {
                 connected: true,
                 address: Some("192.168.1.20:47821".into()),
                 link: Some(LinkStats::default()),
+                problem: Some("declined".into()),
             }],
             nearby: vec![],
             requests: vec![PairRequest {

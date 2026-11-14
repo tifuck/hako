@@ -320,6 +320,9 @@ impl HakoAppUi {
                     );
                 });
             }
+            if let Some(problem) = &p.problem {
+                ui.colored_label(pal().warn, problem);
+            }
             widgets::row(
                 ui,
                 "Receive buffer",

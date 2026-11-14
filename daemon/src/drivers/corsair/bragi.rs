@@ -110,10 +110,10 @@ pub fn ping(addr: u8) -> Vec<u8> {
 pub fn write_data(addr: u8, handle: u8, data: &[u8], pkt_len: usize) -> Vec<Vec<u8>> {
     let mut first = vec![addr, WRITE_DATA, handle];
     first.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    let n = data.len().min(pkt_len - first.len());
+    let n = data.len().min(pkt_len.saturating_sub(first.len()));
     first.extend_from_slice(&data[..n]);
     let mut out = vec![first];
-    for chunk in data[n..].chunks(pkt_len - 3) {
+    for chunk in data[n..].chunks(pkt_len.saturating_sub(3).max(1)) {
         let mut f = vec![addr, CONTINUE_WRITE, handle];
         f.extend_from_slice(chunk);
         out.push(f);
@@ -447,6 +447,10 @@ impl Backend for Bragi {
         if self.software == Some(on) {
             return Ok(());
         }
+        // Unknown until the switch completes: one that fails midway (mode
+        // set, handle not open; handle closed, mode not set) is redone in
+        // full next time.
+        self.software = None;
         if on {
             self.link.set(self.addr, PROP_MODE, MODE_SOFTWARE)?;
             if self.leds > 0 {
@@ -715,6 +719,11 @@ mod tests {
             write_data(0x09, 0, &[7, 8], 64),
             vec![vec![0x09, 6, 0, 2, 0, 0, 0, 7, 8]]
         );
+        // A tiny packet size cannot panic (descriptors are checked too).
+        for pkt_len in 0..8 {
+            let f = write_data(0x08, 0, &data, pkt_len);
+            assert_eq!(f.iter().map(|f| f.len() - 3).sum::<usize>(), 4 + 130);
+        }
     }
 
     #[test]

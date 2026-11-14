@@ -29,7 +29,7 @@
 //!   equalizer) are shown as blocked controls with the reason; the research
 //!   is in `docs/onboard-writes/logitech.md`.
 
-use super::hidpp::{self, MouseEffectKind};
+use super::hidpp::{self, answered, note_miss, MouseEffectKind};
 use crate::drivers::DeviceAdapter;
 use crate::hid::HidrawDevice;
 use anyhow::{bail, Context, Result};
@@ -44,6 +44,8 @@ pub const VID: u16 = 0x046d;
 
 const PING_EVERY: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
+/// How often an incomplete probe is retried while the device answers.
+const PROBE_RETRY: Duration = Duration::from_secs(30);
 /// DPI slider when the device's list cannot be read.
 const DPI_FALLBACK: (u16, u16, u16) = (100, 25600, 50);
 
@@ -200,6 +202,7 @@ pub struct HidppAdapter {
     perkey: Option<(u8, u8)>,
     last_ping: Instant,
     last_sync: Instant,
+    last_probe: Instant,
 }
 
 impl HidppAdapter {
@@ -250,6 +253,7 @@ impl HidppAdapter {
             perkey: None,
             last_ping: Instant::now(),
             last_sync: Instant::now(),
+            last_probe: Instant::now(),
         };
         if a.ping() {
             a.link_up();
@@ -305,13 +309,24 @@ impl HidppAdapter {
         self.host_mode = false;
         self.led_claimed = false;
         if !self.probed {
+            self.last_probe = Instant::now();
             match self.probe() {
-                Ok(()) => self.probed = true,
+                Ok(()) => {
+                    self.probed = true;
+                    self.last_error = None;
+                }
                 Err(e) => {
                     warn!("{}: hidpp probe: {e}", self.name);
                     self.last_error = Some(e.to_string());
                 }
             }
+        }
+        if self.probed {
+            // Saved values reach the device below: check them against the
+            // controls the probe found first.
+            let controls = self.controls();
+            crate::drivers::sanitize_saved(&mut self.chosen, &controls);
+            crate::drivers::sanitize_saved(&mut self.settings, &controls);
         }
         self.sync();
         // Host-mode DPI / rate are volatile: put back what the user chose.
@@ -327,12 +342,20 @@ impl HidppAdapter {
             if !supported {
                 continue;
             }
+            let out_of_range = || anyhow::anyhow!("saved value {v} is out of range");
             let written = match key {
-                SettingKey::Dpi => self.set_dpi(v as u16),
-                SettingKey::LiftOffDistance => self.set_lod(v as u8),
-                _ => self.set_rate(v as u32).map(|()| {
-                    merge_setting(&mut self.settings, key, SettingValue::Int(v));
-                }),
+                SettingKey::Dpi => u16::try_from(v)
+                    .map_err(|_| out_of_range())
+                    .and_then(|dpi| self.set_dpi(dpi)),
+                SettingKey::LiftOffDistance => u8::try_from(v)
+                    .map_err(|_| out_of_range())
+                    .and_then(|lod| self.set_lod(lod)),
+                _ => u32::try_from(v)
+                    .map_err(|_| out_of_range())
+                    .and_then(|hz| self.set_rate(hz))
+                    .map(|()| {
+                        merge_setting(&mut self.settings, key, SettingValue::Int(v));
+                    }),
             };
             if let Err(e) = written {
                 warn!("{}: restore {}: {e}", self.name, key.as_str());
@@ -359,7 +382,9 @@ impl HidppAdapter {
         }
     }
 
-    /// FEATURE_SET walk, then the capability reads each feature needs.
+    /// FEATURE_SET walk, then the capability reads each feature needs. What
+    /// was found is kept, but any read that got no answer fails the probe,
+    /// so it is retried.
     fn probe(&mut self) -> Result<()> {
         let r = self.call(0x00, 0x00, &hidpp::FEAT_FEATURE_SET.to_be_bytes())?;
         let fs = r[4];
@@ -369,28 +394,35 @@ impl HidppAdapter {
         // Count excludes ROOT (index 0), so valid indices are 0..=count.
         let count = self.call(fs, 0x00, &[])?[4];
         let mut feat = Features::default();
+        let mut missed = Vec::new();
         for i in 1..=count.min(63) {
             // fn 1 → feature id BE, flags, version.
-            if let Ok(r) = self.call(fs, 0x01, &[i]) {
+            if let Some(r) = answered(self.call(fs, 0x01, &[i]), "feature table", &mut missed) {
                 feat.note(u16::from_be_bytes([r[4], r[5]]), i, r[7]);
             }
         }
         self.feat = feat;
-        self.read_name();
-        self.read_caps();
+        self.read_name(&mut missed);
+        self.read_caps(&mut missed);
+        if !missed.is_empty() {
+            bail!("incomplete probe ({})", missed.join("; "));
+        }
         Ok(())
     }
 
-    fn read_name(&mut self) {
+    fn read_name(&mut self, missed: &mut Vec<String>) {
         let Some(idx) = self.feat.name else { return };
         if !self.fixed_name {
-            if let Ok(r) = self.call(idx, 0x00, &[]) {
+            if let Some(r) = answered(self.call(idx, 0x00, &[]), "name length", missed) {
                 let len = usize::from(r[4]).min(64);
                 let mut raw = Vec::new();
                 while raw.len() < len {
                     match self.call(idx, 0x01, &[raw.len() as u8]) {
                         Ok(r) => raw.extend_from_slice(&r[4..4 + 16.min(len - raw.len())]),
-                        Err(_) => break,
+                        Err(e) => {
+                            note_miss(e, "name", missed);
+                            break;
+                        }
                     }
                 }
                 let name = String::from_utf8_lossy(&raw)
@@ -405,7 +437,7 @@ impl HidppAdapter {
         // Pairing kinds can be coarse (0 = unknown) and an unlisted device's
         // kind is a descriptor guess; the device knows.
         if !self.fixed_name || self.kind == DeviceKind::Other {
-            if let Ok(r) = self.call(idx, 0x02, &[]) {
+            if let Some(r) = answered(self.call(idx, 0x02, &[]), "device type", missed) {
                 let kind = hidpp::kind_from_hidpp20(r[4]);
                 if kind != DeviceKind::Other {
                     self.kind = kind;
@@ -414,12 +446,11 @@ impl HidppAdapter {
         }
     }
 
-    fn read_caps(&mut self) {
+    fn read_caps(&mut self, missed: &mut Vec<String>) {
         if let Some((idx, true)) = self.feat.dpi {
             // fn 1 GetSensorCapabilities(sensor 0) → flags at [6], bit 1 = LOD.
-            self.lod_settable = self
-                .call(idx, 0x01, &[0x00])
-                .is_ok_and(|r| hidpp::ext_dpi_has_lod(r[6]));
+            self.lod_settable = answered(self.call(idx, 0x01, &[0x00]), "sensor", missed)
+                .is_some_and(|r| hidpp::ext_dpi_has_lod(r[6]));
         }
         if let Some((idx, ext)) = self.feat.dpi {
             self.dpis = if ext {
@@ -428,7 +459,11 @@ impl HidppAdapter {
                 for page in 0..4u8 {
                     match self.call(idx, 0x02, &[0x00, 0x00, page]) {
                         Ok(r) => bytes.extend_from_slice(&r[7..20]),
-                        Err(_) => break,
+                        // A refused page is past the end of the list.
+                        Err(e) => {
+                            note_miss(e, "DPI list", missed);
+                            break;
+                        }
                     }
                     if bytes.as_chunks::<2>().0.contains(&[0, 0]) {
                         break;
@@ -437,25 +472,26 @@ impl HidppAdapter {
                 hidpp::parse_dpi_list(&bytes)
             } else {
                 // fn 1 GetSensorDpiList(sensor 0) → sensor echo + list.
-                self.call(idx, 0x01, &[0x00])
+                answered(self.call(idx, 0x01, &[0x00]), "DPI list", missed)
                     .map(|r| hidpp::parse_dpi_list(&r[5..20]))
                     .unwrap_or_default()
             };
         }
         if let Some((idx, ext)) = self.feat.rate {
             self.rates = if ext {
-                self.call(idx, 0x01, &[])
+                answered(self.call(idx, 0x01, &[]), "report rates", missed)
                     .map(|r| hidpp::ext_rr_supported(u16::from_be_bytes([r[4], r[5]])))
                     .unwrap_or_default()
             } else {
-                self.call(idx, 0x00, &[])
+                answered(self.call(idx, 0x00, &[]), "report rates", missed)
                     .map(|r| hidpp::rr_supported(r[4]))
                     .unwrap_or_default()
             };
         }
         if let Some((idx, fid)) = self.feat.led {
-            self.zones = self.read_zones(idx, fid).unwrap_or_else(|e| {
+            self.zones = self.read_zones(idx, fid, missed).unwrap_or_else(|e| {
                 warn!("{}: LED zones: {e}", self.name);
+                note_miss(e, "LED zones", missed);
                 Vec::new()
             });
         }
@@ -465,14 +501,17 @@ impl HidppAdapter {
             for page in 0..3u8 {
                 match self.call(idx, 0x00, &[0x00, page]) {
                     Ok(r) => bitmap.extend_from_slice(&r[6..20]),
-                    Err(_) => break,
+                    Err(e) => {
+                        note_miss(e, "key map", missed);
+                        break;
+                    }
                 }
             }
             self.perkey = hidpp::perkey_range(&bitmap);
         }
         if let Some(idx) = self.feat.brightness {
             // fn 0 GetInfo: max BE u16, steps, caps, min BE u16.
-            if let Ok(r) = self.call(idx, 0x00, &[]) {
+            if let Some(r) = answered(self.call(idx, 0x00, &[]), "brightness range", missed) {
                 let max = u16::from_be_bytes([r[4], r[5]]);
                 let min = u16::from_be_bytes([r[8], r[9]]);
                 self.brightness = (max > min).then_some((min, max));
@@ -494,7 +533,7 @@ impl HidppAdapter {
     }
 
     /// Zones (0x8070 fn 1/2) or clusters (0x8071 fn 0) and their effect slots.
-    fn read_zones(&mut self, idx: u8, fid: u16) -> Result<Vec<LedZone>> {
+    fn read_zones(&mut self, idx: u8, fid: u16, missed: &mut Vec<String>) -> Result<Vec<LedZone>> {
         let rgb = fid == hidpp::FEAT_RGB;
         let count = if rgb {
             self.call(idx, 0x00, &[0xff, 0xff, 0x00])?[6]
@@ -515,7 +554,7 @@ impl HidppAdapter {
                 } else {
                     self.call(idx, 0x02, &[z, slot])
                 };
-                if let Ok(r) = info {
+                if let Some(r) = answered(info, "LED effect", missed) {
                     slots.insert(u16::from_be_bytes([r[6], r[7]]), slot);
                 }
             }
@@ -949,8 +988,25 @@ impl DeviceAdapter for HidppAdapter {
         };
         if let Err(e) = result {
             // The device kept its old value; so do the UI and the file.
+            let lighting = matches!(
+                key,
+                SettingKey::Effect
+                    | SettingKey::Speed
+                    | SettingKey::ColorR
+                    | SettingKey::ColorG
+                    | SettingKey::ColorB
+            );
+            // Several writes (zones, per-key): some may have landed.
+            let several = self.zones.len() > 1 || self.perkey.is_some();
+            let lit = get_setting(&before, SettingKey::Effect).is_some();
             self.settings = before;
             self.last_error = Some(e.to_string());
+            if lighting && several && lit {
+                // Zones written before the failure get the old lighting back.
+                if let Err(e) = self.apply_lighting() {
+                    warn!("{}: lighting rollback: {e}", self.name);
+                }
+            }
             return Err(e);
         }
         self.last_error = None;
@@ -964,6 +1020,7 @@ impl DeviceAdapter for HidppAdapter {
             }
         }
         self.persist()
+            .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
@@ -979,6 +1036,11 @@ impl DeviceAdapter for HidppAdapter {
                 info!("{} link up; initialising", self.name);
                 self.link_up();
             }
+            return Ok(());
+        }
+        if !self.probed && self.last_probe.elapsed() >= PROBE_RETRY {
+            info!("{}: retrying the incomplete probe", self.name);
+            self.link_up();
             return Ok(());
         }
         if self.last_sync.elapsed() >= SYNC_EVERY {

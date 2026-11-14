@@ -43,6 +43,11 @@ use via::{Channel, Reply, Value};
 const RAW_HID_USAGE: u32 = 0xff60_0061;
 const REPLY_TIMEOUT: Duration = Duration::from_millis(300);
 const BATTERY_POLL: Duration = Duration::from_secs(30);
+/// A detection that failed runs again after 2 s, doubling up to a minute.
+const RETRY_MIN: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(60);
+/// Unanswered version probes before the board counts as raw HID without VIA.
+const SILENT_TRIES: u32 = 3;
 
 /// Claims a VID:PID whose nodes expose the QMK raw HID interface.
 pub fn fallback(nodes: &[&HidDeviceInfo]) -> Option<Fallback> {
@@ -133,6 +138,8 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         hid_dirs: nodes.iter().map(|n| n.sys.clone()).collect(),
         battery: None,
         last_poll: Instant::now(),
+        detect_at: None,
+        detect_tries: 0,
     };
     kb.battery = kb.read_battery();
     kb.connect();
@@ -155,6 +162,19 @@ impl Link for HidrawDevice {
     }
 }
 
+/// No reply in time (unlike an I/O error, the keyboard may just be busy, or
+/// have no VIA).
+#[derive(Debug)]
+struct NoReply(u8);
+
+impl std::fmt::Display for NoReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "no VIA reply to command {:#04x}", self.0)
+    }
+}
+
+impl std::error::Error for NoReply {}
+
 /// Send one VIA command and wait for its echo. `None` = unhandled.
 fn call(link: &mut dyn Link, cmd: &[u8], header_len: usize) -> Result<Option<Vec<u8>>> {
     let mut buf = [0u8; 64];
@@ -169,9 +189,16 @@ fn call(link: &mut dyn Link, cmd: &[u8], header_len: usize) -> Result<Option<Vec
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            bail!("no VIA reply to command {:#04x}", cmd[0]);
+            return Err(NoReply(cmd[0]).into());
         }
-        let n = link.recv(&mut buf, left)?;
+        let n = match link.recv(&mut buf, left) {
+            Ok(n) => n,
+            // `read_timeout` fails with an I/O error, or a plain one on timeout.
+            Err(e) if e.downcast_ref::<std::io::Error>().is_none() => {
+                return Err(NoReply(cmd[0]).into())
+            }
+            Err(e) => return Err(e),
+        };
         match via::parse_reply(cmd, header_len, &buf[..n]) {
             Reply::Data(d) => return Ok(Some(d.to_vec())),
             Reply::Unhandled => return Ok(None),
@@ -238,6 +265,9 @@ pub struct QmkKeyboard {
     hid_dirs: Vec<PathBuf>,
     battery: Option<BatteryState>,
     last_poll: Instant,
+    /// When `detect` runs again; `None` once it succeeded or gave up.
+    detect_at: Option<Instant>,
+    detect_tries: u32,
 }
 
 impl QmkKeyboard {
@@ -258,10 +288,37 @@ impl QmkKeyboard {
         }
     }
 
+    /// Run `detect`; a failure is shown and retried from `tick`.
     fn connect(&mut self) {
-        if let Err(e) = self.detect() {
-            self.last_error = Some(e.to_string());
+        let result = self.detect();
+        self.detect_tries = self.detect_tries.saturating_add(1);
+        match result {
+            Ok(()) => {
+                self.detect_at = None;
+                self.last_error = None;
+            }
+            // QMK's default `raw_hid_receive` ignores every report, so raw HID
+            // without VIA never answers: remaps only, once a few probes (in
+            // case the keyboard was busy) went unanswered.
+            Err(e) if self.protocol.is_none() && e.is::<NoReply>() => {
+                if self.detect_tries >= SILENT_TRIES {
+                    info!("{}: raw HID without VIA; remaps only", self.name);
+                    self.detect_at = None;
+                } else {
+                    self.retry_later();
+                }
+            }
+            Err(e) => {
+                self.last_error = Some(format!("{e:#}"));
+                self.retry_later();
+            }
         }
+    }
+
+    fn retry_later(&mut self) {
+        let doublings = self.detect_tries.saturating_sub(1).min(5);
+        let wait = (RETRY_MIN * (1 << doublings)).min(RETRY_MAX);
+        self.detect_at = Some(Instant::now() + wait);
     }
 
     /// Protocol version, lighting channel, current state, then the user's values.
@@ -386,6 +443,24 @@ impl QmkKeyboard {
         // `controls` lists effect first, so it is enabled before the rest.
         for key in pending {
             self.write(ch, key)?;
+            if key == SettingKey::Effect {
+                self.read_effect(ch)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The firmware clamps the effect to the ones it was built with; show
+    /// what it runs. Legacy firmware reports the mode even when off.
+    fn read_effect(&mut self, ch: Channel) -> Result<()> {
+        if ch != Channel::Legacy {
+            let actual = self.get(ch, Value::Effect)?;
+            let actual = i64::from(actual.first().copied().unwrap_or(0));
+            merge_setting(
+                &mut self.settings,
+                SettingKey::Effect,
+                SettingValue::Int(actual),
+            );
         }
         Ok(())
     }
@@ -404,15 +479,7 @@ impl QmkKeyboard {
             }
             SettingKey::Effect => {
                 let v = int(s, key).unwrap_or(1).clamp(0, 255) as u8;
-                self.put(ch, Value::Effect, &[v])?;
-                // The firmware clamps to the effects it was built with; show
-                // what it runs. Legacy firmware reports the mode even when off.
-                if ch != Channel::Legacy {
-                    let actual = self.get(ch, Value::Effect)?;
-                    let actual = i64::from(actual.first().copied().unwrap_or(0));
-                    merge_setting(&mut self.settings, key, SettingValue::Int(actual));
-                }
-                Ok(())
+                self.put(ch, Value::Effect, &[v])
             }
             SettingKey::ColorR | SettingKey::ColorG | SettingKey::ColorB => {
                 let hs = via::rgb_to_hs(rgb(s));
@@ -480,12 +547,18 @@ impl DeviceAdapter for QmkKeyboard {
                 self.id.vendor_id,
                 self.id.product_id,
                 &self.chosen,
-            );
+            )
+            .context("applied, but not saved");
         }
-        let ch = self.channel.with_context(|| match self.protocol {
-            Some(v) => format!("{} has no VIA lighting (protocol {v:#06x})", self.name),
-            None => format!("{} does not speak VIA", self.name),
-        })?;
+        let ch = self
+            .channel
+            .with_context(|| match (self.protocol, self.detect_at) {
+                (_, Some(_)) => format!("{} has not answered VIA yet; retrying", self.name),
+                (Some(v), None) => {
+                    format!("{} has no VIA lighting (protocol {v:#06x})", self.name)
+                }
+                (None, None) => format!("{} does not speak VIA", self.name),
+            })?;
         let previous = self.settings.clone();
         merge_setting(&mut self.settings, key, value.clone());
         if let Err(e) = self.write(ch, key) {
@@ -493,7 +566,6 @@ impl DeviceAdapter for QmkKeyboard {
             self.last_error = Some(e.to_string());
             return Err(e);
         }
-        self.last_error = None;
         merge_setting(&mut self.chosen, key, value);
         if COLOR_KEYS.contains(&key) {
             // The firmware holds one hue/sat; keep the trio together.
@@ -503,20 +575,33 @@ impl DeviceAdapter for QmkKeyboard {
                 }
             }
         }
-        hako_core::config::save_device_settings(
+        // The keyboard runs the new value from here on, whatever fails next.
+        let mut problems = Vec::new();
+        if key == SettingKey::Effect {
+            if let Err(e) = self.read_effect(ch) {
+                problems.push(format!("applied, but not read back: {e:#}"));
+            }
+        }
+        if let Err(e) = hako_core::config::save_device_settings(
             &self.paths,
             self.id.vendor_id,
             self.id.product_id,
             &self.chosen,
-        )?;
+        ) {
+            problems.push(format!("applied, but not saved: {e:#}"));
+        }
         if self.saving() {
             if let Err(e) = self.save(ch) {
-                let e = e.context("applied, but not saved to the keyboard's memory");
-                self.last_error = Some(format!("{e:#}"));
-                return Err(e);
+                problems.push(format!(
+                    "applied, but not saved to the keyboard's memory: {e:#}"
+                ));
             }
         }
-        Ok(())
+        self.last_error = (!problems.is_empty()).then(|| problems.join("; "));
+        match &self.last_error {
+            Some(e) => bail!("{e}"),
+            None => Ok(()),
+        }
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
@@ -527,6 +612,9 @@ impl DeviceAdapter for QmkKeyboard {
         if self.last_poll.elapsed() >= BATTERY_POLL {
             self.last_poll = Instant::now();
             self.battery = self.read_battery();
+        }
+        if self.detect_at.is_some_and(|t| Instant::now() >= t) {
+            self.connect();
         }
         Ok(())
     }
@@ -624,6 +712,8 @@ mod tests {
         effect_max: u8,
         /// Answers `id_custom_save` (a keyboard override may not).
         saves: bool,
+        /// Commands (by index in `sent`) whose reply is lost.
+        dropped: Vec<usize>,
         sent: Arc<Mutex<Vec<Vec<u8>>>>,
         replies: VecDeque<[u8; 32]>,
     }
@@ -655,6 +745,7 @@ mod tests {
                 values,
                 effect_max: 40,
                 saves: true,
+                dropped: vec![],
                 sent: sent.clone(),
                 replies: VecDeque::new(),
             };
@@ -668,7 +759,11 @@ mod tests {
             assert_eq!(report[0], 0, "report id");
             let mut b = [0u8; 32];
             b.copy_from_slice(&report[1..]);
-            self.sent.lock().unwrap().push(b.to_vec());
+            let n = {
+                let mut sent = self.sent.lock().unwrap();
+                sent.push(b.to_vec());
+                sent.len() - 1
+            };
             match (b[0], &self.channels) {
                 (0x01, _) => match self.version {
                     Some(v) => b[1..3].copy_from_slice(&v.to_be_bytes()),
@@ -698,7 +793,9 @@ mod tests {
                 (0x09, None) if self.saves => {}
                 _ => b[0] = 0xff,
             }
-            self.replies.push_back(b);
+            if !self.dropped.contains(&n) {
+                self.replies.push_back(b);
+            }
             Ok(())
         }
 
@@ -737,6 +834,8 @@ mod tests {
             hid_dirs: vec![],
             battery: None,
             last_poll: Instant::now(),
+            detect_at: None,
+            detect_tries: 0,
         }
     }
 
@@ -1057,6 +1156,100 @@ mod tests {
             Some(0),
             "device's own value"
         );
+    }
+
+    #[test]
+    fn silent_raw_hid_is_no_via_after_a_few_tries() {
+        let (mut fake, sent) = Fake::new(Some(0x000c), Some(vec![3]));
+        fake.dropped = (0..10).collect();
+        let mut kb = keyboard(fake, SettingsMap::new());
+        kb.connect();
+        for _ in 0..10 {
+            assert_eq!(kb.last_error, None, "no reply is not an error");
+            if kb.detect_at.is_none() {
+                break;
+            }
+            kb.detect_at = Some(Instant::now());
+            kb.tick().unwrap();
+        }
+        assert_eq!(kb.detect_at, None);
+        assert_eq!(sent.lock().unwrap().len(), SILENT_TRIES as usize);
+        assert!(kb.snapshot().controls.is_empty());
+        let e = kb.set(SettingKey::Brightness, SettingValue::Int(5));
+        assert!(e.unwrap_err().to_string().contains("does not speak VIA"));
+    }
+
+    #[test]
+    fn a_lost_reply_during_detection_is_retried() {
+        let mut chosen = SettingsMap::new();
+        merge_setting(&mut chosen, SettingKey::Brightness, SettingValue::Int(50));
+        let (mut fake, sent) = Fake::new(Some(0x000c), Some(vec![3]));
+        // Version, channel probe, then the state read's brightness: lost.
+        fake.dropped = vec![2];
+        let mut kb = keyboard(fake, chosen);
+        kb.connect();
+        assert!(kb.last_error.as_deref().unwrap().contains("no VIA reply"));
+        let at = kb.detect_at.expect("retry scheduled");
+        assert!(at > Instant::now());
+        // Not due yet: nothing sent.
+        let n = sent.lock().unwrap().len();
+        kb.tick().unwrap();
+        assert_eq!(sent.lock().unwrap().len(), n);
+        kb.detect_at = Some(Instant::now());
+        kb.tick().unwrap();
+        assert_eq!((kb.last_error.clone(), kb.detect_at), (None, None));
+        assert!(sent.lock().unwrap()[n..]
+            .iter()
+            .any(|c| c[..4] == [0x07, 0x03, 0x01, 128]));
+        assert_eq!(int(&kb.settings, SettingKey::Brightness), Some(50));
+    }
+
+    #[test]
+    fn effect_written_but_not_read_back_is_kept() {
+        let (fake, sent) = Fake::new(Some(0x000c), Some(vec![3]));
+        let mut kb = keyboard(fake, SettingsMap::new());
+        kb.connect();
+        assert_eq!(int(&kb.settings, SettingKey::Effect), Some(4));
+        let n = sent.lock().unwrap().len();
+        // The put (n) is answered, its read-back (n + 1) is not.
+        let mut fake = Fake::new(Some(0x000c), Some(vec![3])).0;
+        fake.dropped = vec![n + 1];
+        fake.sent = sent.clone();
+        kb.link = Some(Box::new(fake));
+        let e = kb
+            .set(SettingKey::Effect, SettingValue::Int(7))
+            .unwrap_err();
+        assert!(e.to_string().contains("not read back"), "{e}");
+        assert_eq!(int(&kb.settings, SettingKey::Effect), Some(7));
+        assert_eq!(int(&kb.chosen, SettingKey::Effect), Some(7));
+        assert!(kb.last_error.is_some());
+        let _ = std::fs::remove_dir_all(&kb.paths.root);
+    }
+
+    #[test]
+    fn unsaved_file_still_saves_to_the_keyboard() {
+        let mut chosen = SettingsMap::new();
+        merge_setting(
+            &mut chosen,
+            SettingKey::SaveToDevice,
+            SettingValue::Bool(true),
+        );
+        let (fake, sent) = Fake::new(Some(0x000c), Some(vec![3]));
+        let mut kb = keyboard(fake, chosen);
+        kb.connect();
+        // The settings folder cannot be created: a file is in the way.
+        std::fs::create_dir_all(&kb.paths.root).unwrap();
+        let blocker = kb.paths.root.join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        kb.paths.devices_dir = blocker.join("devices");
+        let e = kb
+            .set(SettingKey::Brightness, SettingValue::Int(10))
+            .unwrap_err();
+        assert!(e.to_string().contains("applied, but not saved"), "{e}");
+        assert_eq!(int(&kb.settings, SettingKey::Brightness), Some(10));
+        assert_eq!(int(&kb.chosen, SettingKey::Brightness), Some(10));
+        assert_eq!(saves(&sent), [vec![0x09, 0x03, 0x00]]);
+        let _ = std::fs::remove_dir_all(&kb.paths.root);
     }
 
     #[test]

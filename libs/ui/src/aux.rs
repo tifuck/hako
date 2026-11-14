@@ -65,7 +65,9 @@ pub fn chain_editor(ui: &mut Ui, chain: &mut AuxEffectChain) -> bool {
         ui.add_space(theme::SPACE_XS);
     }
 
-    if let Some((from, to)) = moved {
+    // A drag's index is from its start; the chain may have been replaced since.
+    let n = chain.effects.len();
+    if let Some((from, to)) = moved.filter(|&(from, to)| from < n && to < n) {
         let fx = chain.effects.remove(from);
         chain.effects.insert(to, fx);
         commit = true;

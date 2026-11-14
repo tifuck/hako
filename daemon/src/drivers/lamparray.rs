@@ -142,6 +142,17 @@ impl Report {
         self.fields.iter().filter(|f| f.usage == usage).count()
     }
 
+    /// Bytes (report ID included) a reply needs to carry every `usages` field.
+    fn bytes_for(&self, usages: &[u32]) -> usize {
+        1 + self
+            .fields
+            .iter()
+            .filter(|f| usages.contains(&f.usage))
+            .map(|f| f.bit.saturating_add(f.size).div_ceil(8) as usize)
+            .max()
+            .unwrap_or(0)
+    }
+
     fn get(&self, buf: &[u8], usage: u32) -> Option<u32> {
         let f = self.fields.iter().find(|f| f.usage == usage)?;
         Some((0..f.size.min(32)).fold(0, |v, i| {
@@ -321,8 +332,13 @@ fn protocol(desc: &[u8]) -> Option<Protocol> {
     let feature = |r: Option<Report>, usages: &[u32]| r.filter(|r| !r.output && r.has(usages));
     // Intensity is optional: Razer's firmware declares neither its level
     // count nor its update channel.
-    let range = [&[LAMP_ID_START, LAMP_ID_END][..], &CHANNELS[..3]].concat();
-    let multi = [&[LAMP_COUNT, LAMP_ID][..], &CHANNELS[..3]].concat();
+    // Without LampUpdateFlags no update would ever complete.
+    let range = [
+        &[UPDATE_FLAGS, LAMP_ID_START, LAMP_ID_END][..],
+        &CHANNELS[..3],
+    ]
+    .concat();
+    let multi = [&[UPDATE_FLAGS, LAMP_COUNT, LAMP_ID][..], &CHANNELS[..3]].concat();
     let response = [&[LAMP_ID, IS_PROGRAMMABLE][..], &LEVELS[..3]].concat();
     Some(Protocol {
         attributes: feature(l.attributes, &[LAMP_COUNT])?,
@@ -355,17 +371,19 @@ fn parse_lamp(response: &Report, buf: &[u8]) -> Lamp {
 /// `lamp`. 0..=255 maps onto 0..=levels; a channel may not exceed its count.
 fn lamp_rgbi(lamp: &Lamp, color: [u8; 3], pct: i64) -> [u32; 4] {
     let pct = pct.clamp(0, 100) as u32;
-    let scale = |v: u32, levels: u32| (v * levels + 127) / 255;
+    // u64: level counts come from the device and may be up to u32::MAX.
+    // Every result is at most the level count, so it fits a u32 again.
+    let scale = |v: u32, levels: u32| ((u64::from(v) * u64::from(levels) + 127) / 255) as u32;
     let [r, g, b, i] = lamp.levels;
     if !lamp.programmable {
         // Fixed colour: RGB are ignored; intensity follows the brightest
         // channel, rounded up so any visible colour lights the lamp.
-        let level = u32::from(color.into_iter().max().unwrap_or(0)) * pct / 100;
-        return [0, 0, 0, (level * i).div_ceil(255)];
+        let level = u64::from(color.into_iter().max().unwrap_or(0)) * u64::from(pct) / 100;
+        return [0, 0, 0, (level * u64::from(i)).div_ceil(255) as u32];
     }
     let c = color.map(u32::from);
     if i > 1 {
-        let intensity = (pct * i + 50) / 100;
+        let intensity = ((u64::from(pct) * u64::from(i) + 50) / 100) as u32;
         [scale(c[0], r), scale(c[1], g), scale(c[2], b), intensity]
     } else {
         let c = c.map(|v| v * pct / 100);
@@ -449,7 +467,14 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         .with_context(|| format!("{vid:04x}:{pid:04x} has no usable LampArray interface"))?;
     let dev = HidrawDevice::open(&node.path)?;
     let mut attrs = proto.attributes.buf();
-    dev.get_feature(&mut attrs)?;
+    let got = dev.get_feature_len(&mut attrs)?;
+    let need = proto
+        .attributes
+        .bytes_for(&[LAMP_COUNT, MIN_UPDATE_INTERVAL]);
+    ensure!(
+        got >= need,
+        "short LampArray attributes reply ({got} of {need} bytes)"
+    );
     let count = proto.attributes.get(&attrs, LAMP_COUNT).unwrap_or(0);
     ensure!(
         (1..=MAX_LAMPS).contains(&count),
@@ -461,13 +486,17 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         .map_or(Duration::ZERO, |us| {
             Duration::from_micros(us.into()).min(MAX_INTERVAL)
         });
+    let need = proto
+        .response
+        .bytes_for(&[&[LAMP_ID, IS_PROGRAMMABLE][..], &LEVELS[..]].concat());
     let lamps = (0..count)
         .map(|id| {
             let mut req = proto.request.buf();
             proto.request.put(&mut req, LAMP_ID, 0, id);
             dev.set_feature(&mut req)?;
             let mut resp = proto.response.buf();
-            dev.get_feature(&mut resp)?;
+            let n = dev.get_feature_len(&mut resp)?;
+            ensure!(n >= need, "short reply for lamp {id} ({n} of {need} bytes)");
             let got = proto.response.get(&resp, LAMP_ID);
             ensure!(got == Some(id), "asked for lamp {id}, got {got:?}");
             Ok(parse_lamp(&proto.response, &resp))
@@ -634,13 +663,14 @@ impl DeviceAdapter for LampArrayAdapter {
         merge_setting(&mut self.settings, key, value);
         let result = self.apply();
         self.last_error = result.as_ref().err().map(|e| e.to_string());
+        result?;
         hako_core::config::save_device_settings(
             &self.paths,
             self.id.vendor_id,
             self.id.product_id,
             &self.settings,
-        )?;
-        result
+        )
+        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
@@ -890,6 +920,129 @@ mod tests {
             updates(&p.update, &[lamp; 3], [200, 100, 0], 50),
             [vec![0x05, 0x01, 0, 0, 2, 0, 100, 50, 0]]
         );
+    }
+
+    #[test]
+    fn replies_must_carry_the_fields_read() {
+        let p = spec();
+        assert_eq!(
+            p.attributes.bytes_for(&[LAMP_COUNT, MIN_UPDATE_INTERVAL]),
+            1 + 22
+        );
+        assert_eq!(p.attributes.bytes_for(&[LAMP_COUNT]), 1 + 2);
+        let lamp = [&[LAMP_ID, IS_PROGRAMMABLE][..], &LEVELS[..]].concat();
+        assert_eq!(p.response.bytes_for(&lamp), 1 + 27);
+    }
+
+    #[test]
+    fn huge_level_counts_do_not_overflow() {
+        let lamp = |programmable| Lamp {
+            programmable,
+            levels: [u32::MAX; 4],
+        };
+        let max = u32::MAX;
+        assert_eq!(lamp_rgbi(&lamp(true), [255, 0, 0], 100), [max, 0, 0, max]);
+        assert_eq!(lamp_rgbi(&lamp(false), [255, 0, 0], 100), [0, 0, 0, max]);
+        let flat = Lamp {
+            programmable: true,
+            levels: [max, max, max, 1],
+        };
+        assert_eq!(lamp_rgbi(&flat, [255, 255, 255], 100), [max, max, max, 1]);
+    }
+
+    #[test]
+    fn update_reports_need_update_flags() {
+        // Rename LampUpdateFlags (0x55) in the range report: multi updates.
+        let mut desc = SPEC.to_vec();
+        let range = desc
+            .windows(4)
+            .position(|w| w == [0x09, 0x60, 0xa1, 0x02])
+            .unwrap();
+        assert_eq!(desc[range + 4..range + 6], [0x09, 0x55]);
+        desc[range + 5] = 0x56;
+        assert_eq!(protocol(&desc).unwrap().update.id, 4);
+        // Neither update report has them: unusable.
+        let multi = desc
+            .windows(4)
+            .position(|w| w == [0x09, 0x50, 0xa1, 0x02])
+            .unwrap();
+        assert_eq!(desc[multi + 6..multi + 8], [0x09, 0x55]);
+        desc[multi + 7] = 0x56;
+        assert!(protocol(&desc).is_none());
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("hako-lamparray-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn a_failed_write_is_not_saved() {
+        let root = temp_root("save");
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        paths.ensure().unwrap();
+        let mut a = LampArrayAdapter {
+            id: DeviceId {
+                vendor_id: 0x1234,
+                product_id: 0x5678,
+                instance: "x".into(),
+            },
+            kind: DeviceKind::Other,
+            name: "Lamp".into(),
+            dev: None,
+            proto: spec(),
+            lamps: Vec::new(),
+            interval: Duration::ZERO,
+            last_update: None,
+            settings: SettingsMap::new(),
+            paths: paths.clone(),
+            last_error: None,
+            hid_dirs: Vec::new(),
+            battery: None,
+            last_poll: Instant::now(),
+        };
+        let err = a.set(SettingKey::Effect, SettingValue::Text("static".into()));
+        assert_eq!(err.unwrap_err().to_string(), "not connected");
+        assert_eq!(a.last_error.as_deref(), Some("not connected"));
+        assert_eq!(std::fs::read_dir(&paths.devices_dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_generic_probe_result_is_probed_again() {
+        use crate::drivers::fallback_model;
+        use crate::hid::BUS_USB;
+        let root = temp_root("probe");
+        let caps = root.join("hid/input/input0/capabilities");
+        std::fs::create_dir_all(&caps).unwrap();
+        std::fs::write(caps.join("key"), "ffff0000 0 0 0 0").unwrap();
+        std::fs::write(caps.join("rel"), "143").unwrap();
+        std::fs::write(caps.join("abs"), "0").unwrap();
+        let node = HidDeviceInfo {
+            path: root.join("hidraw0"),
+            vendor_id: 0x1d50,
+            product_id: 0x6a6b,
+            interface: Some(0),
+            uniq: String::new(),
+            bus: BUS_USB,
+            name: "Test Mouse".into(),
+            sys: root.join("hid"),
+        };
+        // No report descriptor yet: only the generic probe accepts it.
+        let generic = fallback_model(&[&node]).unwrap();
+        assert!(std::ptr::eq(generic, fallback_model(&[&node]).unwrap()));
+        // Its LampArray interface shows up: the specific model, from then on.
+        std::fs::write(root.join("hid/report_descriptor"), SPEC).unwrap();
+        let lamp = fallback_model(&[&node]).unwrap();
+        assert!(!std::ptr::eq(generic, lamp));
+        std::fs::remove_file(root.join("hid/report_descriptor")).unwrap();
+        assert!(std::ptr::eq(lamp, fallback_model(&[&node]).unwrap()));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

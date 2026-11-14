@@ -21,6 +21,7 @@ use hub::{DaemonHub, DISCOVERY_PERIOD, LOG_LEVELS};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -118,12 +119,23 @@ async fn main() -> Result<()> {
     paths.ensure()?;
     info!("config root {}", paths.root.display());
 
+    // Before anything is built: a stop signal from here on is held until the
+    // select below, which tears down what was built (Hako_* nodes, default sink).
+    let [interrupt, terminate, hangup, quit] = [
+        SignalKind::interrupt(),
+        SignalKind::terminate(),
+        SignalKind::hangup(),
+        SignalKind::quit(),
+    ]
+    .map(signal);
+    let (mut interrupt, mut terminate, mut hangup, mut quit) =
+        (interrupt?, terminate?, hangup?, quit?);
+
     // Bind IPC first so the UI can always connect even if HID discovery is
     // slow/stuck, and so a second daemon exits before touching any device.
     let (listener, _lock) = ipc_server::bind(&socket)?;
 
     let hub = Arc::new(DaemonHub::new(paths));
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     let hub_disc = hub.clone();
     let discovery = tokio::spawn(async move {
@@ -152,8 +164,10 @@ async fn main() -> Result<()> {
     let server = ipc_server::serve(listener, hub.clone());
     tokio::pin!(server);
     let result = tokio::select! {
-        signal = tokio::signal::ctrl_c() => signal.map_err(Into::into),
+        _ = interrupt.recv() => Ok(()),
         _ = terminate.recv() => Ok(()),
+        _ = hangup.recv() => Ok(()),
+        _ = quit.recv() => Ok(()),
         result = &mut server => result,
     };
 
@@ -170,7 +184,7 @@ async fn latency_test_cli(preset: &str, seconds: u32, path: LatencyPath) -> Resu
     let latency = audio_latency_samples(preset)
         .ok_or_else(|| anyhow::anyhow!("unknown latency preset {preset}"))?;
     let stop = Arc::new(AtomicBool::new(false));
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut terminate = signal(SignalKind::terminate())?;
     let flag = stop.clone();
     tokio::spawn(async move {
         tokio::select! {

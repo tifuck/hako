@@ -37,10 +37,24 @@ fn report(key: SettingKey, value: u8) -> Option<[u8; 20]> {
 }
 
 fn wire_value(value: &SettingValue) -> Option<u8> {
-    value
-        .as_int()
-        .map(|v| v as u8)
-        .or_else(|| value.as_bool().map(u8::from))
+    match value.as_int() {
+        Some(v) => u8::try_from(v).ok(),
+        None => value.as_bool().map(u8::from),
+    }
+}
+
+fn controls() -> Vec<SettingMeta> {
+    vec![
+        SettingMeta::slider(
+            SettingKey::MicSideTone,
+            "Sidetone",
+            0.0,
+            SIDETONE_MAX.into(),
+            1.0,
+        ),
+        SettingMeta::toggle(SettingKey::VoicePrompts, "Voice prompts"),
+        SettingMeta::toggle(SettingKey::MicRotateToMute, "Rotate to mute"),
+    ]
 }
 
 pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
@@ -52,7 +66,8 @@ pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
     nodes.sort_by_key(|d| d.interface);
     let info = nodes.first().context("no Zone (report 0x22) interface")?;
     let dev = HidrawDevice::open(&info.path)?;
-    let settings = hako_core::config::load_device_settings(&ctx.paths, VID, pid)?;
+    let mut settings = hako_core::config::load_device_settings(&ctx.paths, VID, pid)?;
+    crate::drivers::sanitize_saved(&mut settings, &controls());
     let name = super::MODELS
         .iter()
         .find(|m| m.product_ids.contains(&pid))
@@ -115,17 +130,7 @@ impl DeviceAdapter for Zone {
             connected: self.dev.is_some(),
             batteries: vec![],
             settings: self.settings.clone(),
-            controls: vec![
-                SettingMeta::slider(
-                    SettingKey::MicSideTone,
-                    "Sidetone",
-                    0.0,
-                    SIDETONE_MAX.into(),
-                    1.0,
-                ),
-                SettingMeta::toggle(SettingKey::VoicePrompts, "Voice prompts"),
-                SettingMeta::toggle(SettingKey::MicRotateToMute, "Rotate to mute"),
-            ],
+            controls: controls(),
             last_error: self.last_error.clone(),
         }
     }
@@ -146,6 +151,7 @@ impl DeviceAdapter for Zone {
             self.id.product_id,
             &self.settings,
         )
+        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn tick(&mut self) -> Result<()> {
@@ -173,5 +179,14 @@ mod tests {
         assert!(report(SettingKey::Dpi, 1).is_none());
         assert_eq!(wire_value(&SettingValue::Bool(true)), Some(1));
         assert_eq!(wire_value(&SettingValue::Int(10)), Some(10));
+        // A saved 266 must not wrap to 10.
+        assert_eq!(wire_value(&SettingValue::Int(266)), None);
+        let mut saved = SettingsMap::new();
+        saved.insert("mic_side_tone".into(), SettingValue::Int(266));
+        crate::drivers::sanitize_saved(&mut saved, &controls());
+        assert_eq!(
+            get_setting(&saved, SettingKey::MicSideTone),
+            Some(&SettingValue::Int(10))
+        );
     }
 }

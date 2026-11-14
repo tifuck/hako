@@ -93,7 +93,7 @@ pub fn sleep(minutes: u32) -> Vec<(u8, u32)> {
     }
     vec![
         (PROP_SLEEP_ENABLED, 1),
-        (PROP_SLEEP_TIMEOUT, minutes * MINUTE_MS),
+        (PROP_SLEEP_TIMEOUT, minutes.saturating_mul(MINUTE_MS)),
     ]
 }
 

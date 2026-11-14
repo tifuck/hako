@@ -289,7 +289,6 @@ fn open_node(pid: u16) -> Result<(HidrawDevice, String)> {
 pub(super) fn open(name: &'static str, pid: u16) -> Opened {
     let (dev, instance) = open_node(pid)?;
     info!("{name} open via {}", dev.path.display());
-    let firmware = firmware(&dev).ok();
     let mut m = Mouse {
         name,
         id: DeviceId {
@@ -298,7 +297,7 @@ pub(super) fn open(name: &'static str, pid: u16) -> Opened {
             instance,
         },
         dev: Some(dev),
-        firmware,
+        firmware: None,
         debounce_ok: false,
         state: SettingsMap::new(),
         last_read: None,
@@ -312,6 +311,7 @@ struct Mouse {
     name: &'static str,
     id: DeviceId,
     dev: Option<HidrawDevice>,
+    /// Read by `refresh` until it succeeds.
     firmware: Option<String>,
     /// The debounce time read back successfully.
     debounce_ok: bool,
@@ -328,6 +328,12 @@ impl Mouse {
         };
         self.state.clear();
         let mut errors = Vec::new();
+        if self.firmware.is_none() {
+            match firmware(dev) {
+                Ok(fw) => self.firmware = Some(fw),
+                Err(e) => errors.push(format!("firmware version: {e}")),
+            }
+        }
         match read_debounce(dev) {
             Ok(ms) => {
                 self.debounce_ok = true;

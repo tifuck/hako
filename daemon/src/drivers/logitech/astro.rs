@@ -242,7 +242,8 @@ pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
     nodes.sort_by_key(|d| d.interface);
     let info = nodes.first().context("no ASTRO (0xFF32) interface")?;
     let dev = HidrawDevice::open(&info.path)?;
-    let chosen = hako_core::config::load_device_settings(&ctx.paths, vid, pid)?;
+    let mut chosen = hako_core::config::load_device_settings(&ctx.paths, vid, pid)?;
+    crate::drivers::sanitize_saved(&mut chosen, &controls(gen));
     let name = super::MODELS
         .iter()
         .find(|m| m.vendor_id == vid && m.product_ids.contains(&pid))
@@ -270,8 +271,9 @@ pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         last_error: None,
     };
     for c in controls(gen) {
-        if let Some(v) = get_setting(&a.chosen, c.key).and_then(|v| v.as_int()) {
-            if let Err(e) = a.write(c.key, v as u8) {
+        let v = get_setting(&a.chosen, c.key).and_then(|v| v.as_int());
+        if let Some(v) = v.and_then(|v| u8::try_from(v).ok()) {
+            if let Err(e) = a.write(c.key, v) {
                 warn!("{}: restore {}: {e}", a.name, c.key.as_str());
             }
         }
@@ -314,10 +316,13 @@ impl Astro {
                 self.stale = true;
                 bail!("ASTRO A50: no reply to {:#04x}", f[1]);
             }
-            if let Ok(n) = dev.read_timeout(&mut buf, left) {
-                if accept(&buf[..n]) {
-                    return Ok(buf[..n].to_vec());
-                }
+            let n = match dev.read_timeout(&mut buf, left) {
+                Ok(n) => n,
+                Err(e) if super::hidpp::hard_read_error(&e) => return Err(e),
+                Err(_) => continue,
+            };
+            if accept(&buf[..n]) {
+                return Ok(buf[..n].to_vec());
             }
         }
     }
@@ -373,10 +378,13 @@ impl Astro {
             Gen::Five => self.poll_g5(),
             Gen::Four => self.poll_g4(),
         };
-        if let Err(e) = ok {
-            self.battery.percent = None;
-            self.battery.charging = false;
-            self.last_error = Some(e.to_string());
+        match ok {
+            Ok(()) => self.last_error = None,
+            Err(e) => {
+                self.battery.percent = None;
+                self.battery.charging = false;
+                self.last_error = Some(e.to_string());
+            }
         }
     }
 
@@ -453,7 +461,8 @@ impl DeviceAdapter for Astro {
     }
 
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
-        let v = value.as_int().context("expected a number")? as u8;
+        let v = value.as_int().context("expected a number")?;
+        let v = u8::try_from(v).with_context(|| format!("{} {v} is out of range", key.as_str()))?;
         if let Err(e) = self.write(key, v) {
             self.last_error = Some(e.to_string());
             return Err(e);
@@ -467,6 +476,7 @@ impl DeviceAdapter for Astro {
             self.id.product_id,
             &self.chosen,
         )
+        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn tick(&mut self) -> Result<()> {

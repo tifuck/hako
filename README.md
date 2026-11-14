@@ -301,6 +301,18 @@ service for you. It works on Ubuntu 22.04 and newer and Debian 12 and newer.
 Remove it with `sudo apt remove hako`. Your settings in `~/.config/hako` are
 kept.
 
+### Arch, Manjaro, EndeavourOS (`PKGBUILD`)
+
+`packaging/arch/PKGBUILD` (in this repo) repackages the release tarball:
+
+```bash
+cd packaging/arch && makepkg -si
+```
+
+Same result as the `.deb`: app, udev rules and the service, started for you.
+pacman updates it (bump `pkgver` and run `updpkgsums`), not the in-app updater.
+Remove it with `sudo pacman -R hako-bin`.
+
 ### Any other distribution (tarball)
 
 Prebuilt for **x86_64 Linux** with glibc 2.35 or later (Fedora, Arch,

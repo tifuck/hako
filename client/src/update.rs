@@ -14,6 +14,9 @@ use std::process::{Command, Stdio};
 
 const REPO: Option<&str> = option_env!("HAKO_REPO");
 const DEB_BIN: &str = "/usr/bin/hako";
+/// Present only when dpkg installed hako; another package manager's
+/// `/usr/bin/hako` is updated by that package manager.
+const DEB_LIST: &str = "/var/lib/dpkg/info/hako.list";
 const UDEV_RULES: &str = "/etc/udev/rules.d/70-hako.rules";
 /// Set for the restarted UI so it can confirm the update.
 pub const UPDATED_ENV: &str = "HAKO_UPDATED";
@@ -24,6 +27,24 @@ pub const WARN_ENV: &str = "HAKO_UPDATE_WARN";
 const SIGNING_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJMt1vykoBFjxuEOvgx8kwO1jhHc4NtrJ3s0TchN+Aqf hako-release";
 const SIG_NAMESPACE: &str = "hako-release";
+
+/// A release that failed verification (signature or checksum): worth telling
+/// the user about, unlike a network failure.
+#[derive(Debug)]
+pub struct Rejected(String);
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Rejected {}
+
+/// `e` is (or wraps) a [`Rejected`] release.
+pub fn rejected(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Rejected>().is_some()
+}
 
 /// A published release newer than this build.
 #[derive(Clone, Debug)]
@@ -59,8 +80,10 @@ pub fn target() -> Option<(&'static str, PathBuf)> {
     let repo = REPO.filter(|r| !r.is_empty())?;
     let exe = std::env::current_exe().ok()?;
     let user = PathBuf::from(std::env::var_os("HOME")?).join(".local/bin/hako");
-    [user, PathBuf::from(DEB_BIN)]
+    let deb = Path::new(DEB_LIST).exists().then(|| PathBuf::from(DEB_BIN));
+    [Some(user), deb]
         .into_iter()
+        .flatten()
         .find(|bin| std::fs::canonicalize(bin).is_ok_and(|b| b == exe))
         .map(|bin| (repo, bin))
 }
@@ -88,20 +111,27 @@ pub fn check(repo: &str) -> Result<Option<Release>> {
         )))
     .context("GitHub did not answer")?;
     let v: serde_json::Value = serde_json::from_slice(&body)?;
+    release(&v, repo, env!("CARGO_PKG_VERSION"), deb_install())
+}
+
+/// The release `v` (GitHub's release JSON) offers, if newer than `local`.
+/// The tag is not signed: the asset name binds the version to the download,
+/// since the signed `SHA256SUMS` lists each build under its versioned name,
+/// so an old build re-published under a newer tag finds no checksum.
+fn release(v: &serde_json::Value, repo: &str, local: &str, deb: bool) -> Result<Option<Release>> {
     let tag = v["tag_name"].as_str().context("release has no tag")?;
     let version = tag.trim_start_matches('v');
-    if !newer(version, env!("CARGO_PKG_VERSION")) {
+    if parse_version(version).is_none() {
+        bail!("the latest release's tag {tag:?} is not a version");
+    }
+    if !newer(version, local) {
         return Ok(None);
     }
-    let suffix = if deb_install() {
-        format!("_{}.deb", deb_arch())
-    } else {
-        format!("-{}-linux.tar.gz", std::env::consts::ARCH)
-    };
-    let (name, url) =
-        asset(&v, repo, |n| n.ends_with(&suffix)).context("no build for this computer")?;
+    let name = asset_name(version, deb);
+    let (_, url) = asset(v, repo, |n| n == name)
+        .with_context(|| format!("no build for this computer ({name})"))?;
     let (_, sums_url) =
-        asset(&v, repo, |n| n == "SHA256SUMS").context("release has no checksums")?;
+        asset(v, repo, |n| n == "SHA256SUMS").context("release has no checksums")?;
     Ok(Some(Release {
         version: version.into(),
         name,
@@ -109,6 +139,16 @@ pub fn check(repo: &str) -> Result<Option<Release>> {
         sums_url,
         sig_url: format!("https://raw.githubusercontent.com/{repo}/signatures/{tag}.sig"),
     }))
+}
+
+/// The name the release workflow gives this computer's build of `version`
+/// (a version [`parse_version`] accepted, so it is a plain file name).
+fn asset_name(version: &str, deb: bool) -> String {
+    if deb {
+        format!("hako_{version}_{}.deb", deb_arch())
+    } else {
+        format!("hako-{version}-{}-linux.tar.gz", std::env::consts::ARCH)
+    }
 }
 
 /// `(name, url)` of the first asset `want` accepts, following only download
@@ -151,17 +191,26 @@ pub fn download(rel: &Release) -> Result<Ready> {
     let sums = run(curl().arg(&rel.sums_url))?;
     let signed = run(curl().arg(&rel.sig_url))
         .with_context(|| format!("v{} is not signed yet", rel.version))
-        .and_then(|sig| verify_signature(&dir, SIGNING_KEY, &sums, &sig));
+        .and_then(|sig| {
+            verify_signature(&dir, SIGNING_KEY, &sums, &sig)
+                .map_err(|e| Rejected(format!("{e:#}")).into())
+        });
     if let Err(e) = signed {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
     }
     let sums = String::from_utf8(sums)?;
-    let want = expected_sum(&sums, &rel.name).context("checksums do not list the download")?;
+    let Some(want) = expected_sum(&sums, &rel.name) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        bail!(Rejected(format!(
+            "the signed checksums do not list {}, download discarded",
+            rel.name
+        )));
+    };
     let got = String::from_utf8(run(Command::new("sha256sum").arg(&file))?)?;
     if got.split_whitespace().next() != Some(want.as_str()) {
         let _ = std::fs::remove_dir_all(&dir);
-        bail!("checksum mismatch, download discarded");
+        bail!(Rejected("checksum mismatch, download discarded".into()));
     }
     Ok(Ready {
         version: rel.version.clone(),
@@ -200,7 +249,7 @@ fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
         // apt installs rules and units and restarts the daemons (postinst).
         run_input(
             Command::new("pkexec").args(["sh", "-c"]).arg(
-                "t=$(mktemp -d) && cat > \"$t/hako.deb\" && apt-get install -y --allow-downgrades \"$t/hako.deb\"; s=$?; rm -rf \"$t\"; exit $s",
+                "t=$(mktemp -d) && cat > \"$t/hako.deb\" && apt-get install -y \"$t/hako.deb\"; s=$?; rm -rf \"$t\"; exit $s",
             ),
             &data,
         )
@@ -218,8 +267,14 @@ fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
             .args(["-xzOf", "-"])
             .arg(format!("{root}/udev/70-hako.rules")),
         &data,
-    );
-    let warn = rules.ok().and_then(|r| update_udev(&r));
+    )
+    .context("the update has no device rules")
+    .and_then(|r| update_udev(&r));
+    let warn = rules.err().map(|e| {
+        format!(
+            "New device rules were not installed ({e:#}). Run: hakod --udev-rules | sudo tee {UDEV_RULES} && sudo udevadm control --reload-rules && sudo udevadm trigger"
+        )
+    });
     run(Command::new("bash")
         .arg(dir.join(root).join("scripts/install-user.sh"))
         .env("HAKO_SKIP_UDEV", "1"))
@@ -228,22 +283,18 @@ fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
 }
 
 /// The device rules live in /etc: ask through polkit, only when they changed.
-fn update_udev(fresh: &[u8]) -> Option<String> {
+fn update_udev(fresh: &[u8]) -> Result<()> {
     if std::fs::read(UDEV_RULES).ok().as_deref() == Some(fresh) {
-        return None;
+        return Ok(());
     }
-    let ok = run_input(
+    run_input(
         Command::new("pkexec").args(["sh", "-c"]).arg(format!(
             "install -m 644 /dev/stdin {UDEV_RULES} && udevadm control --reload-rules && udevadm trigger"
         )),
         fresh,
     )
-    .is_ok();
-    (!ok).then(|| {
-        format!(
-            "New device rules were not installed. Run: hakod --udev-rules | sudo tee {UDEV_RULES} && sudo udevadm control --reload-rules && sudo udevadm trigger"
-        )
-    })
+    .context("cancelled or failed")?;
+    Ok(())
 }
 
 /// Replace this process with the freshly installed UI. Returns only on failure.
@@ -341,18 +392,29 @@ fn check_sum(data: &[u8], want: &str) -> Result<()> {
     Ok(())
 }
 
+/// `(dotted numbers, is a release)` of `1.2.3` or `1.2.3-rc1`. Only ASCII
+/// letters, digits, `.` and `-` pass (no `..`), so a version is safe inside
+/// a file name.
+fn parse_version(s: &str) -> Option<(Vec<u64>, bool)> {
+    if s.contains("..")
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-.".contains(&b))
+    {
+        return None;
+    }
+    let (nums, pre) = s.split_once('-').map_or((s, false), |(n, _)| (n, true));
+    let nums = nums
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    Some((nums, !pre))
+}
+
 /// `remote` > `local`, comparing dotted numbers; on a tie a release beats a
 /// pre-release (`0.4.0` > `0.4.0-rc1`), as in semver.
 fn newer(remote: &str, local: &str) -> bool {
-    let parse = |s: &str| -> Option<(Vec<u64>, bool)> {
-        let (nums, pre) = s.split_once('-').map_or((s, false), |(n, _)| (n, true));
-        let nums = nums
-            .split('.')
-            .map(|p| p.parse().ok())
-            .collect::<Option<_>>()?;
-        Some((nums, !pre))
-    };
-    matches!((parse(remote), parse(local)), (Some(r), Some(l)) if r > l)
+    matches!((parse_version(remote), parse_version(local)), (Some(r), Some(l)) if r > l)
 }
 
 /// Hash for `name` from `sha256sum` output (`<hash>  <name>` or `<hash> *<name>`).
@@ -443,5 +505,45 @@ mod tests {
         let (_, url) = asset(&v, "tifuck/Hako", deb).unwrap();
         assert!(url.starts_with("https://github.com/tifuck/"));
         assert!(asset(&v, "someone/hako", deb).is_none());
+    }
+
+    #[test]
+    fn the_asset_name_binds_the_release_version() {
+        let tar = |v: &str| format!("hako-{v}-{}-linux.tar.gz", std::env::consts::ARCH);
+        let rel = |tag: &str, build: &str| {
+            let url = |n: &str| format!("https://github.com/o/r/releases/download/{tag}/{n}");
+            serde_json::json!({ "tag_name": tag, "assets": [
+                { "name": build, "browser_download_url": url(build) },
+                { "name": "SHA256SUMS", "browser_download_url": url("SHA256SUMS") },
+            ]})
+        };
+        // An old build (and its signed sums) re-published under a newer tag.
+        assert!(release(&rel("v99.0.0", &tar("0.2.5")), "o/r", "0.2.6", false).is_err());
+        let deb = format!("hako_99.0.0_{}.deb", deb_arch());
+        assert!(release(&rel("v99.0.0", &deb), "o/r", "0.2.6", false).is_err());
+        let r = release(&rel("v0.3.0", &tar("0.3.0")), "o/r", "0.2.6", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!((r.version.as_str(), r.name), ("0.3.0", tar("0.3.0")));
+        let r = release(&rel("v99.0.0", &deb), "o/r", "0.2.6", true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.name, deb);
+        assert!(
+            release(&rel("v0.2.6", &tar("0.2.6")), "o/r", "0.2.6", false)
+                .unwrap()
+                .is_none()
+        );
+        // A tag that is no version is an error, not "up to date", and can't
+        // put a path into the file name.
+        for tag in ["latest", "v", "v1.0.0-x/../../y", "v1.0.0-rc..1", "v1.0.0 "] {
+            let r = release(
+                &rel(tag, &tar(tag.trim_start_matches('v'))),
+                "o/r",
+                "0.2.6",
+                false,
+            );
+            assert!(r.is_err(), "{tag:?}");
+        }
     }
 }

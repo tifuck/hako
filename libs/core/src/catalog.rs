@@ -367,6 +367,31 @@ impl SettingMeta {
             }
         }
     }
+
+    /// The in-range whole/fractional number closest to `value` for an invalid
+    /// slider value; `None` when it is valid, not a slider, or the declared
+    /// range is empty.
+    pub fn nearest_valid(&self, value: &SettingValue) -> Option<SettingValue> {
+        if self.kind != ControlKind::Slider && self.kind != ControlKind::ColorChannel
+            || self.validate(value).is_ok()
+        {
+            return None;
+        }
+        let (min, max) = (self.min.unwrap_or(f64::MIN), self.max.unwrap_or(f64::MAX));
+        if min.is_nan() || max.is_nan() || min > max {
+            return None;
+        }
+        let n = value.as_float().filter(|f| f.is_finite())?.clamp(min, max);
+        let fixed = if [self.min, self.max, self.step]
+            .iter()
+            .all(|v| v.is_none_or(|v| v.fract() == 0.0))
+        {
+            SettingValue::Int(n.round() as i64)
+        } else {
+            SettingValue::Float(n)
+        };
+        self.validate(&fixed).is_ok().then_some(fixed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

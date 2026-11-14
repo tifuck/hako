@@ -86,7 +86,9 @@ pub fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         .with_context(|| format!("hidraw interface {}", link.iface))?;
     let dev = HidrawDevice::open(&info.path)?;
     // Settings live under the canonical (first) PID for wired and wireless.
-    let chosen = hako_core::config::load_device_settings(&ctx.paths, VID, spec.pids[0])?;
+    let mut chosen = hako_core::config::load_device_settings(&ctx.paths, VID, spec.pids[0])?;
+    let offered = controls(spec, &link, &chosen, MAX_DPI_STAGES);
+    crate::drivers::sanitize_saved(&mut chosen, &offered);
     let mut settings = chosen.clone();
     defaults(&mut settings, spec);
     let mut a = RazerAdapter {
@@ -155,7 +157,8 @@ impl RazerAdapter {
     }
 
     /// OpenRazer razer_send_payload: SET, wait, GET, check; retried while the
-    /// device is busy / answering something else.
+    /// device answers something else, a read busy or with a bad checksum
+    /// (`check_response`; a busy write is done).
     fn transact(&mut self, txn: u8, (class, cmd, args): Cmd) -> Result<[u8; 90]> {
         let req = p::make_report(txn, class, cmd, &args);
         let wait = Duration::from_millis(self.spec.wait_ms);
@@ -244,8 +247,13 @@ impl RazerAdapter {
             if lighting {
                 self.apply_lighting(VARSTORE, false)?;
             }
+            // Both store what the device already shows, so a failure midway
+            // leaves nothing to undo; the mode just stays off.
             if stages {
-                self.write_stages(VARSTORE)?;
+                self.write_stages(VARSTORE).map_err(|e| match lighting {
+                    true => anyhow!("lighting was stored, DPI stages were not: {e:#}"),
+                    false => e,
+                })?;
             }
         }
         for map in [&mut self.chosen, &mut self.settings] {
@@ -418,7 +426,8 @@ impl RazerAdapter {
         match key {
             SettingKey::Dpi => {
                 let txn = self.link.txn(Family::Dpi);
-                self.send(txn, p::set_dpi(STORE, int? as u16))
+                let dpi = u16::try_from(int?).context("DPI out of range")?;
+                self.send(txn, p::set_dpi(STORE, dpi))
             }
             SettingKey::ReportRate => {
                 let hz = int? as u32;
@@ -445,13 +454,18 @@ impl RazerAdapter {
             }
             SettingKey::PmShutdown => {
                 let txn = self.link.txn(Family::Idle);
-                self.send(txn, p::set_idle(int? as u16 * 60))
+                let minutes = int?.clamp(IDLE_MIN.0 as i64, IDLE_MIN.1 as i64);
+                self.send(txn, p::set_idle(minutes as u16 * 60))
             }
             k if k == SettingKey::DpiStageActive || STAGE_KEYS.contains(&k) => {
                 self.write_stages(store)?;
-                // The active stage sets the DPI; show it unless the user chose one.
+                // The active stage sets the DPI; show it unless the user chose
+                // one. The stages are written either way, so a failed read is
+                // not a failed write.
                 if get_setting(&self.chosen, SettingKey::Dpi).is_none() {
-                    self.read(SettingKey::Dpi)?;
+                    if let Err(e) = self.read(SettingKey::Dpi) {
+                        debug!("{} dpi after stage change: {e}", self.spec.name);
+                    }
                 }
                 Ok(())
             }
@@ -502,7 +516,7 @@ impl RazerAdapter {
     /// cannot tell (no read command, read failed).
     fn holds(&mut self, key: SettingKey, value: &SettingValue) -> bool {
         let want = match key {
-            SettingKey::PmShutdown => value.as_int().map(|m| (m * 60).clamp(60, 900)),
+            SettingKey::PmShutdown => value.as_int().map(|m| m.saturating_mul(60).clamp(60, 900)),
             SettingKey::GameMode => value.as_bool().map(i64::from),
             _ => value.as_int(),
         };
@@ -784,24 +798,35 @@ impl DeviceAdapter for RazerAdapter {
             bail!("{} has no {} control", self.spec.name, key.as_str());
         }
         let before = (self.chosen.clone(), self.settings.clone());
+        let old = get_setting(&self.settings, key).cloned();
+        // In save mode the device already holds an unchanged value.
+        let store = if old.as_ref() == Some(&value) {
+            NOSTORE
+        } else {
+            self.store_for(key)
+        };
         let result = if key == SettingKey::SaveToDevice {
             let on = value.as_bool().context("expected true/false")?;
             self.set_save(on)
         } else {
-            // In save mode the device already holds an unchanged value.
-            let store = if get_setting(&self.settings, key) == Some(&value) {
-                NOSTORE
-            } else {
-                self.store_for(key)
-            };
             merge_setting(&mut self.chosen, key, value.clone());
             merge_setting(&mut self.settings, key, value.clone());
             self.write(key, &value, store)
         };
-        if let Err(e) = result {
-            // The device kept its old value; so do the UI and the file.
+        if let Err(mut e) = result {
+            // The UI and the file keep the old value.
             (self.chosen, self.settings) = before;
-            self.last_error = Some(e.to_string());
+            // A write of several commands (each LED's brightness and effect,
+            // HyperPolling's two, stored stages and their read-back) may have
+            // stopped midway: send the old value back so the device matches.
+            if let Some(old) = old.filter(|_| key != SettingKey::SaveToDevice) {
+                if let Err(re) = self.write(key, &old, store) {
+                    e = anyhow!(
+                        "{e:#}; restoring the previous value also failed ({re:#}), the device may hold part of the change"
+                    );
+                }
+            }
+            self.last_error = Some(format!("{e:#}"));
             return Err(e);
         }
         self.last_error = None;
@@ -968,6 +993,10 @@ mod tests {
         /// Acknowledge stage writes without keeping them.
         drop_writes: bool,
         bad_crc: bool,
+        /// Answer this many reads busy, with no data.
+        busy_reads: u8,
+        /// Answer this (class, cmd) with failure (0x03), keeping nothing.
+        fail: Option<(u8, u8)>,
     }
 
     impl Fake {
@@ -985,6 +1014,17 @@ mod tests {
             let (class, cmd) = (req[6], req[7]);
             let args = &req[8..8 + usize::from(req[5])];
             let led = if class == 0x0f { args[1] } else { 0 };
+            if cmd & 0x80 != 0 && self.busy_reads > 0 {
+                self.busy_reads -= 1;
+                let mut resp = *req;
+                resp[0] = 0x01;
+                return resp;
+            }
+            if self.fail == Some((class, cmd)) {
+                let mut resp = *req;
+                resp[0] = 0x03;
+                return resp;
+            }
             let out = match (class, cmd) {
                 (0x04, 0x86) => [&args[..1], &self.stages[1..]].concat(),
                 (0x04, 0x06) if !self.drop_writes => {
@@ -1271,6 +1311,47 @@ mod tests {
             stores(&fake),
             [(0x0f, 0x04, 1), (0x0f, 0x02, 1), (0x0f, 0x84, 1)]
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A read answered busy is asked again, within a bound; a busy answer's
+    /// argument bytes are never taken as the value.
+    #[test]
+    fn busy_reads_are_retried_then_fail() {
+        let root = std::env::temp_dir().join(format!("hako-razer-busy-{}", std::process::id()));
+        let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake::new()));
+        let mut a = fake_adapter(0x007c, &fake, &root);
+        a.set(SettingKey::Dpi, SettingValue::Int(1600)).unwrap();
+        fake.lock().unwrap().busy_reads = 2;
+        assert_eq!(a.device_value(SettingKey::Dpi).unwrap(), Some(1600));
+        fake.lock().unwrap().busy_reads = 3;
+        let err = a.device_value(SettingKey::Dpi).unwrap_err().to_string();
+        assert!(err.contains("busy"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A lighting write that fails after the brightness went out sends the
+    /// old brightness back, so the device matches the rolled-back settings.
+    #[test]
+    fn failed_multi_step_write_restores_the_old_value() {
+        let root = std::env::temp_dir().join(format!("hako-razer-undo-{}", std::process::id()));
+        let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake::new()));
+        // DeathAdder V2 Mini: one logo LED, brightness then effect.
+        let mut a = fake_adapter(0x008c, &fake, &root);
+        a.set(SettingKey::Brightness, SettingValue::Int(80))
+            .unwrap();
+        fake.lock().unwrap().fail = Some((0x0f, 0x02));
+        let err = a
+            .set(SettingKey::Brightness, SettingValue::Int(40))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("restoring"), "{err:#}");
+        let held = fake.lock().unwrap().held[&(0x0f, 0x04, 0x04)].clone();
+        assert_eq!(held[2], p::brightness_wire(80));
+        assert_eq!(
+            get_setting(&a.settings, SettingKey::Brightness),
+            Some(&SettingValue::Int(80))
+        );
+        assert!(a.last_error.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 

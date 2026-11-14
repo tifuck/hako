@@ -28,7 +28,12 @@ pub fn usage_pages(desc: &[u8]) -> Vec<u16> {
         .collect()
 }
 
-/// Payload bytes of output report `report_id` (0 = unnumbered), excluding the id byte.
+/// Output report sizes a command packet may have; anything else in a
+/// descriptor is treated as absent (the caller's default applies).
+const REPORT_LEN: std::ops::RangeInclusive<usize> = 8..=1024;
+
+/// Payload bytes of output report `report_id` (0 = unnumbered), excluding
+/// the id byte; `None` when absent or outside `REPORT_LEN`.
 pub fn output_report_len(desc: &[u8], report_id: u8) -> Option<usize> {
     let (mut size, mut count, mut id, mut bits) = (0u32, 0u32, 0u32, 0u32);
     for (tag, v) in items(desc) {
@@ -36,11 +41,13 @@ pub fn output_report_len(desc: &[u8], report_id: u8) -> Option<usize> {
             0x74 => size = v,
             0x94 => count = v,
             0x84 => id = v,
-            0x90 if id == u32::from(report_id) => bits += size * count,
+            0x90 if id == u32::from(report_id) => {
+                bits = bits.saturating_add(size.saturating_mul(count))
+            }
             _ => {}
         }
     }
-    (bits > 0).then(|| bits.div_ceil(8) as usize)
+    Some(bits.div_ceil(8) as usize).filter(|n| REPORT_LEN.contains(n))
 }
 
 /// The node of `vid:pid` declaring `usage_page`; else the one on `iface`.
@@ -101,6 +108,23 @@ mod tests {
         ];
         assert_eq!(output_report_len(&desc, 2), Some(1023));
         assert_eq!(output_report_len(&desc, 1), None);
+    }
+
+    #[test]
+    fn implausible_output_lengths_are_rejected() {
+        let out = |size: u8, count: &[u8]| {
+            let mut d = vec![0x06, 0x42, 0xff, 0xa1, 0x01, 0x75, size];
+            d.push(if count.len() == 1 { 0x95 } else { 0x97 });
+            d.extend_from_slice(count);
+            d.extend_from_slice(&[0x91, 0x02, 0xc0]);
+            output_report_len(&d, 0)
+        };
+        assert_eq!(out(8, &[3]), None);
+        assert_eq!(out(8, &[8]), Some(8));
+        assert_eq!(out(8, &[0x00, 0x04, 0x00, 0x00]), Some(1024));
+        assert_eq!(out(8, &[0x01, 0x04, 0x00, 0x00]), None);
+        // Size x count past u32: saturates, then is rejected.
+        assert_eq!(out(0xff, &[0xff, 0xff, 0xff, 0xff]), None);
     }
 
     #[test]

@@ -15,8 +15,29 @@ fi
 ICONDIR="$HOME/.local/share/icons/hicolor/256x256/apps"
 mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user" "$HOME/.local/share/applications" "$ICONDIR"
 
-install -m 755 "$BIN/hakod" "$HOME/.local/bin/hakod"
-install -m 755 "$BIN/hako" "$HOME/.local/bin/hako"
+# Both binaries are staged next to their targets, then renamed into place: a
+# failure never leaves a half-written file or a new hakod with an old hako.
+DEST="$HOME/.local/bin"
+trap 'rm -f "$DEST"/.hakod.new "$DEST"/.hako.new "$DEST"/.hakod.old "$DEST"/.hako.old' EXIT
+for b in hakod hako; do
+  install -m 755 "$BIN/$b" "$DEST/.$b.new"
+  if [ -e "$DEST/$b" ] || [ -L "$DEST/$b" ]; then cp -a "$DEST/$b" "$DEST/.$b.old"; fi
+done
+replaced=()
+for b in hakod hako; do
+  if ! mv -f "$DEST/.$b.new" "$DEST/$b"; then
+    for r in "${replaced[@]}"; do
+      if [ -e "$DEST/.$r.old" ] || [ -L "$DEST/.$r.old" ]; then
+        mv -f "$DEST/.$r.old" "$DEST/$r"
+      else
+        rm -f "$DEST/$r"
+      fi
+    done
+    echo "Could not install $b; the previous binaries were kept." >&2
+    exit 1
+  fi
+  replaced+=("$b")
+done
 install -m 644 "$ROOT/packaging/systemd/hakod.service" "$HOME/.config/systemd/user/hakod.service"
 install -m 644 "$ROOT/packaging/hako.desktop" "$HOME/.local/share/applications/hako.desktop"
 install -m 644 "$ROOT/client/assets/icon.png" "$ICONDIR/hako.png"

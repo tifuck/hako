@@ -268,6 +268,17 @@ fn read_settings(dev: &impl Feature, profile: u8, len: usize, pause: Duration) -
     Ok(buf)
 }
 
+/// Reads the active profile's settings block; a Kone XTD block must pass
+/// [`validate_xtd`] before it is shown.
+fn read_active(dev: &impl Feature, family: Family, pause: Duration) -> Result<Vec<u8>> {
+    let profile = active_profile(dev)?;
+    let b = read_settings(dev, profile, family.settings_len(), pause)?;
+    if family == Family::Xtd {
+        validate_xtd(&b, profile).context("unexpected settings report")?;
+    }
+    Ok(b)
+}
+
 /// Read, validate, change, write and read back the active profile of a
 /// Kone XTD. Returns the block now on the device.
 fn write_xtd(dev: &impl Feature, change: Change, pause: Duration) -> Result<Vec<u8>> {
@@ -327,8 +338,7 @@ const PAUSE: Duration = Duration::from_millis(20);
 impl Mouse {
     fn read(&self) -> Result<Vec<u8>> {
         let dev = self.dev.as_ref().context("not connected")?;
-        let profile = active_profile(dev)?;
-        read_settings(dev, profile, self.spec.family.settings_len(), PAUSE)
+        read_active(dev, self.spec.family, PAUSE)
     }
 
     /// Show `b`'s current DPI, report rate and (on the XTD) every stage.
@@ -362,7 +372,7 @@ impl Mouse {
         self.last_read = Some(Instant::now());
         match self.read().and_then(|b| self.show(&b)) {
             Ok(()) => self.last_error = None,
-            Err(e) => self.last_error = Some(e.to_string()),
+            Err(e) => self.last_error = Some(format!("{e:#}")),
         }
     }
 
@@ -720,6 +730,20 @@ mod tests {
         dev.status = 2;
         assert!(write_xtd(&dev, Change::Stage(0, 400), Duration::ZERO).is_err());
         assert!(dev.writes.borrow().is_empty(), "select failed first");
+    }
+
+    #[test]
+    fn shown_xtd_blocks_are_validated() {
+        let dev = Fake::new(&XTD_FACTORY);
+        assert_eq!(
+            read_active(&dev, Family::Xtd, Duration::ZERO).unwrap(),
+            XTD_FACTORY
+        );
+        let mut bad = XTD_FACTORY;
+        bad[41] ^= 1;
+        let dev = Fake::new(&bad);
+        let e = read_active(&dev, Family::Xtd, Duration::ZERO).unwrap_err();
+        assert!(format!("{e:#}").contains("checksum"), "{e:#}");
     }
 
     #[test]

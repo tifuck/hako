@@ -18,9 +18,11 @@
 use crate::hid::HidrawDevice;
 use anyhow::{bail, Result};
 use hako_core::device::DeviceKind;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-/// Software id we tag requests with (low nibble of the function byte).
+/// Software id of [`long_request`] (low nibble of the function byte);
+/// [`request`] rotates it, see [`next_swid`].
 pub const SWID: u8 = 0x0a;
 /// Device index for corded devices and the receiver itself.
 pub const DIRECT: u8 = 0xff;
@@ -96,6 +98,64 @@ pub fn match_reply(buf: &[u8], dev_idx: u8, feat: u8, fn_swid: u8) -> Reply {
     Reply::Other
 }
 
+/// Software id for the next [`request`], 2..=15 in turn, so a reply that
+/// arrives after its request timed out is not taken for the next request to
+/// the same feature and function. 0 marks notifications and 1 is the kernel
+/// driver's (hid-logitech-hidpp).
+fn next_swid() -> u8 {
+    static NEXT: AtomicU8 = AtomicU8::new(0);
+    2 + NEXT.fetch_add(1, Ordering::Relaxed) % 14
+}
+
+/// A read that failed for another reason than its timeout (device gone,
+/// I/O error): `read_timeout` reports a timeout as a plain message and real
+/// errors as `std::io::Error`.
+pub fn hard_read_error(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>().is_some()
+}
+
+/// The device answered with a HID++ error frame (unsupported function,
+/// invalid argument, ...): it is there, it just refused.
+#[derive(Debug)]
+pub struct Refused {
+    pub feat: u8,
+    pub fnid: u8,
+    pub code: u8,
+    pub raw: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "HID++ error feat={:#x} fn={} code={:#x} raw={}",
+            self.feat, self.fnid, self.code, self.raw
+        )
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// The request was answered with an error frame, as opposed to a timeout
+/// or I/O error (which a later retry may get past).
+pub fn refused(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Refused>().is_some()
+}
+
+/// Note a probe read that got no answer (timeout, I/O error), so the probe
+/// counts as incomplete and is retried. A refusal (error frame) is an
+/// answer: the device does not support that read.
+pub fn note_miss(e: anyhow::Error, what: &str, missed: &mut Vec<String>) {
+    if !refused(&e) {
+        missed.push(format!("{what}: {e}"));
+    }
+}
+
+/// The reply, or `None` after [`note_miss`].
+pub fn answered<T>(r: Result<T>, what: &str, missed: &mut Vec<String>) -> Option<T> {
+    r.map_err(|e| note_miss(e, what, missed)).ok()
+}
+
 pub fn drain_noise(dev: &mut HidrawDevice) {
     dev.drain(Duration::from_millis(1));
 }
@@ -116,30 +176,41 @@ pub fn transact(
     let mut buf = [0u8; 32];
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if let Ok(n) = dev.read_timeout(&mut buf, remaining.min(Duration::from_millis(80))) {
-            if n < 6 {
-                continue;
+        let n = match dev.read_timeout(&mut buf, remaining.min(Duration::from_millis(80))) {
+            Ok(n) => n,
+            Err(e) if hard_read_error(&e) => {
+                return Err(e.context(format!("HID++ read feat={feat:#x} fn={fnid}")))
             }
-            match match_reply(&buf[..n], dev_idx, feat, fn_swid) {
-                Reply::Ok => {
-                    let mut out = [0u8; 20];
-                    let copy = n.min(20);
-                    out[..copy].copy_from_slice(&buf[..copy]);
-                    return Ok(out);
+            Err(_) => continue,
+        };
+        if n < 6 {
+            continue;
+        }
+        match match_reply(&buf[..n], dev_idx, feat, fn_swid) {
+            Reply::Ok => {
+                let mut out = [0u8; 20];
+                let copy = n.min(20);
+                out[..copy].copy_from_slice(&buf[..copy]);
+                return Ok(out);
+            }
+            Reply::Err(code) => {
+                return Err(Refused {
+                    feat,
+                    fnid,
+                    code,
+                    raw: hex(&buf[..n.min(12)]),
                 }
-                Reply::Err(code) => bail!(
-                    "HID++ error feat={feat:#x} fn={fnid} code={code:#x} raw={}",
-                    hex(&buf[..n.min(12)])
-                ),
-                // Mouse input, notification, or someone else's reply.
-                Reply::Other => {}
+                .into())
             }
+            // Mouse input, notification, or someone else's reply.
+            Reply::Other => {}
         }
     }
     bail!("HID++ timeout feat={feat:#x} fn={fnid}")
 }
 
-/// One HID++ 2.0 call: long request to `feat` index, function `fnid`.
+/// One HID++ 2.0 call: long request to `feat` index, function `fnid`,
+/// tagged with the next software id.
 pub fn request(
     dev: &mut HidrawDevice,
     dev_idx: u8,
@@ -147,8 +218,14 @@ pub fn request(
     fnid: u8,
     params: &[u8],
 ) -> Result<[u8; 20]> {
-    let pkt = long_request(dev_idx, feat, fnid, params);
+    let pkt = with_swid(long_request(dev_idx, feat, fnid, params), next_swid());
     transact(dev, &pkt, dev_idx, feat, pkt[3])
+}
+
+/// `pkt` (a [`long_request`]) with software id `swid`.
+fn with_swid(mut pkt: [u8; 20], swid: u8) -> [u8; 20] {
+    pkt[3] = (pkt[3] & 0xf0) | (swid & 0x0f);
+    pkt
 }
 
 /// Read receiver long register `reg` / `sub`; the reply must echo `sub`.
@@ -681,6 +758,58 @@ mod tests {
             match_reply(&[0x10, 0xff, 0x8f, 0x83, 0xb5, 0x03, 0], 0xff, 0x83, 0xb5),
             Reply::Err(0x03)
         );
+    }
+
+    #[test]
+    fn requests_rotate_their_software_id() {
+        let ids: Vec<u8> = (0..40).map(|_| next_swid()).collect();
+        // Never 0 (notifications) or 1 (the kernel driver), never twice in a row.
+        assert!(ids.iter().all(|id| (2..=15).contains(id)), "{ids:?}");
+        assert!(ids.windows(2).all(|w| w[0] != w[1]), "{ids:?}");
+        let pkt = with_swid(long_request(1, 0x0a, 0x05, &[0x00]), 0x03);
+        assert_eq!(&pkt[..5], &[0x11, 0x01, 0x0a, 0x53, 0x00]);
+        // A late reply to the previous request (swid 2) is not this one's.
+        assert_eq!(
+            match_reply(&[0x11, 1, 0x0a, 0x52, 1, 3], 1, 0x0a, pkt[3]),
+            Reply::Other
+        );
+        assert_eq!(
+            match_reply(&[0x11, 1, 0x0a, 0x53, 1, 3], 1, 0x0a, pkt[3]),
+            Reply::Ok
+        );
+    }
+
+    #[test]
+    fn unanswered_reads_make_a_probe_incomplete() {
+        let mut missed = Vec::new();
+        let refused = Refused {
+            feat: 3,
+            fnid: 1,
+            code: 7,
+            raw: String::new(),
+        };
+        // Refused = not supported: an answer, nothing to retry.
+        assert_eq!(
+            answered::<()>(Err(refused.into()), "rates", &mut missed),
+            None
+        );
+        assert!(missed.is_empty());
+        // A timeout leaves the capability unknown: the probe is retried.
+        let timeout = anyhow::anyhow!("HID++ timeout feat=0x3 fn=1");
+        assert_eq!(answered::<()>(Err(timeout), "rates", &mut missed), None);
+        assert_eq!(missed.len(), 1);
+        assert_eq!(answered(Ok(5), "rates", &mut missed), Some(5));
+        assert_eq!(missed.len(), 1);
+    }
+
+    #[test]
+    fn only_real_read_errors_are_hard() {
+        assert!(!hard_read_error(&anyhow::anyhow!(
+            "hid read timeout on /dev/hidraw3"
+        )));
+        let gone: anyhow::Error = std::io::Error::from_raw_os_error(libc::ENODEV).into();
+        assert!(hard_read_error(&gone));
+        assert!(hard_read_error(&gone.context("HID++ read")));
     }
 
     #[test]

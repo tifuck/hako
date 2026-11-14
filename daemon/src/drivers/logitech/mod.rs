@@ -53,7 +53,7 @@ use anyhow::{Context, Result};
 use device::{HidppAdapter, Link, VID};
 use hako_core::device::DeviceKind;
 use std::path::Path;
-use tracing::debug;
+use tracing::{debug, warn};
 
 const BOLT: u16 = 0xc548;
 /// 27 MHz receiver: no pairing registers (Solaar reads its devices from udev).
@@ -657,7 +657,9 @@ fn open_receiver(pid: u16, ctx: &DriverCtx) -> Opened {
 /// until they answer). Skipped: devices in `ctx.open`, slots an open adapter
 /// still holds (a replaced device waits until the old adapter lets go),
 /// wireless PIDs another model claims, and whatever `skip(slot, wpid)` says.
-/// A receiver without a HID++ long-report node has nothing to offer.
+/// A receiver without a HID++ long-report node has nothing to offer. A slot
+/// that fails to open (e.g. an unparsable settings file) is logged and
+/// skipped; the error is returned only when no slot opened.
 fn receiver_slots(pid: u16, ctx: &DriverCtx, skip: impl Fn(u8, u16) -> bool) -> Opened {
     let Some((info, short)) = hidpp_nodes(pid)?.into_iter().next() else {
         debug!("receiver {pid:04x}: no HID++ long-report node");
@@ -666,6 +668,7 @@ fn receiver_slots(pid: u16, ctx: &DriverCtx, skip: impl Fn(u8, u16) -> bool) -> 
     let bolt = pid == BOLT;
     let mut rx = HidrawDevice::open(&info.path)?;
     let mut out: Vec<Box<dyn DeviceAdapter>> = Vec::new();
+    let mut failed = None;
     for slot in 1..=6u8 {
         if slot_held(&ctx.open, slot) {
             continue;
@@ -682,17 +685,29 @@ fn receiver_slots(pid: u16, ctx: &DriverCtx, skip: impl Fn(u8, u16) -> bool) -> 
         {
             continue;
         }
-        let dev = HidrawDevice::open(&info.path)?;
-        out.push(Box::new(HidppAdapter::new(
-            ctx.paths.clone(),
-            dev,
-            Link::Slot { slot, bolt, short },
-            wpid,
-            hidpp::kind_from_hidpp10(kind),
-            None,
-        )?));
+        let opened = HidrawDevice::open(&info.path).and_then(|dev| {
+            HidppAdapter::new(
+                ctx.paths.clone(),
+                dev,
+                Link::Slot { slot, bolt, short },
+                wpid,
+                hidpp::kind_from_hidpp10(kind),
+                None,
+            )
+        });
+        match opened {
+            Ok(a) => out.push(Box::new(a)),
+            Err(e) => {
+                let e = e.context(format!("receiver {pid:04x} slot {slot} ({wpid:04x})"));
+                warn!("{e:#}");
+                failed.get_or_insert(e);
+            }
+        }
     }
-    Ok(out)
+    match failed {
+        Some(e) if out.is_empty() => Err(e),
+        _ => Ok(out),
+    }
 }
 
 /// An open adapter already serves receiver slot `slot`.

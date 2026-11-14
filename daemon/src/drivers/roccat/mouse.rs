@@ -244,8 +244,7 @@ impl Lights for Mouse {
 
     fn apply(&mut self, effect: &str, color: [u8; 3]) -> Result<()> {
         if effect != "static" {
-            self.release();
-            return Ok(());
+            return self.release();
         }
         self.take_control()?;
         match self.family {
@@ -265,23 +264,24 @@ impl Lights for Mouse {
         memory_controls(self.family)
     }
 
-    fn release(&mut self) {
+    fn release(&mut self) -> Result<()> {
         if self.host {
+            self.dev.set_feature(&mut switch(false))?;
             self.host = false;
-            let _ = self.dev.set_feature(&mut switch(false));
         }
+        Ok(())
     }
 
     fn battery_label(&self) -> Option<&'static str> {
         (self.family == Family::ProAir).then_some("Mouse")
     }
 
-    fn battery(&mut self) -> Option<u8> {
-        self.dev.write(&battery_query()).ok()?;
+    fn battery(&mut self) -> Result<Option<u8>> {
+        self.dev.write(&battery_query())?;
         let r = read_until(&mut self.dev, Duration::from_millis(200), |r| {
             r.starts_with(&[0x90, 0x0a])
         })?;
-        parse_battery(&r)
+        Ok(r.and_then(|r| parse_battery(&r)))
     }
 }
 

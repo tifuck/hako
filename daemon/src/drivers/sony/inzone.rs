@@ -446,8 +446,11 @@ impl InzoneAdapter {
         for _ in 0..64 {
             let left = deadline.saturating_duration_since(Instant::now());
             let Some(dev) = self.dev.as_mut() else { break };
-            let Ok(n) = dev.read_timeout(&mut buf, left) else {
-                break;
+            let n = match dev.read_timeout(&mut buf, left) {
+                Ok(n) => n,
+                // A timeout is a plain error, a failed read an I/O one.
+                Err(e) if e.downcast_ref::<std::io::Error>().is_some() => return Err(e),
+                Err(_) => break,
             };
             let Some(ev) = parse(&buf[..n]) else { continue };
             self.apply(&ev);
@@ -547,6 +550,7 @@ impl DeviceAdapter for InzoneAdapter {
             self.spec.pids[0],
             &self.settings,
         )
+        .context("applied, but not saved")
     }
 
     fn tick(&mut self) -> Result<()> {
@@ -941,6 +945,52 @@ mod tests {
             Some(&(EID_GUIDANCE, SET, vec![1]))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_read_is_an_error_not_offline() {
+        struct Gone;
+        impl Link for Gone {
+            fn write(&mut self, _: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn read_timeout(&mut self, _: &mut [u8], _: Duration) -> Result<usize> {
+                Err(std::io::Error::from_raw_os_error(libc::EIO).into())
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("hako-inzone-gone-{}", std::process::id()));
+        let mut a = InzoneAdapter {
+            spec: &H9_II,
+            id: DeviceId {
+                vendor_id: super::super::SONY,
+                product_id: 0x0fa8,
+                instance: "test".into(),
+            },
+            dev: Some(Box::new(Gone)),
+            tid: 1,
+            settings: SettingsMap::new(),
+            batteries: vec![BatteryState {
+                label: "Headset".into(),
+                percent: Some(50),
+                charging: false,
+                present: true,
+            }],
+            ambient: None,
+            online: true,
+            last_poll: None,
+            failures: 0,
+            last_error: None,
+            paths: ConfigPaths {
+                root: dir.clone(),
+                config_toml: dir.join("config.toml"),
+                devices_dir: dir.join("devices"),
+                profiles_dir: dir.join("profiles"),
+                remaps_dir: dir.join("remaps"),
+            },
+        };
+        assert!(a.poll().is_err());
+        assert!(a.online, "not taken for out of range");
+        assert!(a.request(EID_BATTERY, GET, &[]).is_err());
     }
 
     /// Read-only probe of a plugged-in dongle (GETs only).

@@ -30,7 +30,7 @@
 use super::{instance, int, request, VID};
 use crate::drivers::{DeviceAdapter, DriverCtx, Opened};
 use crate::hid::{find_hidraw, HidrawDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{BatteryState, DeviceId, DeviceKind, DeviceSnapshot};
@@ -748,6 +748,9 @@ pub struct MouseAdapter {
     last_error: Option<String>,
     last_battery: Instant,
     failures: u8,
+    /// The stored values did not all reach the mouse (asleep, off): re-sent
+    /// when the battery poll sees it again.
+    restore_pending: bool,
     paths: ConfigPaths,
 }
 
@@ -781,10 +784,24 @@ impl MouseAdapter {
             last_error: None,
             last_battery: Instant::now(),
             failures: 0,
+            restore_pending: false,
             paths,
         };
-        // Only what the user set before: never overwrite onboard defaults.
-        let stored = |k: &SettingKey| get_setting(&a.settings, *k).is_some();
+        a.restore();
+        a.poll_battery();
+        info!(
+            "SteelSeries {name} open {} wireless={}",
+            info.path.display(),
+            a.wireless
+        );
+        Ok(a)
+    }
+
+    /// Re-send what the user set before (the mouse forgets it); only that:
+    /// never overwrite onboard defaults. A failure stays in `last_error` and
+    /// is retried when the battery poll sees the mouse.
+    fn restore(&mut self) {
+        let stored = |k: &SettingKey| get_setting(&self.settings, *k).is_some();
         let mut restore: Vec<_> = [
             SettingKey::Dpi,
             SettingKey::ReportRate,
@@ -796,20 +813,19 @@ impl MouseAdapter {
         if LIGHT_KEYS.iter().any(stored) {
             restore.push(SettingKey::Effect);
         }
+        let mut failed = false;
         for key in restore {
-            let payloads = a.payloads(&a.settings, key);
-            if let Err(e) = a.write_all(&payloads, a.feature(key)) {
-                warn!("{name} restore {}: {e}", key.as_str());
-                a.last_error = Some(e.to_string());
+            let payloads = self.payloads(&self.settings, key);
+            if let Err(e) = self.write_all(&payloads, self.feature(key)) {
+                warn!("{} restore {}: {e}", self.name, key.as_str());
+                self.last_error = Some(e.to_string());
+                failed = true;
             }
         }
-        a.poll_battery();
-        info!(
-            "SteelSeries {name} open {} wireless={}",
-            info.path.display(),
-            a.wireless
-        );
-        Ok(a)
+        if self.restore_pending && !failed {
+            self.last_error = None;
+        }
+        self.restore_pending = failed;
     }
 
     /// Payloads that put `key` (from `s`) on the device. Lighting keys
@@ -865,8 +881,10 @@ impl MouseAdapter {
             if feature {
                 dev.set_feature(&mut frame(p, false, len))?;
             } else if wireless {
-                // The dongle answers every command; take the answer off the queue.
-                request(dev, &frame(p, true, len), |_| true, REPLY_TIMEOUT)?;
+                // The dongle answers every command; take the answer off the
+                // queue. No answer: the mouse did not get it.
+                request(dev, &frame(p, true, len), |_| true, REPLY_TIMEOUT)?
+                    .context("no answer from the mouse (asleep or switched off?)")?;
             } else {
                 dev.write(&frame(p, false, len))?;
             }
@@ -897,6 +915,13 @@ impl MouseAdapter {
                 self.battery.percent = b.map(|(p, _)| p);
                 self.battery.charging = b.is_some_and(|(_, c)| c);
                 self.battery.present = b.is_some();
+                // Asleep or off, the mouse forgets what was sent: send it
+                // again once it answers.
+                if wireless && b.is_none() {
+                    self.restore_pending = true;
+                } else if self.restore_pending && b.is_some() {
+                    self.restore();
+                }
             }
             Err(e) => {
                 self.failures = self.failures.saturating_add(1);
@@ -952,18 +977,24 @@ impl DeviceAdapter for MouseAdapter {
             }
             self.write_all(&payloads, self.feature(key))?;
         }
-        hako_core::config::save_device_settings(&self.paths, VID, self.id.product_id, &proposed)?;
+        // The mouse has the value: keep it even if the file cannot be written.
         self.settings = proposed;
         self.last_error = None;
+        let file = hako_core::config::save_device_settings(
+            &self.paths,
+            VID,
+            self.id.product_id,
+            &self.settings,
+        )
+        .map_err(|e| anyhow!("applied, but not saved: {e:#}"));
         let saving = get_setting(&self.settings, SettingKey::SaveToDevice)
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if key != SettingKey::SaveToDevice && saving {
-            if let Some(cmd) = save {
-                self.write_all(&[cmd], false)?;
-            }
-        }
-        Ok(())
+        let flash = match save {
+            Some(cmd) if key != SettingKey::SaveToDevice && saving => self.write_all(&[cmd], false),
+            _ => Ok(()),
+        };
+        file.and(flash)
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {

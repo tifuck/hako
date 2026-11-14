@@ -105,6 +105,8 @@ impl MouseAdapter {
         if !spec.zones.is_empty() {
             lighting_defaults(&mut settings, false);
         }
+        let offered = controls(spec, &settings);
+        crate::drivers::sanitize_saved(&mut settings, &offered);
         let mut a = Self {
             spec,
             id: DeviceId {
@@ -283,9 +285,9 @@ impl MouseAdapter {
                 let (Some(d), Some(stage)) = (spec.dpi, int) else {
                     return Ok(());
                 };
-                let stage = stage as u8;
-                self.t()?
-                    .transact(&p::set_active_stage(stage, d.zero_based))?;
+                let stage = u8::try_from(stage).context("no such DPI stage")?;
+                let cmd = p::set_active_stage(stage, d.zero_based)?;
+                self.t()?.transact(&cmd)?;
                 self.mirror_active(stage);
                 Ok(())
             }
@@ -318,16 +320,13 @@ impl MouseAdapter {
             }
             SettingKey::PmShutdown => {
                 let wire = int
-                    .and_then(|m| p::auto_off_wire(m as u8))
+                    .and_then(|m| u8::try_from(m).ok())
+                    .and_then(p::auto_off_wire)
                     .context("unsupported auto-off time")?;
                 let low = self.low_battery.context("battery state not read yet")?;
                 self.t()?.transact(&p::set_energy(wire, low)).map(drop)
             }
-            SettingKey::Effect
-            | SettingKey::Brightness
-            | SettingKey::ColorR
-            | SettingKey::ColorG
-            | SettingKey::ColorB => self.write_lighting(),
+            k if is_lighting(k) => self.write_lighting(),
             _ => Ok(()),
         }
     }
@@ -391,6 +390,17 @@ impl MouseAdapter {
             .unwrap_or(self.id.product_id);
         hako_core::config::save_device_settings(&self.paths, VID, config_pid, &self.settings)
     }
+}
+
+fn is_lighting(key: SettingKey) -> bool {
+    matches!(
+        key,
+        SettingKey::Effect
+            | SettingKey::Brightness
+            | SettingKey::ColorR
+            | SettingKey::ColorG
+            | SettingKey::ColorB
+    )
 }
 
 /// The active profile's performance settings, as far as `spec` reads them.
@@ -588,6 +598,10 @@ impl DeviceAdapter for MouseAdapter {
             // The device kept its old value; so do the UI and the file.
             self.settings = before;
             self.last_error = Some(e.to_string());
+            if is_lighting(key) && self.spec.zones.len() > 1 {
+                // Zones written before the failure get the old lighting back.
+                let _ = self.write_lighting();
+            }
             return Err(e);
         }
         // The change is live; storing it is a separate step that can fail.
@@ -598,7 +612,8 @@ impl DeviceAdapter for MouseAdapter {
             Ok(())
         };
         self.last_error = stored.as_ref().err().map(|e| format!("{e:#}"));
-        self.persist()?;
+        self.persist()
+            .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))?;
         stored
     }
 
@@ -665,6 +680,25 @@ mod tests {
         }
         for m in MICE {
             assert_eq!(find(m.pids[0]).map(|s| s.name), Some(m.name));
+        }
+    }
+
+    #[test]
+    fn saved_out_of_range_stage_never_reaches_the_driver() {
+        let m = MICE
+            .iter()
+            .find(|m| {
+                controls(m, &SettingsMap::new())
+                    .iter()
+                    .any(|c| c.key == SettingKey::DpiStageActive)
+            })
+            .unwrap();
+        for bad in [0, 5, 261] {
+            let mut s = SettingsMap::new();
+            merge_setting(&mut s, SettingKey::DpiStageActive, SettingValue::Int(bad));
+            let c = controls(m, &s);
+            crate::drivers::sanitize_saved(&mut s, &c);
+            assert_eq!(get_setting(&s, SettingKey::DpiStageActive), None, "{bad}");
         }
     }
 

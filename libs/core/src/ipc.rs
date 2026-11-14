@@ -94,12 +94,16 @@ pub struct IpcEvent {
 }
 
 impl IpcResponse {
+    /// A result that cannot be serialised is an error, never `ok` with no result.
     pub fn ok(id: serde_json::Value, result: impl Serialize) -> Self {
-        Self {
-            id,
-            ok: true,
-            result: Some(serde_json::to_value(result).unwrap_or(serde_json::Value::Null)),
-            error: None,
+        match serde_json::to_value(result) {
+            Ok(result) => Self {
+                id,
+                ok: true,
+                result: Some(result),
+                error: None,
+            },
+            Err(e) => Self::err(id, "io", format!("the result could not be serialised: {e}")),
         }
     }
 
@@ -507,3 +511,17 @@ impl Default for AppSettings {
 // Re-export convenience for handlers
 pub type FullState = HubState;
 pub type Snap = DeviceSnapshot;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unserialisable_result_is_an_error() {
+        let bad: std::collections::HashMap<(u8, u8), u8> = [((1, 2), 3)].into();
+        let resp = IpcResponse::ok(serde_json::json!(7), bad);
+        assert!(!resp.ok && resp.result.is_none());
+        assert_eq!(resp.error.unwrap().code, "io");
+        assert!(IpcResponse::ok(serde_json::json!(7), 1).ok);
+    }
+}

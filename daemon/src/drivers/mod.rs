@@ -28,12 +28,13 @@ pub mod wooting;
 use crate::hid::HidDeviceInfo;
 use anyhow::{bail, Result};
 use hako_audio::AudioService;
-use hako_core::catalog::{SettingKey, SettingValue, SettingsMap};
+use hako_core::catalog::{ControlKind, SettingKey, SettingMeta, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
 use hako_core::protocol::AdapterEvent;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+use tracing::warn;
 
 pub type EventTx = broadcast::Sender<AdapterEvent>;
 
@@ -126,19 +127,33 @@ const FALLBACK_VENDORS: &[(u16, &str)] = &[(0x046d, "Logitech HID++ devices not 
 
 /// The model for an unlisted VID:PID whose nodes a probe accepts. Created
 /// once per VID:PID and leaked, so the hub treats it like a table entry.
-/// ponytail: one leaked `Model` per distinct unknown device ever seen.
+/// Only the generic probe's answer is not final: a device seen mid-enumeration
+/// (its specific interface or report descriptor not there yet) is probed
+/// again on every call, and gets the specific model once one accepts it.
+/// ponytail: up to two leaked `Model`s per distinct unknown device ever seen.
 pub fn fallback_model(nodes: &[&HidDeviceInfo]) -> Option<&'static Model> {
-    static SEEN: Mutex<Vec<&'static Model>> = Mutex::new(Vec::new());
+    // (model, accepted by the generic probe only)
+    static SEEN: Mutex<Vec<(&'static Model, bool)>> = Mutex::new(Vec::new());
     let first = nodes.first()?;
     let (vid, pid) = (first.vendor_id, first.product_id);
     let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(m) = seen
+    let cached = seen
         .iter()
-        .find(|m| m.vendor_id == vid && m.product_ids == [pid])
-    {
-        return Some(m);
+        .position(|(m, _)| m.vendor_id == vid && m.product_ids == [pid]);
+    if let Some(i) = cached.filter(|&i| !seen[i].1) {
+        return Some(seen[i].0);
     }
-    let fb = FALLBACKS.iter().find_map(|probe| probe(nodes))?;
+    let Some((n, fb)) = FALLBACKS
+        .iter()
+        .enumerate()
+        .find_map(|(n, probe)| probe(nodes).map(|fb| (n, fb)))
+    else {
+        return cached.map(|i| seen[i].0);
+    };
+    let generic = n == FALLBACKS.len() - 1;
+    if let Some(i) = cached.filter(|_| generic) {
+        return Some(seen[i].0);
+    }
     let model: &'static Model = Box::leak(Box::new(Model {
         vendor_id: vid,
         product_ids: Box::leak(Box::new([pid])),
@@ -148,7 +163,10 @@ pub fn fallback_model(nodes: &[&HidDeviceInfo]) -> Option<&'static Model> {
         multi: false,
         open: fb.open,
     }));
-    seen.push(model);
+    match cached {
+        Some(i) => seen[i] = (model, generic),
+        None => seen.push((model, generic)),
+    }
     Some(model)
 }
 
@@ -351,6 +369,36 @@ pub trait DeviceAdapter: Send {
     }
 }
 
+/// Make values loaded from a device file safe to send before the first write:
+/// an invalid slider value becomes the nearest valid one, any other invalid
+/// value is dropped (the driver's default or the device's own value applies).
+/// Read-only and blocked controls are left alone. Call it once `controls` is
+/// known and before anything from `settings` reaches the hardware.
+pub fn sanitize_saved(settings: &mut SettingsMap, controls: &[SettingMeta]) {
+    for meta in controls {
+        if meta.read_only || meta.kind == ControlKind::ReadOnly || meta.blocked.is_some() {
+            continue;
+        }
+        let key = meta.key.as_str();
+        let Some(value) = settings.get(key) else {
+            continue;
+        };
+        if meta.validate(value).is_ok() {
+            continue;
+        }
+        match meta.nearest_valid(value) {
+            Some(fixed) => {
+                warn!("saved {key} {value:?} is invalid; using {fixed:?}");
+                settings.insert(key.to_string(), fixed);
+            }
+            None => {
+                warn!("saved {key} {value:?} is invalid; ignoring it");
+                settings.remove(key);
+            }
+        }
+    }
+}
+
 /// One `set` per value, in order: what `set_many` does by default.
 pub fn set_each<A: DeviceAdapter + ?Sized>(
     a: &mut A,
@@ -464,6 +512,23 @@ impl DeviceAdapter for PlaceholderAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_saved_fixes_or_drops_invalid_values() {
+        let controls = [
+            SettingMeta::slider(SettingKey::MicVolume, "Mic", 0.0, 10.0, 1.0),
+            SettingMeta::toggle(SettingKey::GameMode, "G"),
+            SettingMeta::readonly(SettingKey::Dpi, "D", 0.0, 100.0),
+        ];
+        let mut s = SettingsMap::new();
+        s.insert("mic_volume".into(), SettingValue::Int(266));
+        s.insert("game_mode".into(), SettingValue::Int(3));
+        s.insert("dpi".into(), SettingValue::Int(500));
+        sanitize_saved(&mut s, &controls);
+        assert_eq!(s.get("mic_volume"), Some(&SettingValue::Int(10)));
+        assert_eq!(s.get("game_mode"), None);
+        assert_eq!(s.get("dpi"), Some(&SettingValue::Int(500)));
+    }
 
     #[test]
     fn device_list_file_matches_driver_registry() {

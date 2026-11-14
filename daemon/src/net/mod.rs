@@ -20,17 +20,17 @@ use hako_core::config::ConfigPaths;
 use hako_core::net::{
     identity_path, load_net, peer_id, recv_node, save_identity, send_node, update_net, LinkStats,
     NearbyPeer, NetFile, NetOp, NetState, PairRequest, Peer, PeerState, DEFAULT_JITTER_MS,
-    DEFAULT_PORT, MAX_NET_OPS,
+    DEFAULT_PORT, MAX_NET_OPS, MAX_PEERS,
 };
 use hako_core::protocol::AdapterEvent;
 use hako_core::VERSION;
 use std::collections::{HashMap, HashSet};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
-use std::os::fd::{AsRawFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -40,7 +40,8 @@ use wire::{
 };
 
 const TICK: Duration = Duration::from_secs(1);
-/// Connect, handshake and Hello time limit; also every control write's.
+/// Connect time limit, then the handshake and Hello's together; also every
+/// control write's.
 const HANDSHAKE: Duration = Duration::from_secs(5);
 /// A session with nothing heard for this long is dead.
 const SILENCE: Duration = Duration::from_secs(5);
@@ -49,9 +50,16 @@ const PENDING: Duration = Duration::from_secs(60);
 /// A denied key is refused for this long.
 const DENIED: Duration = Duration::from_secs(60);
 const MAX_PENDING: usize = 4;
-/// Ticks between beacons, between reconnect attempts.
+/// Incoming connections still in their handshake.
+const MAX_HANDSHAKES: usize = 8;
+/// Machines kept from beacons (the one heard longest ago goes).
+const MAX_NEARBY: usize = 64;
+/// Ticks between beacons.
 const BEACON_TICKS: u64 = 2;
-const DIAL_TICKS: u64 = 3;
+/// Reconnect attempts to a paired machine are this far apart, doubling
+/// after each one up to `MAX_REDIAL` until it is connected again.
+const REDIAL: Duration = Duration::from_secs(3);
+const MAX_REDIAL: Duration = Duration::from_secs(300);
 /// Blocking receives wake this often to see whether to stop.
 const RECV_WAIT: Duration = Duration::from_millis(200);
 
@@ -108,6 +116,35 @@ impl Session {
         sent
     }
 
+    /// Without waiting (pings, goodbyes): skipped while another write is in
+    /// progress, and a frame the socket cannot take at once ends the
+    /// session (its peer stopped reading). Sent?
+    fn try_send(&self, msg: &Control) -> bool {
+        let writer = match self.writer.try_lock() {
+            Ok(writer) => writer,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        let Ok(frame) = self.cipher.seal_control(msg) else {
+            return false;
+        };
+        // SAFETY: `frame` holds `frame.len()` bytes and `writer` keeps the
+        // socket open.
+        let n = unsafe {
+            libc::send(
+                writer.as_raw_fd(),
+                frame.as_ptr().cast(),
+                frame.len(),
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        let sent = usize::try_from(n).is_ok_and(|n| n == frame.len());
+        if !sent {
+            self.shutdown();
+        }
+        sent
+    }
+
     fn shutdown(&self) {
         let _ = self.sock.shutdown(Shutdown::Both);
     }
@@ -134,6 +171,33 @@ struct Entry {
     session: Arc<Session>,
     stage: Stage,
     since: Instant,
+    /// Live, and its key was pinned by this session's pairing: unpinned
+    /// again if the other side answers `Denied` (it could not keep it).
+    fresh: bool,
+}
+
+/// Reconnects to a paired machine since it was last connected.
+struct Redial {
+    attempts: u32,
+    next: Instant,
+    /// Shown on its row: it declined, or another machine answered.
+    problem: Option<String>,
+}
+
+/// Why a dial failed.
+enum DialError {
+    /// The machine answered `Denied`.
+    Declined(String),
+    /// Another key answered than the one wanted.
+    WrongKey(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for DialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Declined(e) | Self::WrongKey(e) | Self::Failed(e)) = self;
+        f.write_str(e)
+    }
 }
 
 /// A live session's audio: its keys and its nodes (`None`: no audio, tests).
@@ -150,7 +214,7 @@ struct Live {
     udp: Arc<UdpSocket>,
     beacons: Option<Arc<UdpSocket>>,
     /// The accept thread's listener (shut down to wake it).
-    listener: RawFd,
+    listener: Arc<TcpListener>,
     /// Dropped: the tick thread ends.
     tick: mpsc::Sender<()>,
     threads: Vec<JoinHandle<()>>,
@@ -172,6 +236,8 @@ struct Inner {
     denied: HashMap<String, Instant>,
     /// Reconnects in flight.
     dialing: HashSet<String>,
+    /// Paired machines being reconnected, by key.
+    redial: HashMap<String, Redial>,
     /// Refreshed by the tick (1 Hz).
     stats: HashMap<String, LinkStats>,
 }
@@ -185,7 +251,7 @@ struct Shared {
     inner: Mutex<Inner>,
     /// Audio routes by source address. Lock order: `inner`, then `links`.
     links: Mutex<HashMap<SocketAddr, Arc<Link>>>,
-    /// One `PatchNet` at a time.
+    /// One `PatchNet` op at a time (a `Pair`'s dial runs outside it).
     patching: Mutex<()>,
     /// The last `NetUpdated` sent: events go out on change only.
     sent: Mutex<Option<NetState>>,
@@ -206,20 +272,22 @@ impl NetService {
         audio: Option<NetAudio>,
     ) -> Self {
         let mut inner = Inner::default();
+        let mut problems = Vec::new();
         match load_net(&paths) {
             Ok(file) => inner.file = file,
             Err(e) => {
                 warn!("net.toml: {e:#}");
-                inner.problem = Some(format!("{e:#}"));
+                problems.push(format!("{e:#}"));
             }
         }
         match load_identity(&paths) {
             Ok(identity) => inner.identity = identity,
             Err(e) => {
                 warn!("{e:#}");
-                inner.problem = Some(format!("{e:#}"));
+                problems.push(format!("{e:#}"));
             }
         }
+        inner.problem = (!problems.is_empty()).then(|| problems.join("; "));
         let on = inner.file.enabled;
         let shared = Arc::new(Shared {
             paths,
@@ -244,15 +312,18 @@ impl NetService {
 
     /// Apply `ops` in order, stopping at the first failure. A `Pair` waits
     /// for the handshake (its request is in the returned state; `Accepted`
-    /// arrives later as `NetUpdated`). Blocking.
+    /// arrives later as `NetUpdated`), without holding up other patches.
+    /// Blocking.
     pub fn patch(&self, ops: &[NetOp]) -> Result<NetState, PatchError> {
         if ops.len() > MAX_NET_OPS {
             return Err(PatchError::Invalid(format!(
                 "at most {MAX_NET_OPS} ops per patch"
             )));
         }
-        let _one = lock(&self.shared.patching);
-        let done = ops.iter().try_for_each(|op| self.shared.apply(op));
+        let done = ops.iter().try_for_each(|op| {
+            let _one = (!matches!(op, NetOp::Pair { .. })).then(|| lock(&self.shared.patching));
+            self.shared.apply(op)
+        });
         self.shared.publish();
         done.map(|()| self.shared.state())
     }
@@ -286,7 +357,7 @@ impl Shared {
                     return Err(PatchError::Invalid(format!("already connected to {name}")));
                 }
                 self.dial(addr, true, want.as_deref())
-                    .map_err(PatchError::Invalid)
+                    .map_err(|e| PatchError::Invalid(e.to_string()))
             }
             NetOp::Respond { id, accept } => self.respond(id, *accept),
             _ => {
@@ -295,7 +366,14 @@ impl Shared {
                     NetOp::SetEnabled { on: true } => self.up(),
                     NetOp::SetEnabled { on: false } => {
                         self.down();
-                        lock(&self.inner).problem = None;
+                        // A key file that still cannot be read stays a problem.
+                        let mut inner = lock(&self.inner);
+                        inner.problem = inner
+                            .identity
+                            .is_none()
+                            .then(|| load_identity(&self.paths).err())
+                            .flatten()
+                            .map(|e| format!("identity key: {e:#}"));
                     }
                     NetOp::Forget { id } => {
                         let found = lock(&self.inner)
@@ -328,7 +406,15 @@ impl Shared {
         &self,
         change: impl FnOnce(&mut NetFile) -> Result<(), String>,
     ) -> Result<(), PatchError> {
-        let mut inner = lock(&self.inner);
+        self.save(&mut lock(&self.inner), change)
+    }
+
+    /// `edit` under a lock already held.
+    fn save(
+        &self,
+        inner: &mut Inner,
+        change: impl FnOnce(&mut NetFile) -> Result<(), String>,
+    ) -> Result<(), PatchError> {
         let mut invalid = None;
         let saved = update_net(&self.paths, |f| {
             change(f).map_err(|e| {
@@ -400,10 +486,10 @@ impl Shared {
         });
         let stop = Arc::new(AtomicBool::new(false));
         let (tick, ticks) = mpsc::channel();
-        let fd = listener.as_raw_fd();
+        let listener = Arc::new(listener);
         let mut threads = Vec::new();
-        let (me, flag) = (self.clone(), stop.clone());
-        threads.extend(spawn("hako-net-accept", move || me.accept(listener, &flag)));
+        let (me, flag, sock) = (self.clone(), stop.clone(), listener.clone());
+        threads.extend(spawn("hako-net-accept", move || me.accept(&sock, &flag)));
         let (me, flag, sock) = (self.clone(), stop.clone(), udp.clone());
         threads.extend(spawn("hako-net-audio", move || me.audio_rx(&sock, &flag)));
         if let Some(sock) = beacons.clone() {
@@ -414,12 +500,15 @@ impl Shared {
         }
         let me = self.clone();
         threads.extend(spawn("hako-net-tick", move || me.ticks(&ticks)));
+        if threads.len() < 3 + usize::from(beacons.is_some()) {
+            inner.problem = Some("could not start every network thread (see the log)".into());
+        }
         inner.live = Some(Live {
             stop,
             port,
             udp,
             beacons,
-            listener: fd,
+            listener,
             tick,
             threads,
         });
@@ -432,9 +521,9 @@ impl Shared {
         };
         live.stop.store(true, Ordering::Relaxed);
         drop(live.tick);
-        // SAFETY: the accept thread owns the listener until it is joined
-        // below; shutdown only wakes its `accept`.
-        unsafe { libc::shutdown(live.listener, libc::SHUT_RDWR) };
+        // SAFETY: `live.listener` keeps the socket open; shutdown only wakes
+        // the accept thread's `accept`.
+        unsafe { libc::shutdown(live.listener.as_raw_fd(), libc::SHUT_RDWR) };
         let sessions: Vec<_> = lock(&self.inner)
             .sessions
             .values()
@@ -449,11 +538,13 @@ impl Shared {
         let mut inner = lock(&self.inner);
         inner.nearby.clear();
         inner.stats.clear();
+        inner.redial.clear();
         drop(inner);
         self.publish();
     }
 
-    fn accept(self: &Arc<Self>, listener: TcpListener, stop: &Arc<AtomicBool>) {
+    fn accept(self: &Arc<Self>, listener: &TcpListener, stop: &Arc<AtomicBool>) {
+        let handshakes = Arc::new(AtomicUsize::new(0));
         for conn in listener.incoming() {
             if stop.load(Ordering::Relaxed) {
                 return;
@@ -466,12 +557,19 @@ impl Shared {
                     continue;
                 }
             };
+            // One thread per connection; past `MAX_HANDSHAKES` still in
+            // their handshake, new ones are dropped.
+            let Some(slot) = Slot::take(&handshakes) else {
+                debug!(
+                    "net: incoming {:?}: too many handshakes",
+                    stream.peer_addr()
+                );
+                continue;
+            };
             let (me, stop) = (self.clone(), stop.clone());
-            // ponytail: one thread per incoming handshake, unbounded (LAN
-            // flooding is out of scope); a cap if that ever matters.
             spawn("hako-net-in", move || {
                 let from = stream.peer_addr();
-                if let Err(e) = me.answer(stream, &stop) {
+                if let Err(e) = me.answer(stream, &stop, slot) {
                     debug!("net: incoming {from:?}: {e:#}");
                 }
             });
@@ -480,8 +578,13 @@ impl Shared {
 
     /// The responder: handshake, Hello, then known keys go live, unknown
     /// ones that ask to pair wait for Accept / Deny. Reads the session
-    /// until it ends.
-    fn answer(self: &Arc<Self>, mut stream: TcpStream, stop: &Arc<AtomicBool>) -> Result<()> {
+    /// until it ends (`slot` is given back once it is set up).
+    fn answer(
+        self: &Arc<Self>,
+        stream: TcpStream,
+        stop: &Arc<AtomicBool>,
+        slot: Slot,
+    ) -> Result<()> {
         let (private, own, hello) = {
             let inner = lock(&self.inner);
             let (Some(live), Some(identity)) = (&inner.live, &inner.identity) else {
@@ -494,11 +597,12 @@ impl Shared {
             )
         };
         prepare(&stream)?;
-        let hs = handshake(&mut stream, &private, false)?;
+        let mut timed = Deadline::new(&stream);
+        let hs = handshake(&mut timed, &private, false)?;
         let mut last = 0;
         let Control::Hello {
             name, port, pair, ..
-        } = read_control(&mut stream, &hs.cipher, &mut last)?
+        } = read_control(&mut timed, &hs.cipher, &mut last)?
         else {
             bail!("no Hello");
         };
@@ -527,7 +631,7 @@ impl Shared {
         };
         let setup = s.send(&hello).and_then(|()| {
             if stage == Stage::Live {
-                self.go_live(&s).map_err(|e| anyhow!(message(e)))?;
+                self.go_live(&s, false).map_err(|e| anyhow!(message(e)))?;
                 s.send(&Control::Accepted)?;
             }
             Ok(())
@@ -536,6 +640,7 @@ impl Shared {
             self.close(&s, Some(&Control::Bye));
             return Err(e);
         }
+        drop(slot);
         self.publish();
         self.read_loop(&s, stream, last);
         Ok(())
@@ -549,11 +654,12 @@ impl Shared {
         addr: SocketAddr,
         pair: bool,
         want: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), DialError> {
+        use DialError::{Declined, Failed, WrongKey};
         let (private, own, stop, hello) = {
             let inner = lock(&self.inner);
             let (Some(live), Some(identity)) = (&inner.live, &inner.identity) else {
-                return Err("Network is off".into());
+                return Err(Failed("Network is off".into()));
             };
             (
                 identity.private.clone(),
@@ -562,30 +668,40 @@ impl Shared {
                 hello(&inner.file, live.port, pair),
             )
         };
-        let failed = |e: anyhow::Error| format!("{addr}: {e:#}");
-        let mut stream =
-            TcpStream::connect_timeout(&addr, HANDSHAKE).map_err(|e| format!("{addr}: {e}"))?;
-        prepare(&stream).map_err(|e| format!("{addr}: {e}"))?;
-        let hs = handshake(&mut stream, &private, true).map_err(failed)?;
+        let failed = |e: anyhow::Error| Failed(format!("{addr}: {e:#}"));
+        let stream = TcpStream::connect_timeout(&addr, HANDSHAKE)
+            .map_err(|e| Failed(format!("{addr}: {e}")))?;
+        prepare(&stream).map_err(|e| Failed(format!("{addr}: {e}")))?;
+        let mut timed = Deadline::new(&stream);
+        let hs = handshake(&mut timed, &private, true).map_err(failed)?;
         if hs.key == own {
-            return Err(format!("{addr} is this machine"));
+            return Err(Failed(format!("{addr} is this machine")));
         }
         if want.is_some_and(|key| key != hs.key) {
-            return Err(format!(
+            return Err(WrongKey(format!(
                 "{addr} is not the machine that announced itself there"
-            ));
+            )));
+        }
+        if pair {
+            let inner = lock(&self.inner);
+            let peers = &inner.file.peers;
+            if peers.len() >= MAX_PEERS && !peers.iter().any(|p| p.key == hs.key) {
+                return Err(Failed(format!(
+                    "at most {MAX_PEERS} paired peers: forget one first"
+                )));
+            }
         }
         let mut last = 0;
         let reply = hs
             .cipher
             .seal_control(&hello)
-            .and_then(|frame| Ok(stream.write_all(&frame)?))
-            .and_then(|()| read_control(&mut stream, &hs.cipher, &mut last))
+            .and_then(|frame| Ok(timed.write_all(&frame)?))
+            .and_then(|()| read_control(&mut timed, &hs.cipher, &mut last))
             .map_err(failed)?;
         let (name, port) = match reply {
             Control::Hello { name, port, .. } => (name, port),
-            Control::Denied => return Err(format!("{addr} declined")),
-            _ => return Err(format!("{addr} closed the connection")),
+            Control::Denied => return Err(Declined(format!("{addr} declined"))),
+            _ => return Err(Failed(format!("{addr} closed the connection"))),
         };
         let s = Arc::new(Session::new(&stream, hs, &name, port).map_err(failed)?);
         let registered = register(
@@ -595,8 +711,8 @@ impl Shared {
             &stop,
         );
         if let Err(e) = registered {
-            let _ = s.send(&Control::Bye);
-            return Err(e);
+            s.try_send(&Control::Bye);
+            return Err(Failed(e));
         }
         self.publish();
         let me = self.clone();
@@ -621,8 +737,15 @@ impl Shared {
         };
         match (stage, accept) {
             (Stage::Incoming, true) => {
-                self.go_live(&s)?;
-                let _ = s.send(&Control::Accepted);
+                let fresh = self.go_live(&s, true)?;
+                if let Err(e) = s.send(&Control::Accepted) {
+                    // It never learns it was accepted: not paired here either.
+                    self.close(&s, None);
+                    if fresh {
+                        self.unpin(&s);
+                    }
+                    return Err(PatchError::Invalid(format!("{}: {e:#}", s.name)));
+                }
             }
             (Stage::Incoming, false) => {
                 lock(&self.inner)
@@ -641,27 +764,83 @@ impl Shared {
         Ok(())
     }
 
-    /// Pin `s`'s key (new, or renamed), then open its nodes and audio route.
-    fn go_live(self: &Arc<Self>, s: &Arc<Session>) -> Result<(), PatchError> {
+    /// Pin `s`'s key (renamed: saved), then open its nodes and audio route.
+    /// `new`: the user paired, so a key not pinned yet is pinned (`true`
+    /// returned: fresh); otherwise only a key still pinned goes live (a
+    /// reconnect in flight never undoes a Forget). Only a session still
+    /// registered is pinned, and on failure no fresh pin is left behind.
+    fn go_live(self: &Arc<Self>, s: &Arc<Session>, new: bool) -> Result<bool, PatchError> {
         let gone = || PatchError::Invalid(format!("{} disconnected", s.name));
-        let pinned = lock(&self.inner)
-            .file
-            .peers
-            .iter()
-            .any(|p| p.key == s.key && p.name == s.name);
-        if !pinned {
-            self.edit(|f| {
-                f.trust(Peer {
-                    id: s.id.clone(),
-                    name: s.name.clone(),
-                    key: s.key.clone(),
-                    jitter_ms: DEFAULT_JITTER_MS,
-                })
-            })?;
-        }
+        let fresh = {
+            let mut inner = lock(&self.inner);
+            let current = inner
+                .sessions
+                .get(&s.key)
+                .is_some_and(|e| Arc::ptr_eq(&e.session, s));
+            if !current {
+                return Err(gone());
+            }
+            let known = inner.file.peers.iter().find(|p| p.key == s.key);
+            if known.is_none() && !new {
+                return Err(PatchError::Invalid(format!(
+                    "{} is no longer paired",
+                    s.name
+                )));
+            }
+            let fresh = known.is_none();
+            if known.is_none_or(|p| p.name != s.name) {
+                self.save(&mut inner, |f| {
+                    f.trust(Peer {
+                        id: s.id.clone(),
+                        name: s.name.clone(),
+                        key: s.key.clone(),
+                        jitter_ms: DEFAULT_JITTER_MS,
+                    })
+                })?;
+            }
+            fresh
+        };
+        let link = match self.open_link(s) {
+            Ok(link) => link,
+            Err(e) => {
+                if fresh {
+                    self.unpin(s);
+                }
+                return Err(e);
+            }
+        };
+        let mut inner = lock(&self.inner);
+        let Some(entry) = inner
+            .sessions
+            .get_mut(&s.key)
+            .filter(|e| Arc::ptr_eq(&e.session, s))
+        else {
+            drop(inner);
+            drop(link);
+            if fresh {
+                self.unpin(s);
+            }
+            return Err(gone());
+        };
+        entry.stage = Stage::Live;
+        entry.fresh = fresh;
+        inner.seen_at.insert(s.key.clone(), s.addr);
+        inner.redial.remove(&s.key);
+        let old = lock(&self.links).insert(s.addr, link);
+        drop(inner);
+        drop(old);
+        self.publish();
+        Ok(fresh)
+    }
+
+    /// `s`'s nodes and audio route.
+    fn open_link(&self, s: &Session) -> Result<Arc<Link>, PatchError> {
         let (jitter, udp) = {
             let inner = lock(&self.inner);
-            let live = inner.live.as_ref().ok_or_else(gone)?;
+            let live = inner
+                .live
+                .as_ref()
+                .ok_or_else(|| PatchError::Invalid("Network was turned off".into()))?;
             let jitter = inner
                 .file
                 .peers
@@ -670,36 +849,41 @@ impl Shared {
                 .map_or(DEFAULT_JITTER_MS, |p| p.jitter_ms);
             (jitter, live.udp.clone())
         };
-        let port = self.audio.as_ref().map(|audio| {
-            lock(audio).open(
-                &send_node(&s.id),
-                &recv_node(&s.id),
-                &s.name,
-                jitter,
-                send_fn(s.cipher.clone(), udp, s.addr),
-            )
-        });
-        let link = Arc::new(Link {
+        let port = match &self.audio {
+            Some(audio) => Some(
+                lock(audio)
+                    .open(
+                        &send_node(&s.id),
+                        &recv_node(&s.id),
+                        &s.name,
+                        jitter,
+                        send_fn(s.cipher.clone(), udp, s.addr),
+                    )
+                    .map_err(|e| PatchError::Invalid(format!("{}: {e}", s.name)))?,
+            ),
+            None => None,
+        };
+        Ok(Arc::new(Link {
             key: s.key.clone(),
             cipher: s.cipher.clone(),
             port,
+        }))
+    }
+
+    /// Undo the pin `s`'s pairing made: the other side did not complete it.
+    fn unpin(&self, s: &Session) {
+        let removed = self.edit(|f| {
+            f.peers.retain(|p| p.key != s.key);
+            Ok(())
         });
-        let mut inner = lock(&self.inner);
-        let Some(entry) = inner
-            .sessions
-            .get_mut(&s.key)
-            .filter(|e| Arc::ptr_eq(&e.session, s))
-        else {
-            drop(inner);
-            return Err(gone());
-        };
-        entry.stage = Stage::Live;
-        inner.seen_at.insert(s.key.clone(), s.addr);
-        let old = lock(&self.links).insert(s.addr, link);
-        drop(inner);
-        drop(old);
-        self.publish();
-        Ok(())
+        if let Err(e) = removed {
+            let e = message(e);
+            warn!("net: {} stays paired here: {e}", s.name);
+            lock(&self.inner).problem = Some(format!(
+                "{} did not complete the pairing but stays paired here: {e}",
+                s.name
+            ));
+        }
     }
 
     /// Read `s`'s control frames until it ends, then close it.
@@ -715,17 +899,40 @@ impl Shared {
                     *lock(&s.rtt_ms) = s.clock().saturating_sub(t) as f32 / 1000.0;
                 }
                 Control::Accepted => {
-                    let outgoing = lock(&self.inner).sessions.get(&s.key).is_some_and(|e| {
-                        Arc::ptr_eq(&e.session, s) && matches!(e.stage, Stage::Outgoing { .. })
-                    });
-                    if outgoing {
-                        if let Err(e) = self.go_live(s) {
-                            warn!("net: {}: {}", s.name, message(e));
-                            break;
+                    let shown = lock(&self.inner)
+                        .sessions
+                        .get(&s.key)
+                        .filter(|e| Arc::ptr_eq(&e.session, s))
+                        .and_then(|e| match e.stage {
+                            Stage::Outgoing { shown } => Some(shown),
+                            _ => None,
+                        });
+                    if let Some(shown) = shown {
+                        if let Err(e) = self.go_live(s, shown) {
+                            let e = message(e);
+                            warn!("net: {}: {e}", s.name);
+                            if shown {
+                                lock(&self.inner).problem =
+                                    Some(format!("pairing with {}: {e}", s.name));
+                            }
+                            // The other side unpins what it just pinned.
+                            self.close(s, Some(&Control::Denied));
+                            return;
                         }
                     }
                 }
-                Control::Denied | Control::Bye => break,
+                Control::Denied => {
+                    let fresh = lock(&self.inner)
+                        .sessions
+                        .get(&s.key)
+                        .is_some_and(|e| Arc::ptr_eq(&e.session, s) && e.fresh);
+                    if fresh {
+                        warn!("net: {} could not complete the pairing", s.name);
+                        self.unpin(s);
+                    }
+                    break;
+                }
+                Control::Bye => break,
                 Control::Hello { .. } => {}
             }
         }
@@ -735,7 +942,7 @@ impl Shared {
     /// Tell the peer (`msg`), disconnect and drop the session.
     fn close(&self, s: &Arc<Session>, msg: Option<&Control>) {
         if let Some(msg) = msg {
-            let _ = s.send(msg);
+            s.try_send(msg);
         }
         s.shutdown();
         let link = {
@@ -800,6 +1007,20 @@ impl Shared {
             .nearby
             .get(&beacon.key)
             .is_none_or(|s| s.beacon != beacon || s.addr != addr);
+        if changed {
+            // Back, or moved: a paired machine is dialled again at once.
+            inner.redial.remove(&beacon.key);
+        }
+        if inner.nearby.len() >= MAX_NEARBY && !inner.nearby.contains_key(&beacon.key) {
+            let oldest = inner
+                .nearby
+                .iter()
+                .min_by_key(|(_, s)| s.at)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                inner.nearby.remove(&key);
+            }
+        }
         inner.nearby.insert(
             beacon.key.clone(),
             Seen {
@@ -808,10 +1029,7 @@ impl Shared {
                 at: Instant::now(),
             },
         );
-        drop(inner);
-        if changed {
-            self.publish();
-        }
+        // The tick publishes it (1 Hz, however many beacons arrive).
     }
 
     fn ticks(self: &Arc<Self>, stop: &mpsc::Receiver<()>) {
@@ -861,11 +1079,10 @@ impl Shared {
                     (link.key.clone(), stats)
                 })
                 .collect();
-            let dials = if n.is_multiple_of(DIAL_TICKS) {
-                reconnects(inner)
-            } else {
-                Vec::new()
-            };
+            inner
+                .redial
+                .retain(|key, _| inner.file.peers.iter().any(|p| &p.key == key));
+            let dials = reconnects(inner, now);
             let beacon = match (&inner.live, &inner.identity, self.discovery) {
                 (Some(live), Some(identity), Some(port)) if n.is_multiple_of(BEACON_TICKS) => {
                     live.beacons.clone().map(|sock| {
@@ -886,16 +1103,18 @@ impl Shared {
             self.close(s, Some(&Control::Bye));
         }
         for s in sessions {
-            let _ = s.send(&Control::Ping { t: s.clock() });
+            s.try_send(&Control::Ping { t: s.clock() });
         }
-        for (key, addr) in dials {
+        for (key, addrs) in dials {
             let me = self.clone();
-            spawn("hako-net-dial", move || {
-                if let Err(e) = me.dial(addr, false, Some(&key)) {
-                    debug!("net: reconnect: {e}");
-                }
+            let dialing = key.clone();
+            let spawned = spawn("hako-net-dial", move || {
+                me.redial(&key, &addrs);
                 lock(&me.inner).dialing.remove(&key);
             });
+            if spawned.is_none() {
+                lock(&self.inner).dialing.remove(&dialing);
+            }
         }
         if let Some((sock, bytes, to)) = beacon {
             if let Err(e) = sock.send_to(&bytes, to) {
@@ -903,6 +1122,50 @@ impl Shared {
             }
         }
         self.publish();
+    }
+
+    /// Reconnect to paired `key` at `addrs` in order (its beacon's address,
+    /// then where it was last connected); the first that answers wins. A
+    /// decline or another machine answering is shown on its row; the first
+    /// failure since it was connected is a warning, later ones are not.
+    fn redial(self: &Arc<Self>, key: &str, addrs: &[SocketAddr]) {
+        let mut failed: Option<DialError> = None;
+        for &addr in addrs {
+            match self.dial(addr, false, Some(key)) {
+                Ok(()) => {
+                    failed = None;
+                    break;
+                }
+                // A decline or impostor says more than a later timeout.
+                Err(e)
+                    if !matches!(
+                        failed,
+                        Some(DialError::Declined(_) | DialError::WrongKey(_))
+                    ) =>
+                {
+                    failed = Some(e);
+                }
+                Err(_) => {}
+            }
+        }
+        let mut inner = lock(&self.inner);
+        let Some(r) = inner.redial.get_mut(key) else {
+            return;
+        };
+        r.problem = match &failed {
+            Some(DialError::Declined(e)) => Some(format!(
+                "{e} the reconnect: it may have unpaired this computer (pair again)"
+            )),
+            Some(DialError::WrongKey(e)) => Some(e.clone()),
+            Some(DialError::Failed(_)) | None => None,
+        };
+        if let Some(e) = failed {
+            if r.attempts == 1 {
+                warn!("net: reconnect: {e} (retrying less and less often)");
+            } else {
+                debug!("net: reconnect: {e}");
+            }
+        }
     }
 
     fn state(&self) -> NetState {
@@ -930,6 +1193,13 @@ impl Shared {
                         .or_else(|| inner.seen_at.get(&p.key).copied())
                         .map(|a| a.to_string()),
                     link: s.map(|_| inner.stats.get(&p.key).copied().unwrap_or_default()),
+                    problem: match s {
+                        Some(s) => lock(&self.links)
+                            .get(&s.addr)
+                            .and_then(|link| link.port.as_ref())
+                            .and_then(NetPort::problem),
+                        None => inner.redial.get(&p.key).and_then(|r| r.problem.clone()),
+                    },
                 }
             })
             .collect();
@@ -1023,14 +1293,17 @@ fn register(
             session: s.clone(),
             stage,
             since: Instant::now(),
+            fresh: false,
         },
     );
     Ok(())
 }
 
-/// Paired machines to dial now: not connected or being dialled, with a
-/// known address, and a higher id than this machine (the lower id dials).
-fn reconnects(inner: &mut Inner) -> Vec<(String, SocketAddr)> {
+/// Paired machines to dial now: not connected or being dialled, due (see
+/// `REDIAL`), with a known address, and a higher id than this machine (the
+/// lower id dials). Addresses in order: the beacon's (it may have moved),
+/// then where it last connected (a beacon proves nothing).
+fn reconnects(inner: &mut Inner, now: Instant) -> Vec<(String, Vec<SocketAddr>)> {
     let Some(own) = inner.identity.as_ref().map(|i| peer_id(&i.public)) else {
         return Vec::new();
     };
@@ -1039,21 +1312,45 @@ fn reconnects(inner: &mut Inner) -> Vec<(String, SocketAddr)> {
         .peers
         .iter()
         .filter(|p| {
-            own < p.id && !inner.sessions.contains_key(&p.key) && !inner.dialing.contains(&p.key)
+            own < p.id
+                && !inner.sessions.contains_key(&p.key)
+                && !inner.dialing.contains(&p.key)
+                && inner.redial.get(&p.key).is_none_or(|r| now >= r.next)
         })
         .filter_map(|p| {
-            let addr = inner
+            let mut addrs: Vec<_> = inner
                 .nearby
                 .get(&p.key)
                 .map(|s| s.addr)
-                .or_else(|| inner.seen_at.get(&p.key).copied())?;
-            Some((p.key.clone(), addr))
+                .into_iter()
+                .collect();
+            if let Some(&at) = inner.seen_at.get(&p.key) {
+                if !addrs.contains(&at) {
+                    addrs.push(at);
+                }
+            }
+            (!addrs.is_empty()).then(|| (p.key.clone(), addrs))
         })
         .collect();
-    inner
-        .dialing
-        .extend(dials.iter().map(|(key, _)| key.clone()));
+    for (key, _) in &dials {
+        inner.dialing.insert(key.clone());
+        let r = inner.redial.entry(key.clone()).or_insert(Redial {
+            attempts: 0,
+            next: now,
+            problem: None,
+        });
+        r.attempts = r.attempts.saturating_add(1);
+        r.next = now + redial_delay(r.attempts);
+    }
     dials
+}
+
+/// The wait after reconnect attempt `n` (1-based): `REDIAL`, doubling, at
+/// most `MAX_REDIAL`.
+fn redial_delay(n: u32) -> Duration {
+    REDIAL
+        .saturating_mul(2u32.saturating_pow(n.saturating_sub(1)))
+        .min(MAX_REDIAL)
 }
 
 /// One UDP packet: dropped before decryption unless its source address
@@ -1161,6 +1458,71 @@ fn prepare(stream: &TcpStream) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(HANDSHAKE))?;
     stream.set_write_timeout(Some(HANDSHAKE))
+}
+
+/// Reads with one time limit for the whole handshake and Hello: a read
+/// timeout alone limits each read, so a peer sending a byte now and then
+/// could hold the connection (and its thread) forever.
+struct Deadline<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl<'a> Deadline<'a> {
+    fn new(stream: &'a TcpStream) -> Self {
+        Self {
+            stream,
+            until: Instant::now() + HANDSHAKE,
+        }
+    }
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                "handshake took too long",
+            ));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        let mut stream = self.stream;
+        stream.read(buf)
+    }
+}
+
+impl Write for Deadline<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut stream = self.stream;
+        stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut stream = self.stream;
+        stream.flush()
+    }
+}
+
+/// One of `MAX_HANDSHAKES` incoming connections in their handshake; given
+/// back when dropped.
+struct Slot(Arc<AtomicUsize>);
+
+impl Slot {
+    fn take(count: &Arc<AtomicUsize>) -> Option<Self> {
+        count
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_HANDSHAKES).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self(count.clone()))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// After a failed receive: timeouts just loop; anything else waits a
@@ -1570,6 +1932,269 @@ mod tests {
         assert!(got(from));
         assert!(!got(from), "replayed");
         assert_eq!(&samples[..4], &block);
+    }
+
+    /// A session to a stand-in peer (keys from a real handshake), not
+    /// registered; keep the listener while it is used.
+    fn session(name: &str) -> (Arc<Session>, TcpListener) {
+        let (hs, _, _, _) = wire::tests::pair();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let s = Session::new(&stream, hs, name, DEFAULT_PORT).unwrap();
+        (Arc::new(s), listener)
+    }
+
+    #[test]
+    fn go_live_pins_only_a_live_session_and_a_reconnect_never_pins() {
+        let (net, paths, _) = machine("golive");
+        turn_on(&net);
+        let (s, _peer) = session("Peer");
+        assert!(net.shared.go_live(&s, true).is_err(), "not registered");
+        assert!(!trusts(&paths, &s.id));
+        let stop = lock(&net.shared.inner).live.as_ref().unwrap().stop.clone();
+        let reconnect = Stage::Outgoing { shown: false };
+        register(&mut lock(&net.shared.inner), &s, reconnect, &stop).unwrap();
+        // A reconnect of a forgotten peer goes nowhere and pins nothing.
+        assert!(net.shared.go_live(&s, false).is_err());
+        assert!(!trusts(&paths, &s.id) && !connected(&net, &s.id));
+        // The user's pairing pins it.
+        assert!(matches!(net.shared.go_live(&s, true), Ok(true)));
+        assert!(trusts(&paths, &s.id) && connected(&net, &s.id));
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_pairing_the_initiator_cannot_save_is_undone_on_both_sides() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes into a read-only directory
+        }
+        let (a, a_paths, _) = machine("half-a");
+        let (b, b_paths, b_port) = machine("half-b");
+        let a_id = turn_on(&a);
+        turn_on(&b);
+        a.patch(&[NetOp::Pair {
+            address: format!("127.0.0.1:{b_port}"),
+        }])
+        .unwrap();
+        let mode = |m| std::fs::Permissions::from_mode(m);
+        std::fs::set_permissions(&a_paths.root, mode(0o500)).unwrap();
+        b.patch(&[NetOp::Respond {
+            id: a_id.clone(),
+            accept: true,
+        }])
+        .unwrap();
+        wait("bravo unpinned alpha", || {
+            !trusts(&b_paths, &a_id) && b.state().peers.is_empty()
+        });
+        wait("alpha shows why", || a.state().problem.is_some());
+        std::fs::set_permissions(&a_paths.root, mode(0o700)).unwrap();
+        assert!(load_net(&a_paths).unwrap().peers.is_empty());
+        done([(a, a_paths), (b, b_paths)]);
+    }
+
+    #[test]
+    fn a_declined_reconnect_is_shown_on_the_peer() {
+        let (a, a_paths, _) = machine("decline-a");
+        let (b, b_paths, b_port) = machine("decline-b");
+        let (a_id, b_id) = (turn_on(&a), turn_on(&b));
+        a.patch(&[NetOp::Pair {
+            address: format!("127.0.0.1:{b_port}"),
+        }])
+        .unwrap();
+        b.patch(&[NetOp::Respond {
+            id: a_id.clone(),
+            accept: true,
+        }])
+        .unwrap();
+        wait("connected", || connected(&a, &b_id) && connected(&b, &a_id));
+        // The higher id forgets the lower one, which then redials.
+        let (low, high, low_id, high_id) = if a_id < b_id {
+            (&a, &b, &a_id, &b_id)
+        } else {
+            (&b, &a, &b_id, &a_id)
+        };
+        high.patch(&[NetOp::Forget { id: low_id.clone() }]).unwrap();
+        wait("declined", || {
+            low.state().peers.iter().any(|p| {
+                &p.id == high_id
+                    && !p.connected
+                    && p.problem.as_deref().is_some_and(|e| e.contains("declined"))
+            })
+        });
+        done([(a, a_paths), (b, b_paths)]);
+    }
+
+    #[test]
+    fn reconnects_back_off_and_fall_back_from_a_beacon_to_the_verified_address() {
+        let key = "ff".repeat(32);
+        let mut inner = Inner {
+            identity: Some(Identity {
+                private: Vec::new(),
+                public: "00".repeat(32),
+            }),
+            ..Inner::default()
+        };
+        inner.file.peers.push(Peer {
+            id: peer_id(&key),
+            name: "Peer".into(),
+            key: key.clone(),
+            jitter_ms: DEFAULT_JITTER_MS,
+        });
+        let beacon: SocketAddr = "10.0.0.9:47821".parse().unwrap();
+        let verified: SocketAddr = "10.0.0.2:47821".parse().unwrap();
+        inner.seen_at.insert(key.clone(), verified);
+        inner.nearby.insert(
+            key.clone(),
+            Seen {
+                beacon: Beacon {
+                    id: peer_id(&key),
+                    name: "Peer".into(),
+                    key: key.clone(),
+                    port: 47821,
+                },
+                addr: beacon,
+                at: Instant::now(),
+            },
+        );
+        let now = Instant::now();
+        assert_eq!(
+            reconnects(&mut inner, now),
+            [(key.clone(), vec![beacon, verified])]
+        );
+        assert!(reconnects(&mut inner, now).is_empty(), "in flight");
+        let mut at = now;
+        let mut gaps = Vec::new();
+        for _ in 0..10 {
+            inner.dialing.clear();
+            let next = inner.redial[&key].next;
+            gaps.push((next - at).as_secs());
+            let early = next - Duration::from_millis(1);
+            assert!(reconnects(&mut inner, early).is_empty());
+            assert_eq!(reconnects(&mut inner, next).len(), 1);
+            at = next;
+        }
+        assert_eq!(gaps, [3, 6, 12, 24, 48, 96, 192, 300, 300, 300]);
+    }
+
+    #[test]
+    fn nearby_machines_are_capped() {
+        let (net, paths, _) = machine("crowd");
+        let from = "10.0.0.2:47820".parse().unwrap();
+        for i in 0..100u32 {
+            let key = format!("{i:064x}");
+            let beacon = Beacon {
+                id: peer_id(&key),
+                name: "Crowd".into(),
+                key,
+                port: 47821,
+            };
+            net.shared.heard(&beacon.encode(), from);
+        }
+        let inner = lock(&net.shared.inner);
+        assert_eq!(inner.nearby.len(), MAX_NEARBY);
+        assert!(inner.nearby.contains_key(&format!("{:064x}", 99)));
+        drop(inner);
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_handshake_has_one_time_limit_however_slowly_bytes_come() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let drip = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            for _ in 0..40 {
+                if peer.write_all(&[0]).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let stream = TcpStream::connect(addr).unwrap();
+        let start = Instant::now();
+        let mut timed = Deadline {
+            stream: &stream,
+            until: start + Duration::from_millis(300),
+        };
+        let read = timed.read_exact(&mut [0u8; 1000]);
+        let kind = read.unwrap_err().kind();
+        assert!(
+            matches!(kind, ErrorKind::TimedOut | ErrorKind::WouldBlock),
+            "{kind:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        drop(stream);
+        drip.join().unwrap();
+    }
+
+    #[test]
+    fn a_silent_pair_target_does_not_hold_up_other_patches() {
+        let (net, paths, _) = machine("silent");
+        turn_on(&net);
+        // Connects, then never says anything.
+        let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = silent.local_addr().unwrap().to_string();
+        std::thread::scope(|scope| {
+            let pair = scope.spawn(|| net.patch(&[NetOp::Pair { address }]));
+            std::thread::sleep(Duration::from_millis(300));
+            let start = Instant::now();
+            net.patch(&[NetOp::SetName {
+                name: "Desk".into(),
+            }])
+            .unwrap();
+            assert!(
+                start.elapsed() < Duration::from_secs(1),
+                "{:?}",
+                start.elapsed()
+            );
+            assert!(pair.join().unwrap().is_err());
+        });
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn pings_and_goodbyes_never_wait_for_a_stuck_write() {
+        let (s, _peer) = session("Peer");
+        let stuck = lock(&s.writer);
+        let start = Instant::now();
+        assert!(!s.try_send(&Control::Ping { t: 1 }));
+        assert!(start.elapsed() < Duration::from_millis(500));
+        drop(stuck);
+        assert!(s.try_send(&Control::Ping { t: 2 }));
+    }
+
+    #[test]
+    fn load_problems_add_up_and_off_keeps_an_unreadable_key() {
+        let (net, paths, _) = machine("unreadable");
+        net.shutdown();
+        std::fs::write(identity_path(&paths), "not a key\n").unwrap();
+        let (events, _) = broadcast::channel(8);
+        let net = NetService::start(paths.clone(), events, None, None);
+        assert!(net.state().problem.is_some());
+        let state = net.patch(&[NetOp::SetEnabled { on: false }]).unwrap();
+        assert!(state
+            .problem
+            .is_some_and(|p| p.contains("net-identity.key")));
+        net.shutdown();
+        std::fs::write(hako_core::net::net_path(&paths), "version = [").unwrap();
+        let (events, _) = broadcast::channel(8);
+        let net = NetService::start(paths.clone(), events, None, None);
+        let problem = net.state().problem.unwrap();
+        assert!(
+            problem.contains("net.toml") && problem.contains("net-identity.key"),
+            "{problem}"
+        );
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
     }
 
     #[test]

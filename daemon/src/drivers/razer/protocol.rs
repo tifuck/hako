@@ -59,7 +59,22 @@ pub fn crc_ok(resp: &[u8; 90]) -> bool {
     resp[2..88].iter().fold(0, |crc, b| crc ^ b) == resp[88]
 }
 
-/// OpenRazer razer_send_payload acceptance: same class/cmd, status busy or ok.
+/// A read: its answer's arguments are data (get commands have bit 7 set).
+fn is_read(req: &[u8; 90]) -> bool {
+    req[7] & 0x80 != 0
+}
+
+/// A read the device answered busy: its arguments are not the answer yet,
+/// so the response is worth reading again.
+pub fn busy_read(req: &[u8; 90], resp: &[u8; 90]) -> bool {
+    is_read(req) && resp[0] == 0x01
+}
+
+/// OpenRazer razer_send_payload acceptance (same class/cmd, status busy or
+/// ok: "some commands respond with 'busy' but succeed"), stricter for reads,
+/// whose arguments are parsed: only ok counts. Like OpenRazer, the reply
+/// checksum is not required (firmware differs; USB already checks the
+/// transfer); only the stage block, written back to flash, checks it.
 pub fn check_response(req: &[u8; 90], resp: &[u8; 90]) -> Result<()> {
     let (class, cmd) = (req[6], req[7]);
     if resp[6] != class || resp[7] != cmd {
@@ -68,6 +83,9 @@ pub fn check_response(req: &[u8; 90], resp: &[u8; 90]) -> Result<()> {
             resp[6],
             resp[7]
         );
+    }
+    if busy_read(req, resp) {
+        bail!("razer device busy class={class:#04x} cmd={cmd:#04x}");
     }
     if !matches!(resp[0], 0x01 | 0x02) {
         bail!(
@@ -586,18 +604,28 @@ mod tests {
 
     #[test]
     fn response_check_accepts_busy_and_ok_only() {
+        // A write: busy counts as done, as in OpenRazer.
+        let w = report(0x1f, set_idle(300));
         let r = report(0x1f, get_battery());
-        let mut resp = r;
-        for (status, ok) in [
-            (0x01, true),
-            (0x02, true),
-            (0x03, false),
-            (0x04, false),
-            (0x05, false),
+        for (status, write_ok, read_ok) in [
+            (0x01, true, false),
+            (0x02, true, true),
+            (0x03, false, false),
+            (0x04, false, false),
+            (0x05, false, false),
         ] {
-            resp[0] = status;
-            assert_eq!(check_response(&r, &resp).is_ok(), ok, "status {status:#x}");
+            for (req, ok) in [(w, write_ok), (r, read_ok)] {
+                let mut resp = req;
+                resp[0] = status;
+                assert_eq!(
+                    check_response(&req, &resp).is_ok(),
+                    ok,
+                    "status {status:#x}"
+                );
+                assert_eq!(busy_read(&req, &resp), status == 0x01 && req == r);
+            }
         }
+        let mut resp = r;
         resp[0] = 0x02;
         resp[7] = 0x84;
         assert!(check_response(&r, &resp).is_err());

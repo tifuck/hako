@@ -53,7 +53,7 @@ pub use models::MODELS;
 
 use crate::drivers::{DeviceAdapter, DriverCtx, Opened};
 use crate::hid::HidrawDevice;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{BatteryState, DeviceId, DeviceKind, DeviceSnapshot};
@@ -421,6 +421,8 @@ impl Peripheral {
             last_battery: None,
             failures: 0,
         };
+        let offered = p.controls();
+        crate::drivers::sanitize_saved(&mut p.settings, &offered);
         // Lighting is volatile: re-apply the saved state on every connect.
         if let Err(e) = p.apply(true) {
             warn!("{}: {e}", p.name);
@@ -549,14 +551,17 @@ impl Peripheral {
         if !with_dpi {
             return Ok(());
         }
-        if let (Some(dpi), Some(_)) = (int(&self.settings, SettingKey::Dpi), self.caps.dpi) {
-            self.backend.dpi(dpi as u16)?;
+        if let (Some(dpi), Some((min, max))) = (int(&self.settings, SettingKey::Dpi), self.caps.dpi)
+        {
+            self.backend
+                .dpi(dpi.clamp(i64::from(min), i64::from(max)) as u16)?;
         }
         if self.caps.tuning {
             if let Some(on) = flag(&self.settings, SettingKey::AngleSnapping) {
                 self.backend.angle_snap(on)?;
             }
             if let Some(level) = int(&self.settings, SettingKey::LiftOffDistance) {
+                let level = level.clamp(nxp::LIFT_MIN.into(), nxp::LIFT_MAX.into());
                 self.backend.lift(level as u8)?;
             }
         }
@@ -755,33 +760,9 @@ impl Peripheral {
         c
     }
 
-    fn persist(&self) -> Result<()> {
-        hako_core::config::save_device_settings(&self.paths, VID, self.settings_pid, &self.settings)
-    }
-}
-
-impl DeviceAdapter for Peripheral {
-    fn id(&self) -> &DeviceId {
-        &self.id
-    }
-
-    fn snapshot(&self) -> DeviceSnapshot {
-        DeviceSnapshot {
-            id: self.id.clone(),
-            kind: self.kind,
-            name: self.name.clone(),
-            connected: self.connected,
-            batteries: self.batteries.clone(),
-            settings: self.settings.clone(),
-            controls: self.controls(),
-            last_error: self.last_error.clone(),
-        }
-    }
-
-    fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
-        let before = self.settings.clone();
-        merge_setting(&mut self.settings, key, value.clone());
-        let result = match key {
+    /// Put `value` for `key` on the device (`self.settings` already holds it).
+    fn write(&mut self, key: SettingKey, value: &SettingValue) -> Result<()> {
+        match key {
             SettingKey::ReportRate => {
                 let hz = value.as_int().unwrap_or(0) as u32;
                 self.backend
@@ -820,11 +801,50 @@ impl DeviceAdapter for Peripheral {
             // Leaving "onboard" takes host mode again, so DPI goes back too.
             SettingKey::Effect => self.apply(true),
             _ => self.apply(false),
-        };
-        if let Err(e) = result {
-            // The device kept its old value; so do the UI and the file.
+        }
+    }
+
+    fn persist(&self) -> Result<()> {
+        hako_core::config::save_device_settings(&self.paths, VID, self.settings_pid, &self.settings)
+    }
+}
+
+impl DeviceAdapter for Peripheral {
+    fn id(&self) -> &DeviceId {
+        &self.id
+    }
+
+    fn snapshot(&self) -> DeviceSnapshot {
+        DeviceSnapshot {
+            id: self.id.clone(),
+            kind: self.kind,
+            name: self.name.clone(),
+            connected: self.connected,
+            batteries: self.batteries.clone(),
+            settings: self.settings.clone(),
+            controls: self.controls(),
+            last_error: self.last_error.clone(),
+        }
+    }
+
+    fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+        let before = self.settings.clone();
+        let old = get_setting(&before, key).cloned();
+        merge_setting(&mut self.settings, key, value.clone());
+        if let Err(mut e) = self.write(key, &value) {
+            // The UI and the file keep the old value. Host mode with its
+            // colour, both DPI axes, the onboard sidetone / sleep properties
+            // are several writes that may stop midway: send the old value
+            // back so the device matches ("onboard" hands back to hardware).
             self.settings = before;
-            self.last_error = Some(e.to_string());
+            if let Some(old) = old {
+                if let Err(re) = self.write(key, &old) {
+                    e = anyhow!(
+                        "{e:#}; restoring the previous value also failed ({re:#}), the device may hold part of the change"
+                    );
+                }
+            }
+            self.last_error = Some(format!("{e:#}"));
             return Err(e);
         }
         self.last_error = None;
@@ -877,7 +897,11 @@ mod tests {
             self.0.lock().unwrap().push(format!("sw {on}"));
             Ok(())
         }
+        /// Refuses [9, 9, 9], like a device that stops answering.
         fn color(&mut self, rgb: [u8; 3]) -> Result<()> {
+            if rgb == [9, 9, 9] {
+                anyhow::bail!("no reply");
+            }
             self.0.lock().unwrap().push(format!("color {rgb:?}"));
             Ok(())
         }
@@ -1011,6 +1035,62 @@ mod tests {
             ]
         );
         assert!(!p.snapshot().connected);
+        let _ = std::fs::remove_dir_all(&p.paths.root);
+    }
+
+    /// Leaving "onboard" switches to host mode before the colour goes out:
+    /// if the colour fails, the device is handed back to its firmware, as
+    /// the rolled-back setting says (no keepalive runs for "onboard").
+    #[test]
+    fn failed_switch_to_host_mode_hands_back() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut p = peripheral(
+            log.clone(),
+            Caps {
+                lighting: true,
+                ..Caps::default()
+            },
+            "handback",
+        );
+        p.set(SettingKey::Effect, SettingValue::Text("onboard".into()))
+            .unwrap();
+        for key in [SettingKey::ColorR, SettingKey::ColorG, SettingKey::ColorB] {
+            p.set(key, SettingValue::Int(9)).unwrap();
+        }
+        log.lock().unwrap().clear();
+        let err = p
+            .set(SettingKey::Effect, SettingValue::Text("static".into()))
+            .unwrap_err();
+        assert!(err.to_string().contains("no reply"), "{err:#}");
+        assert_eq!(*log.lock().unwrap(), ["sw true", "sw false"]);
+        assert!(p.onboard());
+        let _ = std::fs::remove_dir_all(&p.paths.root);
+    }
+
+    /// Saved values out of range are fixed before connect sends them.
+    #[test]
+    fn saved_values_are_sanitized_before_connect() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let dir =
+            std::env::temp_dir().join(format!("hako-corsair-test-sane-{}", std::process::id()));
+        let paths = ConfigPaths {
+            root: dir.clone(),
+            config_toml: dir.join("config.toml"),
+            devices_dir: dir.join("devices"),
+            profiles_dir: dir.join("profiles"),
+            remaps_dir: dir.join("remaps"),
+        };
+        paths.ensure().unwrap();
+        let mut s = SettingsMap::new();
+        s.insert("dpi".into(), SettingValue::Int(70000));
+        hako_core::config::save_device_settings(&paths, VID, 0xffff, &s).unwrap();
+        let p = peripheral(
+            log.clone(),
+            Caps::of(models::spec(0x1b5a).unwrap().family),
+            "sane",
+        );
+        let max = p.caps.dpi.unwrap().1;
+        assert!(log.lock().unwrap().contains(&format!("dpi {max}")));
         let _ = std::fs::remove_dir_all(&p.paths.root);
     }
 

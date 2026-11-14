@@ -10,7 +10,7 @@
 
 use crate::drivers::{DeviceAdapter, DriverCtx, Opened};
 use crate::hid::{find_hidraw, pad64, HidrawDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use hako_audio::AudioService;
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
@@ -22,6 +22,10 @@ use tracing::{debug, info, warn};
 const VID: u16 = 0x1038;
 /// How often a missing ChatMix is retried.
 const CHATMIX_RETRY: Duration = Duration::from_secs(5);
+/// First wait before a failed init sequence is sent again; doubled per
+/// failure up to `INIT_RETRY_MAX`.
+const INIT_RETRY: Duration = Duration::from_secs(5);
+const INIT_RETRY_MAX: Duration = Duration::from_secs(60);
 /// ChatMix target: the analog output, else any Nova Pro sink.
 const CHATMIX_SINKS: &[&str] = &[
     r"alsa_output\.usb-SteelSeries_Arctis_Nova_Pro_Wireless.*analog",
@@ -48,6 +52,11 @@ pub struct SteelSeriesAdapter {
     last_poll: Instant,
     last_chatmix_try: Instant,
     poll_failures: u8,
+    /// Why the last init sequence failed; it is re-sent from `tick` until it
+    /// goes through, and shown until then.
+    init_error: Option<String>,
+    init_failures: u32,
+    last_init_try: Instant,
     audio: Arc<AudioService>,
     /// A dial report arrived since the ChatMix volumes were last pushed.
     mix_dirty: bool,
@@ -75,6 +84,7 @@ impl SteelSeriesAdapter {
             instance,
         };
         let mut settings = hako_core::config::load_device_settings(&paths, VID, pid)?;
+        crate::drivers::sanitize_saved(&mut settings, &controls(pid));
         defaults_into(&mut settings);
         let mut adapter = Self {
             id,
@@ -102,14 +112,14 @@ impl SteelSeriesAdapter {
             last_poll: Instant::now() - Duration::from_secs(10),
             last_chatmix_try: Instant::now(),
             poll_failures: 0,
+            init_error: None,
+            init_failures: 0,
+            last_init_try: Instant::now(),
             audio,
             mix_dirty: false,
             paths,
         };
-        if let Err(e) = adapter.init_device() {
-            warn!("init_device: {e}");
-            adapter.last_error = Some(format!("init: {e}"));
-        }
+        adapter.try_init();
         // A (re)connected headset ends a kill-switch reset.
         adapter.audio.resume_chatmix();
         if let Err(error) = adapter.audio.ensure_chatmix(CHATMIX_SINKS) {
@@ -196,6 +206,26 @@ impl SteelSeriesAdapter {
         // are not wired to the playback path on this device (that EQ is host-side
         // DSP in SteelSeries GG/Sonar), so we don't expose or send them.
         Ok(())
+    }
+
+    /// Send the init sequence; a failure is kept in `init_error` (and
+    /// `last_error`) for `tick` to retry.
+    fn try_init(&mut self) {
+        self.last_init_try = Instant::now();
+        match self.init_device() {
+            Ok(()) => {
+                self.init_failures = 0;
+                if self.init_error.take().is_some() {
+                    self.last_error = None;
+                }
+            }
+            Err(e) => {
+                warn!("init_device: {e}");
+                self.init_failures = self.init_failures.saturating_add(1);
+                self.init_error = Some(format!("init: {e}"));
+                self.last_error = self.init_error.clone();
+            }
+        }
     }
 
     fn poll_status(&mut self) -> Result<()> {
@@ -311,6 +341,13 @@ impl SteelSeriesAdapter {
             settings,
         )
     }
+}
+
+/// Wait before re-sending an init sequence that failed `failures` times.
+fn init_retry_after(failures: u32) -> Duration {
+    INIT_RETRY
+        .saturating_mul(1 << failures.saturating_sub(1).min(8))
+        .min(INIT_RETRY_MAX)
 }
 
 /// `225d` is listed by one source only: its setters stay volatile (they are
@@ -435,42 +472,33 @@ impl DeviceAdapter for SteelSeriesAdapter {
             && get_setting(&proposed, SettingKey::SaveToDevice)
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-        match key {
-            SettingKey::SaveToDevice => self.commit(save)?,
-            SettingKey::MicVolume => {
-                let v = value.as_int().unwrap_or(10) as u8;
-                self.write_cmd(&[0x06, 0x37, v])?;
+        let cmd = match key {
+            // Turning it on saves once; if that fails the mode stays off.
+            SettingKey::SaveToDevice => {
                 self.commit(save)?;
+                None
             }
-            SettingKey::MicSideTone => {
-                let v = value.as_int().unwrap_or(0) as u8;
-                self.write_cmd(&[0x06, 0x39, v])?;
-                self.commit(save)?;
-            }
-            SettingKey::MicLedBrightness => {
-                let v = value.as_int().unwrap_or(10) as u8;
-                self.write_cmd(&[0x06, 0xbf, v])?;
-                self.commit(save)?;
-            }
-            SettingKey::PmShutdown => {
-                let v = value.as_int().unwrap_or(5) as u8;
-                self.write_cmd(&[0x06, 0xc1, v])?;
-                self.commit(save)?;
-            }
+            SettingKey::MicVolume => Some([0x06, 0x37, value.as_int().unwrap_or(10) as u8]),
+            SettingKey::MicSideTone => Some([0x06, 0x39, value.as_int().unwrap_or(0) as u8]),
+            SettingKey::MicLedBrightness => Some([0x06, 0xbf, value.as_int().unwrap_or(10) as u8]),
+            SettingKey::PmShutdown => Some([0x06, 0xc1, value.as_int().unwrap_or(5) as u8]),
             SettingKey::WirelessModeRange => {
-                let v = if value.as_bool().unwrap_or(false) {
-                    0x01
-                } else {
-                    0x00
-                };
-                self.write_cmd(&[0x06, 0xc3, v])?;
-                self.commit(save)?;
+                Some([0x06, 0xc3, u8::from(value.as_bool().unwrap_or(false))])
             }
             _ => bail!("unsupported setting {}", key.as_str()),
-        }
+        };
+        let flash = match cmd {
+            Some(cmd) => {
+                self.write_cmd(&cmd)?;
+                self.commit(save)
+            }
+            None => Ok(()),
+        };
         // The device (or audio graph) already changed: show it even if saving fails.
         self.settings = proposed;
-        self.persist(&self.settings)
+        let file = self.persist(&self.settings);
+        flash.map_err(|e| anyhow!("applied, but not saved to device memory: {e:#}"))?;
+        file
     }
 
     fn tick(&mut self) -> Result<()> {
@@ -484,6 +512,12 @@ impl DeviceAdapter for SteelSeriesAdapter {
         if self.dev.is_some() {
             let _ = self.drain_reports(Duration::ZERO);
         }
+        if self.init_error.is_some()
+            && self.dev.is_some()
+            && self.last_init_try.elapsed() >= init_retry_after(self.init_failures)
+        {
+            self.try_init();
+        }
         if self.last_poll.elapsed() >= Duration::from_secs(5) {
             if let Err(e) = self.poll_status() {
                 self.poll_failures = self.poll_failures.saturating_add(1);
@@ -494,7 +528,8 @@ impl DeviceAdapter for SteelSeriesAdapter {
                 return Err(e);
             } else {
                 self.poll_failures = 0;
-                self.last_error = None;
+                // A failed init stays visible until it is re-sent.
+                self.last_error = self.init_error.clone();
             }
         }
         Ok(())
@@ -523,6 +558,13 @@ mod tests {
         assert_eq!(battery_pct(7), Some(88));
         assert_eq!(battery_pct(8), Some(100));
         assert_eq!(battery_pct(0xff), None);
+    }
+
+    #[test]
+    fn failed_init_is_retried_with_backoff() {
+        let waits: Vec<_> = (1..=6).map(|f| init_retry_after(f).as_secs()).collect();
+        assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
+        assert_eq!(init_retry_after(u32::MAX), INIT_RETRY_MAX);
     }
 
     #[test]

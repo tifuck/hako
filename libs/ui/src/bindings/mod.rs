@@ -236,6 +236,11 @@ fn page(ui: &mut Ui, cx: &mut Cx) {
         .unwrap_or_else(|| Layout::guess(&cx.d.name));
 
     toolbar(ui, cx, (!mouse).then_some(&mut layout), layout_id);
+    // Concerns every key (e.g. no permission to grab the device), so it is
+    // shown whether or not one is selected.
+    if let Some(err) = &cx.remaps.last_error {
+        ui.colored_label(theme::pal().warn, err);
+    }
     ui.add_space(theme::SPACE_SM);
 
     let dropped = if mouse {

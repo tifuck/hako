@@ -41,7 +41,7 @@ mod mouse;
 
 use crate::drivers::{DeviceAdapter, DriverCtx, Model, Opened};
 use crate::hid::{find_hidraw, HidrawDevice};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
@@ -393,6 +393,8 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         hako_core::config::load_device_settings(&ctx.paths, VID, model.product_ids[0])?;
     // Only a look the user chose is restored; a fresh device keeps its own.
     let restore = get_setting(&settings, SettingKey::Effect).is_some();
+    let known = controls(family, &Look::new(family, &settings));
+    crate::drivers::sanitize_saved(&mut settings, &known);
     defaults(&mut settings);
     let mut a = Lighting {
         name: model.name,
@@ -439,13 +441,19 @@ struct Lighting {
 }
 
 impl Lighting {
-    /// Write each report and wait for its reply (contents unused).
+    /// Write each report and wait for its reply (contents unused; a device
+    /// that does not answer is not an error, a failed read is).
     fn send(&mut self, reports: &[Report]) -> Result<()> {
         let dev = self.dev.as_mut().context("not connected")?;
         let mut buf = [0u8; 65];
         for r in reports {
             dev.write(r)?;
-            let _ = dev.read_timeout(&mut buf, REPLY_WAIT);
+            if let Err(e) = dev.read_timeout(&mut buf, REPLY_WAIT) {
+                // A timeout is a plain error, a failed read an I/O one.
+                if e.downcast_ref::<std::io::Error>().is_some() {
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
@@ -485,13 +493,28 @@ impl DeviceAdapter for Lighting {
         let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value);
         if let Err(e) = self.apply() {
-            // The device kept its old look; so do the UI and the file.
+            // Some of the reports may have gone out: send the old look again.
             self.settings = before;
-            self.last_error = Some(e.to_string());
+            let e = match self.apply() {
+                Ok(()) => e,
+                Err(r) => anyhow!("{e:#}; restoring the previous look failed too: {r:#}"),
+            };
+            self.last_error = Some(format!("{e:#}"));
             return Err(e);
         }
         self.last_error = None;
-        hako_core::config::save_device_settings(&self.paths, VID, self.canonical, &self.settings)
+        let saved = hako_core::config::save_device_settings(
+            &self.paths,
+            VID,
+            self.canonical,
+            &self.settings,
+        );
+        if let Err(e) = saved {
+            let e = e.context("applied, but not saved");
+            self.last_error = Some(format!("{e:#}"));
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn set_many(&mut self, values: &[(SettingKey, SettingValue)]) -> Result<()> {
@@ -620,6 +643,41 @@ mod tests {
                 assert_ne!(p[1..4], [0x54, 0x81, 0x01], "{f:?} sends a save");
             }
         }
+    }
+
+    #[test]
+    fn failed_write_rolls_back_and_reports_the_failed_restore() {
+        let dir = std::env::temp_dir().join(format!("hako-cm-test-{}", std::process::id()));
+        let mut settings = SettingsMap::new();
+        defaults(&mut settings);
+        let mut a = Lighting {
+            name: "Test",
+            kind: DeviceKind::Mouse,
+            family: Family::Mm711,
+            canonical: 0x0101,
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: 0x0101,
+                instance: "t".into(),
+            },
+            dev: None,
+            settings: settings.clone(),
+            last_error: None,
+            paths: ConfigPaths {
+                root: dir.clone(),
+                config_toml: dir.join("config.toml"),
+                devices_dir: dir.join("devices"),
+                profiles_dir: dir.join("profiles"),
+                remaps_dir: dir.join("remaps"),
+            },
+        };
+        let e = a
+            .set(SettingKey::Brightness, SettingValue::Int(10))
+            .unwrap_err();
+        assert!(e.to_string().contains("failed too"), "{e}");
+        assert_eq!(a.settings, settings);
+        assert!(a.last_error.is_some());
+        assert!(!dir.exists(), "nothing saved");
     }
 
     #[test]

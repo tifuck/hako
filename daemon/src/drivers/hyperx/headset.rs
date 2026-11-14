@@ -695,7 +695,8 @@ fn controls(f: Family) -> Vec<SettingMeta> {
 fn load_settings(spec: &Spec<Family>, paths: &ConfigPaths) -> Result<SettingsMap> {
     let settings = load_device_settings(paths, spec.vid, spec.pids[0])?;
     if settings.is_empty() && spec.pids == CLOUD_STINGER_2.pids {
-        return Ok(load_device_settings(paths, HP, CLOUD_II_HP.pids[0]).unwrap_or_default());
+        return load_device_settings(paths, HP, CLOUD_II_HP.pids[0])
+            .context("the Stinger 2's old settings (HP Cloud II Wireless file)");
     }
     Ok(settings)
 }
@@ -962,6 +963,15 @@ impl DeviceAdapter for HeadsetAdapter {
 
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
         let f = self.family();
+        if has_battery(f) {
+            if self.last_poll.is_none() {
+                // Not asked yet (just opened): find out whether it is on.
+                self.poll()?;
+            }
+            if !self.battery.present {
+                bail!("{} is off or out of range", self.spec.name);
+            }
+        }
         if f == Alpha2 {
             self.alpha2_set(key, &value)?;
         } else if f == AlphaS && key == SettingKey::MicSideTone {
@@ -977,8 +987,18 @@ impl DeviceAdapter for HeadsetAdapter {
                 None => bail!("no status reply from the control box"),
             }
         } else {
-            for p in set_packets(f, key, &value)? {
-                self.send(&p, Duration::from_millis(100))?;
+            let old = get_setting(&self.settings, key).cloned();
+            for (i, p) in set_packets(f, key, &value)?.iter().enumerate() {
+                if let Err(e) = self.send(p, Duration::from_millis(100)) {
+                    // A packet before this one landed: put the old value back.
+                    if let (true, Some(old)) = (i > 0, &old) {
+                        for p in set_packets(f, key, old).unwrap_or_default() {
+                            let _ = self.send(&p, Duration::from_millis(100));
+                            std::thread::sleep(GAP);
+                        }
+                    }
+                    return Err(e);
+                }
                 std::thread::sleep(GAP);
             }
         }
@@ -993,6 +1013,7 @@ impl DeviceAdapter for HeadsetAdapter {
             self.spec.pids[0],
             &self.settings,
         )
+        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
     }
 
     fn tick(&mut self) -> Result<()> {

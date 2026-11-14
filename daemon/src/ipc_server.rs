@@ -26,6 +26,9 @@ use tracing::{info, warn};
 const METER_PERIOD: Duration = Duration::from_millis(33);
 /// How often meter targets are resolved again (AUX turning on or off).
 const METER_RESOLVE: Duration = Duration::from_secs(1);
+/// A subscriber that has not taken an event / meter frame for this long
+/// stopped reading: it is dropped (and its meter streams with it).
+const PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bind the daemon socket, owner-only. Refuses to replace a socket another
 /// daemon still answers on; a stale file from a crashed daemon is removed.
@@ -149,7 +152,11 @@ async fn serve_requests(
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
                 let last = matches!(ev, AdapterEvent::ShuttingDown);
-                if write_json_frame(stream, &to_ipc_event(ev)?).await.is_err() || last {
+                if push(stream, &to_ipc_event(ev)?, PUSH_TIMEOUT)
+                    .await
+                    .is_err()
+                    || last
+                {
                     break;
                 }
             }
@@ -236,8 +243,19 @@ async fn stream_meters(
             payload: serde_json::to_value(meter_frame(&resolved, read, specs.len()))
                 .unwrap_or_default(),
         };
-        if write_json_frame(stream, &ev).await.is_err() {
+        if push(stream, &ev, PUSH_TIMEOUT).await.is_err() {
             break;
+        }
+    }
+}
+
+/// Write a frame the client did not ask for; fails if it is not taken in time.
+async fn push(stream: &mut UnixStream, ev: &IpcEvent, limit: Duration) -> Result<()> {
+    match tokio::time::timeout(limit, write_json_frame(stream, ev)).await {
+        Ok(written) => written,
+        Err(_) => {
+            warn!("subscriber stopped reading; dropped");
+            bail!("subscriber stopped reading")
         }
     }
 }
@@ -317,6 +335,21 @@ mod tests {
         assert!(!client_left(
             &read_json_frame(&mut server).await.unwrap_err()
         ));
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_that_stops_reading_is_dropped() {
+        let (mut server, _client) = UnixStream::pair().unwrap();
+        let ev = IpcEvent {
+            kind: EventKind::Meters,
+            payload: serde_json::json!("x".repeat(256 * 1024)),
+        };
+        let limit = Duration::from_millis(100);
+        let mut pushed = 0;
+        while push(&mut server, &ev, limit).await.is_ok() {
+            pushed += 1;
+            assert!(pushed < 64, "the socket never filled up");
+        }
     }
 
     #[test]

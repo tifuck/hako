@@ -155,7 +155,7 @@ impl Lights for Elo {
         };
         self.dev.write(&inactive_report(minutes))?;
         // HeadsetControl reads one reply before pausing.
-        read_until(&mut self.dev, Duration::from_millis(500), |_| true);
+        read_until(&mut self.dev, Duration::from_millis(500), |_| true)?;
         std::thread::sleep(self.family.pause());
         Ok(())
     }

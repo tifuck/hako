@@ -401,6 +401,10 @@ const ATTEMPTS: usize = 3;
 const VOLTAGE_RANGE: std::ops::RangeInclusive<u16> = 2500..=4500;
 const BATTERY_POLL: Duration = Duration::from_secs(60);
 const FAILURE_BACKOFF: Duration = Duration::from_secs(10);
+/// Most time one battery poll spends on its query, then on switching the
+/// dongle back to local mode (each command's wait is cut to what is left).
+const POLL_BUDGET: Duration = Duration::from_secs(5);
+const RESTORE_BUDGET: Duration = Duration::from_secs(5);
 /// Single-cell Li-ion curve (percent, mV); the headset reports no percentage.
 const CALIBRATION: [(u8, u16); 11] = [
     (0, 3300),
@@ -475,6 +479,24 @@ fn bs_voltage(data: &[u8]) -> Option<u16> {
         .filter(|mv| VOLTAGE_RANGE.contains(mv))
 }
 
+/// A command's reply wait, cut to what is left before `deadline`; `None`
+/// once it has passed.
+fn wait_within(timeout: Duration, deadline: Option<Instant>, now: Instant) -> Option<Duration> {
+    let left = deadline.map_or(timeout, |d| timeout.min(d.saturating_duration_since(now)));
+    (!left.is_zero()).then_some(left)
+}
+
+/// Time between battery polls: doubled from `FAILURE_BACKOFF` per failed poll
+/// in a row, up to the normal period.
+fn poll_every(failures: u32) -> Duration {
+    if failures == 0 {
+        return BATTERY_POLL;
+    }
+    FAILURE_BACKOFF
+        .saturating_mul(1 << (failures - 1).min(8))
+        .min(BATTERY_POLL)
+}
+
 fn voltage_to_percent(mv: u16) -> u8 {
     let (first, last) = (CALIBRATION[0], CALIBRATION[CALIBRATION.len() - 1]);
     if mv <= first.1 {
@@ -506,7 +528,8 @@ fn open_blackshark(pid: u16, _ctx: &DriverCtx) -> Opened {
         linked: false,
         percent: None,
         last_poll: None,
-        last_ok: false,
+        failures: 0,
+        deadline: None,
         last_error: None,
     };
     info!("Razer BlackShark V2 Pro open via {}", info.path.display());
@@ -522,12 +545,17 @@ struct BlackSharkAdapter {
     linked: bool,
     percent: Option<u8>,
     last_poll: Option<Instant>,
-    last_ok: bool,
+    /// Failed polls in a row (backs the next poll off).
+    failures: u32,
+    /// Every command's reply wait ends by then (a poll's time budget).
+    deadline: Option<Instant>,
     last_error: Option<String>,
 }
 
 impl BlackSharkAdapter {
     fn command(&mut self, ty: u8, body: &[u8], timeout: Duration) -> Result<Vec<u8>> {
+        let timeout = wait_within(timeout, self.deadline, Instant::now())
+            .ok_or_else(|| anyhow!("battery poll ran out of time"))?;
         self.seq = self.seq % 127 + 1;
         let seq = self.seq;
         let dev = self.dev.as_mut().context("device not open")?;
@@ -603,8 +631,17 @@ impl BlackSharkAdapter {
         Err(last)
     }
 
-    /// Battery voltage, or `None` when no headset is linked to the dongle.
+    /// Battery voltage, or `None` when no headset is linked to the dongle;
+    /// bounded by `POLL_BUDGET` + `RESTORE_BUDGET` (a dongle that acks but
+    /// never answers would otherwise hold the worker for ~25 s).
     fn read_voltage(&mut self) -> Result<Option<u16>> {
+        self.deadline = Some(Instant::now() + POLL_BUDGET);
+        let result = self.read_voltage_within();
+        self.deadline = None;
+        result
+    }
+
+    fn read_voltage_within(&mut self) -> Result<Option<u16>> {
         if self.link_value(LINK_STATUS)? & LINK_HEADSET == 0 {
             return Ok(None);
         }
@@ -619,6 +656,7 @@ impl BlackSharkAdapter {
                 Err(anyhow!("dongle did not enter remote mode"))
             };
         // Local is the dongle's normal mode: restore it whatever happened.
+        self.deadline = Some(Instant::now() + RESTORE_BUDGET);
         let mut local = self.is_mode(MODE_LOCAL);
         for _ in 0..ATTEMPTS {
             if local {
@@ -662,17 +700,18 @@ impl DeviceAdapter for BlackSharkAdapter {
     }
 
     fn tick(&mut self) -> Result<()> {
-        let every = if self.last_ok {
-            BATTERY_POLL
-        } else {
-            FAILURE_BACKOFF
-        };
+        let every = poll_every(self.failures);
         if self.dev.is_none() || self.last_poll.is_some_and(|t| t.elapsed() < every) {
             return Ok(());
         }
-        self.last_poll = Some(Instant::now());
         let result = self.read_voltage();
-        self.last_ok = result.is_ok();
+        // Counted from the poll's end, so a slow poll is not run back to back.
+        self.last_poll = Some(Instant::now());
+        self.failures = if result.is_ok() {
+            0
+        } else {
+            self.failures.saturating_add(1)
+        };
         match result {
             Ok(mv) => {
                 self.linked = mv.is_some();
@@ -791,18 +830,24 @@ impl BlackShark2023Adapter {
             .as_mut()
             .context("device not open")?
             .drain(Duration::ZERO);
+        let answer = self.ask(cmd);
+        // Remote mode stays until it is switched off: always switch it off.
+        let off = self.remote(false);
+        let answer = answer?;
+        off?;
+        Ok(answer)
+    }
+
+    fn ask(&mut self, cmd: u8) -> Result<Option<u8>> {
         self.remote(true)?;
-        let mut answer = None;
         for _ in 0..ATTEMPTS {
             self.remote(true)?;
             self.send(&bs23_query(cmd))?;
-            answer = self.await_reply(cmd);
-            if answer.is_some() {
-                break;
+            if let Some(answer) = self.await_reply(cmd) {
+                return Ok(Some(answer));
             }
         }
-        self.remote(false)?;
-        Ok(answer)
+        Ok(None)
     }
 
     fn await_reply(&mut self, cmd: u8) -> Option<u8> {
@@ -899,6 +944,23 @@ impl DeviceAdapter for BlackShark2023Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A battery poll's command waits end at its deadline, and failed polls
+    /// back off instead of repeating every 10 s.
+    #[test]
+    fn blackshark_poll_is_bounded_and_backs_off() {
+        let now = Instant::now();
+        assert_eq!(wait_within(REPLY_TIMEOUT, None, now), Some(REPLY_TIMEOUT));
+        let soon = now + Duration::from_millis(200);
+        assert_eq!(
+            wait_within(REPLY_TIMEOUT, Some(soon), now),
+            Some(Duration::from_millis(200))
+        );
+        assert_eq!(wait_within(REPLY_TIMEOUT, Some(now), soon), None);
+        let waits: Vec<_> = (0..6).map(|f| poll_every(f).as_secs()).collect();
+        assert_eq!(waits, [60, 10, 20, 40, 60, 60]);
+        assert_eq!(poll_every(u32::MAX), BATTERY_POLL);
+    }
 
     #[test]
     fn kraken_reports_match_openrazer_layout() {
