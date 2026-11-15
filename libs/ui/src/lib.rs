@@ -96,6 +96,8 @@ pub struct HakoAppUi {
     pub toasts: Vec<widgets::Toast>,
     /// Latest app settings from the daemon (also the edit draft).
     pub settings: Option<AppSettings>,
+    /// Why hakod gave no settings, shown on the settings page while there are none.
+    pub settings_error: Option<String>,
     /// Settings view active instead of a device page.
     pub show_settings: bool,
     /// Mixer page active instead of a device page (settings still win).
@@ -127,6 +129,7 @@ impl Default for HakoAppUi {
             profile_delete: None,
             toasts: Vec::new(),
             settings: None,
+            settings_error: None,
             show_settings: false,
             show_mixer: false,
             mixer: mixer::MixerUi::default(),
@@ -756,6 +759,9 @@ impl HakoAppUi {
 
     fn settings_page(&mut self, ui: &mut egui::Ui, out: &mut Vec<UiCommand>) {
         ui.label(egui::RichText::new("Settings").heading().color(pal().text));
+        if let (None, Some(e)) = (&self.settings, &self.settings_error) {
+            ui.colored_label(pal().warn, format!("Settings unavailable: {e}"));
+        }
         ui.add_space(theme::SPACE_LG);
 
         let online = self.daemon_error.is_none();

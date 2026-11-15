@@ -33,15 +33,21 @@
 //!   `3554:f507..f509` are only claimed once the mouse answers it.
 //!
 //! Every setting (DPI stages, report rate, lift-off, debounce, lighting,
-//! sleep timer) is stored in the mouse's onboard profiles and no layout has
-//! two independent sources, so they are `.persistent().blocked(..)`
-//! placeholders and nothing here writes to a mouse. Research:
-//! `docs/onboard-writes/pulsar.md`.
+//! sleep timer) is stored in the mouse's onboard profiles. Mice that answer
+//! the identity query with `cid` 0x57 (Pulsar's current Nordic line, ~65
+//! PIDs from the vendor's web configurator and Fusion `Config.ini`) get the
+//! vendor's own memory protocol in `cid87.rs`: a few settings are written
+//! (opt-in, read-validate-write-verify), the rest stay
+//! `.persistent().blocked(..)`. Every other model keeps blocked placeholders
+//! and nothing here writes to it. Research: `docs/onboard-writes/pulsar.md`,
+//! `docs/vendor-re/pulsar.md`.
+
+mod cid87;
 
 use crate::drivers::{DeviceAdapter, Model, Opened};
 use crate::hid::{find_hidraw, HidrawDevice};
 use anyhow::{bail, Context, Result};
-use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue};
+use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::device::{BatteryState, DeviceId, DeviceKind, DeviceSnapshot};
 use std::time::{Duration, Instant};
 use tracing::info;
@@ -101,6 +107,12 @@ const NOCTUA: Spec = Spec {
     max_dpi: 42000.0,
     ..CRAZYLIGHT
 };
+/// `cid` 0x57 PIDs of Pulsar's web configurator / Fusion: claimed only after
+/// the identity query.
+const CID87: Spec = Spec {
+    identify: true,
+    ..CRAZYLIGHT
+};
 const NORDIC: Spec = Spec {
     max_dpi: 26000.0,
     max_rate: 1000,
@@ -157,6 +169,26 @@ pub const MODELS: &[Model] = &[
         [0x5504, 0x7507],
         NOCTUA
     ),
+    pulsar!(
+        "Pulsar Mouse",
+        PULSAR,
+        [
+            0x3415, 0x3501, 0x3502, 0x3503, 0x3504, 0x3505, 0x3506, 0x3507, 0x3508, 0x3509, 0x3510,
+            0x3511, 0x3512, 0x3513, 0x3514, 0x3515, 0x3516, 0x3517, 0x3518, 0x3519, 0x3524, 0x3525,
+            0x3526, 0x3528, 0x3529, 0x3601, 0x3603, 0x3604, 0x3605, 0x3606, 0x3607, 0x3608, 0x3609,
+            0x3610, 0x3611, 0x3612, 0x3613, 0x3614, 0x3615, 0x3618, 0x3619, 0x7501, 0x7502, 0x7503,
+            0x7504, 0x7505, 0x7506, 0x7508, 0x7509, 0x7510, 0x7601, 0x7602, 0x7603, 0x7604, 0x7605,
+            0x9502, 0x9503, 0x9601
+        ],
+        CID87
+    ),
+    pulsar!(
+        "Pulsar Wireless Mouse",
+        PULSAR,
+        [0x5407, 0x5501, 0x5502, 0x5601, 0x5603],
+        CID87
+    ),
+    pulsar!("Pulsar Mouse (Nordic)", NORDIC_VID, [0xf40a], CID87),
     pulsar!(
         "Pulsar Wireless (Nordic)",
         NORDIC_VID,
@@ -305,6 +337,11 @@ fn parse_identity(r: &[u8; 17]) -> Option<(u8, u8)> {
     (r[2] == 0 && r[10] != 0 && r[11] != 0).then_some((r[10], r[11]))
 }
 
+/// Identity reply `type` byte (cable / wireless and rate class, `cid87`).
+fn identity_type(r: &[u8; 17]) -> u8 {
+    r[12]
+}
+
 /// (percent, on power).
 fn parse_power(r: &[u8; 17]) -> Option<(u8, bool)> {
     (r[6] <= 100).then_some((r[6], r[7] != 0))
@@ -344,6 +381,9 @@ const SONIX_BLOCKED: &str = "stored in the mouse's onboard profiles; single sour
 const NORDIC_BLOCKED: &str = "stored in the mouse's onboard profile memory; \
 only small tools agree on the layout, each for other PIDs and not shown to be independent \
 (python-pulsar-mouse-tool, rustar; pulsar-mouse-linux builds on the first)";
+
+const CID87_BLOCKED: &str = "the vendor's web configurator writes it, but this value's \
+encoding is not confirmed here";
 
 /// Every onboard setting the sources document, as blocked placeholders.
 fn controls(spec: &Spec) -> Vec<SettingMeta> {
@@ -430,16 +470,32 @@ fn open(name: &'static str, vid: u16, pid: u16, spec: &'static Spec) -> Opened {
         None
     };
     let mut shown = name.to_string();
-    if let (true, Some(d)) = (spec.identify, dev.as_mut()) {
-        let ids = nordic_command(d, &identity_request())
-            .context("Pulsar identity query")?
-            .and_then(|r| parse_identity(&r));
-        let Some((cid, mid)) = ids else {
-            info!("{vid:04x}:{pid:04x} did not answer the Pulsar identity query; not claimed");
-            return Ok(vec![]);
+    let mut family = None;
+    if let (Protocol::Nordic, Some(d)) = (spec.protocol, dev.as_mut()) {
+        let reply = if spec.identify {
+            nordic_command(d, &identity_request()).context("Pulsar identity query")?
+        } else {
+            // Not needed to claim the mouse; a sleeping one just stays read-only.
+            nordic_command(d, &identity_request()).ok().flatten()
         };
-        if let Some(n) = mid_name(cid, mid) {
-            shown = n.into();
+        let ids = reply.and_then(|r| parse_identity(&r).map(|i| (i, identity_type(&r))));
+        match ids {
+            None if spec.identify => {
+                info!("{vid:04x}:{pid:04x} did not answer the Pulsar identity query; not claimed");
+                return Ok(vec![]);
+            }
+            Some(((cid87::CID, mid), kind)) => {
+                family = Some(cid87::Cid87::new(mid, kind));
+                if let Some(n) = cid87::mid_name(mid) {
+                    shown = n;
+                }
+            }
+            Some(((cid, mid), _)) => {
+                if let Some(n) = mid_name(cid, mid) {
+                    shown = n.into();
+                }
+            }
+            None => {}
         }
     }
     info!("{shown} open via {}", info.path.display());
@@ -465,6 +521,10 @@ fn open(name: &'static str, vid: u16, pid: u16, spec: &'static Spec) -> Opened {
         },
         last_poll: None,
         last_error: None,
+        cid87: family,
+        state: SettingsMap::new(),
+        last_read: None,
+        dirty: family.is_some(),
     })])
 }
 
@@ -477,9 +537,47 @@ struct Mouse {
     battery: BatteryState,
     last_poll: Option<Instant>,
     last_error: Option<String>,
+    /// Set for `cid` 0x57 mice: the settings they read and write.
+    cid87: Option<cid87::Cid87>,
+    state: SettingsMap,
+    last_read: Option<Instant>,
+    /// The mouse changed a setting itself, or the first read has not worked.
+    dirty: bool,
 }
 
+/// Retry of a settings read that failed (a sleeping wireless mouse).
+const READ_RETRY: Duration = Duration::from_secs(60);
+
 impl Mouse {
+    /// Reads the shown settings of a `cid` 0x57 mouse.
+    fn load(&mut self) {
+        let (Some(family), Some(dev)) = (self.cid87, self.dev.as_mut()) else {
+            return;
+        };
+        self.last_read = Some(Instant::now());
+        match cid87::with_mouse(dev, family.wireless, |l| family.read_settings(l)) {
+            Ok(s) => {
+                self.state = s;
+                self.dirty = false;
+            }
+            Err(e) => self.last_error = Some(format!("settings: {e}")),
+        }
+    }
+
+    /// Takes pushed `0a` reports: a setting changed on the mouse itself.
+    fn read_events(&mut self) {
+        let (Some(_), Some(dev)) = (self.cid87, self.dev.as_mut()) else {
+            return;
+        };
+        let mut buf = [0u8; 64];
+        while let Ok(n) = dev.read_timeout(&mut buf, Duration::ZERO) {
+            if cid87::parse_status_changed(&buf[..n]).is_some_and(|(a, b)| a & 0x0f != 0 || b != 0)
+            {
+                self.dirty = true;
+            }
+        }
+    }
+
     fn poll(&mut self) -> Result<()> {
         let dev = self.dev.as_mut().context("not connected")?;
         let reading = match self.spec.protocol {
@@ -511,20 +609,45 @@ impl DeviceAdapter for Mouse {
             } else {
                 vec![]
             },
-            settings: Default::default(),
-            controls: controls(self.spec),
+            settings: self.state.clone(),
+            controls: match self.cid87 {
+                Some(f) => f.controls(controls(self.spec), CID87_BLOCKED),
+                None => controls(self.spec),
+            },
             last_error: self.last_error.clone(),
         }
     }
 
-    fn set(&mut self, key: SettingKey, _value: SettingValue) -> Result<()> {
-        bail!(
-            "{} is stored in the mouse's onboard profile; not written",
-            key.as_str()
-        )
+    fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+        let Some(family) = self.cid87.filter(|f| f.writes(key)) else {
+            bail!(
+                "{} is stored in the mouse's onboard profile; not written",
+                key.as_str()
+            )
+        };
+        let dev = self.dev.as_mut().context("not connected")?;
+        let result = cid87::with_mouse(dev, family.wireless, |l| {
+            family.write(l, key, &value)?;
+            family.read_settings(l)
+        });
+        match result {
+            Ok(s) => {
+                self.state = s;
+                self.last_error = None;
+                Ok(())
+            }
+            Err(e) => {
+                self.last_error = Some(e.to_string());
+                Err(e)
+            }
+        }
     }
 
     fn tick(&mut self) -> Result<()> {
+        self.read_events();
+        if self.dirty && self.last_read.is_none_or(|t| t.elapsed() >= READ_RETRY) {
+            self.load();
+        }
         if self.dev.is_none() || self.last_poll.is_some_and(|t| t.elapsed() < POLL) {
             return Ok(());
         }
@@ -659,12 +782,18 @@ mod tests {
             assert!(!m.usbfs && !m.multi);
             assert!(m.name.starts_with("Pulsar "));
         }
-        assert_eq!(ids.len(), 18);
+        assert_eq!(ids.len(), 18 + 58 + 5 + 1);
     }
 
     #[test]
     fn every_setting_is_a_blocked_onboard_placeholder() {
-        for spec in [&SONIX_WIRED, &FUSION2_8K, &CRAZYLIGHT_WIRED, &NORDIC] {
+        for spec in [
+            &SONIX_WIRED,
+            &FUSION2_8K,
+            &CRAZYLIGHT_WIRED,
+            &NORDIC,
+            &CID87,
+        ] {
             let c = controls(spec);
             for m in &c {
                 assert!(m.persistent && m.blocked.is_some(), "{:?}", m.key);

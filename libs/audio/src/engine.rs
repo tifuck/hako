@@ -30,7 +30,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -336,6 +337,8 @@ impl Request {
 struct Shared {
     graph: Mutex<Graph>,
     changed: Condvar,
+    /// Why the engine thread could not start (it is not restarted).
+    failed: OnceLock<String>,
 }
 
 impl Shared {
@@ -346,6 +349,13 @@ impl Shared {
     fn update(&self, f: impl FnOnce(&mut Graph)) {
         f(&mut self.lock());
         self.changed.notify_all();
+    }
+
+    /// The engine thread is gone for good: `engine` says why at once.
+    fn fail(&self, error: String) {
+        warn!("{error}");
+        let _ = self.failed.set(error);
+        self.update(|graph| graph.settled = true);
     }
 }
 
@@ -367,6 +377,9 @@ pub fn engine() -> Result<&'static Engine> {
         .changed
         .wait_timeout_while(engine.shared.lock(), wait, |graph| !graph.settled)
         .unwrap_or_else(PoisonError::into_inner);
+    if let Some(error) = engine.shared.failed.get() {
+        bail!("PipeWire engine failed to start: {error}");
+    }
     if !graph.connected {
         bail!("PipeWire is not reachable");
     }
@@ -382,7 +395,7 @@ impl Engine {
             .name("hako-pipewire".into())
             .spawn(move || run(thread_shared, receiver))
         {
-            warn!("spawn PipeWire engine thread: {error}");
+            shared.fail(format!("spawn PipeWire engine thread: {error}"));
         }
         Self {
             shared,
@@ -429,7 +442,12 @@ impl Engine {
         }
         match answer.recv_timeout(REPLY_TIMEOUT) {
             Ok(result) => result.map_err(anyhow::Error::msg),
-            Err(_) => bail!("PipeWire did not answer within {REPLY_TIMEOUT:?}"),
+            Err(RecvTimeoutError::Timeout) => {
+                bail!("PipeWire did not answer within {REPLY_TIMEOUT:?}")
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                bail!("PipeWire connection lost before the request completed")
+            }
         }
     }
 
@@ -520,11 +538,11 @@ fn run(shared: Arc<Shared>, requests: pw::channel::Receiver<Request>) {
     pw::init();
     let mainloop = match pw::main_loop::MainLoopRc::new(None) {
         Ok(mainloop) => mainloop,
-        Err(error) => return warn!("PipeWire main loop: {error}"),
+        Err(error) => return shared.fail(format!("PipeWire main loop: {error}")),
     };
     let context = match pw::context::ContextRc::new(&mainloop, None) {
         Ok(context) => context,
-        Err(error) => return warn!("PipeWire context: {error}"),
+        Err(error) => return shared.fail(format!("PipeWire context: {error}")),
     };
     let conn: Rc<RefCell<Option<Conn>>> = Rc::default();
     let handler = conn.clone();

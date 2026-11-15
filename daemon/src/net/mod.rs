@@ -221,11 +221,13 @@ enum DialError {
     /// Another key answered than the one wanted.
     WrongKey(String),
     Failed(String),
+    /// The connection or handshake failed.
+    Io(String),
 }
 
 impl std::fmt::Display for DialError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (Self::Declined(e) | Self::WrongKey(e) | Self::Failed(e)) = self;
+        let (Self::Declined(e) | Self::WrongKey(e) | Self::Failed(e) | Self::Io(e)) = self;
         f.write_str(e)
     }
 }
@@ -273,6 +275,8 @@ struct Inner {
     redial: HashMap<String, Redial>,
     /// Refreshed by the tick (1 Hz).
     stats: HashMap<String, LinkStats>,
+    /// The daemon is stopping: Network stays down.
+    stopped: bool,
 }
 
 struct Shared {
@@ -361,8 +365,10 @@ impl NetService {
         done.map(|()| self.shared.state())
     }
 
-    /// Daemon stop: Bye to peers, nodes closed, threads stopped. Blocking.
+    /// Daemon stop: Bye to peers, nodes closed, threads stopped, and no
+    /// `PatchNet` brings Network up again. Blocking.
     pub fn shutdown(&self) {
+        lock(&self.shared.inner).stopped = true;
         self.shared.down();
     }
 }
@@ -399,8 +405,10 @@ impl Shared {
                 if let Some(name) = there {
                     return Err(PatchError::Invalid(format!("already connected to {name}")));
                 }
-                self.dial(addr, true, want.as_deref())
-                    .map_err(|e| PatchError::Invalid(e.to_string()))
+                self.dial(addr, true, want.as_deref()).map_err(|e| match e {
+                    DialError::Io(e) => PatchError::Io(anyhow!(e)),
+                    e => PatchError::Invalid(e.to_string()),
+                })
             }
             NetOp::Respond { id, accept } => self.respond(id, *accept),
             _ => {
@@ -477,7 +485,7 @@ impl Shared {
     /// Bind and start the threads (once); failures become `problem`.
     fn up(self: &Arc<Self>) {
         let mut inner = lock(&self.inner);
-        if inner.live.is_some() {
+        if inner.live.is_some() || inner.stopped {
             return;
         }
         inner.problem = None;
@@ -676,7 +684,7 @@ impl Shared {
                 .and_then(|stage| {
                     register(&mut inner, &s, stage, stop)
                         .map(|()| stage)
-                        .map_err(|e| (Control::Denied, e))
+                        .map_err(|e| (Control::Bye, e))
                 });
             (admitted, old)
         };
@@ -703,6 +711,10 @@ impl Shared {
         });
         if let Err(e) = setup {
             self.close(&s, Some(&Control::Bye));
+            // A paired machine's reconnect: the log is all that says why.
+            if stage == Stage::Live {
+                warn!("net: reconnect from {}: {e:#}", s.name);
+            }
             return Err(e);
         }
         drop(slot);
@@ -720,7 +732,7 @@ impl Shared {
         pair: bool,
         want: Option<&str>,
     ) -> Result<(), DialError> {
-        use DialError::{Declined, Failed, WrongKey};
+        use DialError::{Declined, Failed, Io, WrongKey};
         let (private, own, stop, hello) = {
             let inner = lock(&self.inner);
             let (Some(live), Some(identity)) = (&inner.live, &inner.identity) else {
@@ -733,10 +745,10 @@ impl Shared {
                 hello(&inner.file, live.port, pair),
             )
         };
-        let failed = |e: anyhow::Error| Failed(format!("{addr}: {e:#}"));
-        let stream = TcpStream::connect_timeout(&addr, HANDSHAKE)
-            .map_err(|e| Failed(format!("{addr}: {e}")))?;
-        prepare(&stream).map_err(|e| Failed(format!("{addr}: {e}")))?;
+        let failed = |e: anyhow::Error| Io(format!("{addr}: {e:#}"));
+        let stream =
+            TcpStream::connect_timeout(&addr, HANDSHAKE).map_err(|e| Io(format!("{addr}: {e}")))?;
+        prepare(&stream).map_err(|e| Io(format!("{addr}: {e}")))?;
         let mut timed = Deadline::new(&stream);
         let keyed = handshake(&mut timed, &private, true).map_err(failed)?;
         if keyed.key == own {
@@ -791,7 +803,11 @@ impl Shared {
                 .then(|| inner.sessions.remove(&s.key))
                 .flatten();
             let stage = Stage::Outgoing { shown: pair };
-            (register(&mut inner, &s, stage, &stop), old)
+            let registered = register(&mut inner, &s, stage, &stop);
+            if let (Ok(()), Some(r)) = (&registered, inner.redial.get_mut(&s.key)) {
+                r.problem = None;
+            }
+            (registered, old)
         };
         if let Some(old) = old {
             self.close(&old.session, None);
@@ -830,7 +846,7 @@ impl Shared {
                     if fresh {
                         self.unpin(&s);
                     }
-                    return Err(PatchError::Invalid(format!("{}: {e:#}", s.name)));
+                    return Err(PatchError::Io(e.context(s.name.clone())));
                 }
             }
             (Stage::Incoming, false) => {
@@ -893,7 +909,13 @@ impl Shared {
                     })
                 });
                 match saved {
-                    Err(e) if renamed => return Err(e),
+                    Err(e) if fresh => return Err(e),
+                    // Pinned already: live under the saved name.
+                    Err(e) if renamed => {
+                        let e = format!("{}: new name not saved: {}", s.name, message(e));
+                        warn!("net: {e}");
+                        inner.problem = Some(e);
+                    }
                     // Only the address: `seen_at` still has it this run.
                     Err(e) => warn!("net: {}: address not saved: {}", s.name, message(e)),
                     Ok(()) => {}
@@ -911,23 +933,39 @@ impl Shared {
             }
         };
         let mut inner = lock(&self.inner);
+        let mut links = lock(&self.links);
+        // Another live session's audio route (two machines behind one
+        // address, or a Hello naming another's port) is never replaced.
+        let taken = links
+            .get(&s.addr)
+            .filter(|l| l.key != s.key)
+            .and_then(|l| inner.sessions.get(&l.key))
+            .map(|e| e.session.name.clone());
         let Some(entry) = inner
             .sessions
             .get_mut(&s.key)
-            .filter(|e| Arc::ptr_eq(&e.session, s))
+            .filter(|e| Arc::ptr_eq(&e.session, s) && taken.is_none())
         else {
+            drop(links);
             drop(inner);
             drop(link);
             if fresh {
                 self.unpin(s);
             }
-            return Err(gone());
+            return Err(match taken {
+                Some(other) => PatchError::Invalid(format!(
+                    "{} connected from {}, where {other} is connected",
+                    s.name, s.addr
+                )),
+                None => gone(),
+            });
         };
+        let old = links.insert(s.addr, link);
+        drop(links);
         entry.stage = Stage::Live;
         entry.fresh = fresh;
         inner.seen_at.insert(s.key.clone(), s.addr);
         inner.redial.remove(&s.key);
-        let old = lock(&self.links).insert(s.addr, link);
         drop(inner);
         drop(old);
         self.publish();
@@ -1026,7 +1064,11 @@ impl Shared {
                         Some(e) if e.stage == (Stage::Outgoing { shown: false }) => {
                             drop(inner);
                             if let Err(e) = self.go_live(s, false) {
-                                warn!("net: {}: {}", s.name, message(e));
+                                let e = format!("{}: {}", s.name, message(e));
+                                warn!("net: {e}");
+                                if let Some(r) = lock(&self.inner).redial.get_mut(&s.key) {
+                                    r.problem = Some(e);
+                                }
                                 self.undo(s);
                                 return;
                             }
@@ -1275,22 +1317,21 @@ impl Shared {
             }
         }
         let mut inner = lock(&self.inner);
-        let Some(r) = inner.redial.get_mut(key) else {
+        // Connected: `dial` cleared the problem, a later failure sets it.
+        let (Some(r), Some(e)) = (inner.redial.get_mut(key), failed) else {
             return;
         };
-        r.problem = match &failed {
-            Some(DialError::Declined(e)) => Some(format!(
+        r.problem = match &e {
+            DialError::Declined(e) => Some(format!(
                 "{e} the reconnect: it may have unpaired this computer (pair again)"
             )),
-            Some(DialError::WrongKey(e)) => Some(e.clone()),
-            Some(DialError::Failed(_)) | None => None,
+            DialError::WrongKey(e) => Some(e.clone()),
+            DialError::Failed(_) | DialError::Io(_) => None,
         };
-        if let Some(e) = failed {
-            if r.attempts == 1 {
-                warn!("net: reconnect: {e} (retrying less and less often)");
-            } else {
-                debug!("net: reconnect: {e}");
-            }
+        if r.attempts == 1 {
+            warn!("net: reconnect: {e} (retrying less and less often)");
+        } else {
+            debug!("net: reconnect: {e}");
         }
     }
 
@@ -1667,14 +1708,29 @@ fn hello(file: &NetFile, port: u16, pair: bool) -> Control {
 }
 
 /// `host` or `host:port` (default port), IPv4.
+// ponytail: getaddrinfo has no time limit, so a slow DNS server holds the
+// `Pair` that long.
 fn resolve(address: &str) -> Result<SocketAddr, String> {
     let address = address.trim();
-    address
-        .to_socket_addrs()
-        .or_else(|_| (address, DEFAULT_PORT).to_socket_addrs())
-        .ok()
-        .and_then(|mut found| found.find(SocketAddr::is_ipv4))
-        .ok_or_else(|| format!("cannot find {address:?} (host or host:port)"))
+    let found = match portless(address) {
+        Some(host) => (host, DEFAULT_PORT).to_socket_addrs(),
+        None => address.to_socket_addrs(),
+    };
+    found
+        .map_err(|e| format!("cannot find {address:?} (host or host:port): {e}"))?
+        .find(SocketAddr::is_ipv4)
+        .ok_or_else(|| format!("{address:?} has no IPv4 address"))
+}
+
+/// `address`'s host when it names no port: `host`, `1.2.3.4`, `::1`, `[::1]`.
+fn portless(address: &str) -> Option<&str> {
+    if address.parse::<IpAddr>().is_ok() {
+        return Some(address);
+    }
+    if let Some(v6) = address.strip_prefix('[').and_then(|a| a.strip_suffix(']')) {
+        return Some(v6);
+    }
+    (!address.contains(':')).then_some(address)
 }
 
 /// Control connections: no Nagle, handshake time limits.
@@ -2265,6 +2321,90 @@ mod tests {
         assert!(matches!(net.shared.go_live(&s, true), Ok(true)));
         assert!(trusts(&paths, &s.id) && connected(&net, &s.id));
         net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_paired_machine_goes_live_when_its_new_name_cannot_be_saved() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes into a read-only directory
+        }
+        let (net, paths, _) = machine("rename");
+        turn_on(&net);
+        let (s, _peer) = session("Tower");
+        net.shared
+            .edit(|f| {
+                f.trust(Peer {
+                    id: s.id.clone(),
+                    name: "Desk".into(),
+                    key: s.key.clone(),
+                    jitter_ms: DEFAULT_JITTER_MS,
+                    address: Some(s.addr),
+                })
+            })
+            .unwrap();
+        let stop = lock(&net.shared.inner).live.as_ref().unwrap().stop.clone();
+        let reconnect = Stage::Outgoing { shown: false };
+        register(&mut lock(&net.shared.inner), &s, reconnect, &stop).unwrap();
+        let mode = |m| std::fs::Permissions::from_mode(m);
+        std::fs::set_permissions(&paths.root, mode(0o500)).unwrap();
+        let live = net.shared.go_live(&s, false);
+        std::fs::set_permissions(&paths.root, mode(0o700)).unwrap();
+        assert!(matches!(live, Ok(false)));
+        let state = net.state();
+        assert!(state.peers[0].connected && state.peers[0].name == "Desk");
+        assert!(state.problem.is_some_and(|p| p.contains("not saved")));
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_second_machine_at_a_live_address_is_refused() {
+        let (net, paths, _) = machine("one-address");
+        turn_on(&net);
+        let stop = lock(&net.shared.inner).live.as_ref().unwrap().stop.clone();
+        let ((first, _p1), (second, _p2)) = (session("Desk"), session("Tower"));
+        assert_eq!(first.addr, second.addr);
+        for s in [&first, &second] {
+            let reconnect = Stage::Outgoing { shown: false };
+            register(&mut lock(&net.shared.inner), s, reconnect, &stop).unwrap();
+        }
+        assert!(matches!(net.shared.go_live(&first, true), Ok(true)));
+        assert!(net.shared.go_live(&second, true).is_err());
+        assert_eq!(lock(&net.shared.links)[&first.addr].key, first.key);
+        assert!(connected(&net, &first.id) && !connected(&net, &second.id));
+        assert!(!trusts(&paths, &second.id));
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_crossed_pairing_request_is_not_a_decline() {
+        let (a, a_paths, a_port) = machine("crossed-a");
+        let (b, b_paths, b_port) = machine("crossed-b");
+        turn_on(&a);
+        turn_on(&b);
+        a.patch(&[NetOp::Pair {
+            address: format!("127.0.0.1:{b_port}"),
+            key: None,
+        }])
+        .unwrap();
+        // Bravo asks alpha too while alpha's request waits there.
+        let to = SocketAddr::from(([127, 0, 0, 1], a_port));
+        let crossed = b.shared.dial(to, true, None);
+        assert!(matches!(crossed, Err(DialError::Failed(_))));
+        done([(a, a_paths), (b, b_paths)]);
+    }
+
+    #[test]
+    fn network_stays_down_after_shutdown() {
+        let (net, paths, port) = machine("stopped");
+        net.shutdown();
+        let state = net.patch(&[NetOp::SetEnabled { on: true }]).unwrap();
+        assert!(state.enabled);
+        assert!(TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok());
         let _ = std::fs::remove_dir_all(&paths.root);
     }
 
@@ -2975,5 +3115,15 @@ mod tests {
             Ok(SocketAddr::from(([10, 0, 0, 2], 5000)))
         );
         assert!(resolve("").is_err());
+        assert_eq!(portless("desk.local"), Some("desk.local"));
+        assert_eq!(portless("::1"), Some("::1"));
+        assert_eq!(portless("[::1]"), Some("::1"));
+        assert_eq!(portless("[::1]:47821"), None);
+        assert_eq!(portless("desk.local:5000"), None);
+        // A bad port is an error, not a host name to look up.
+        let bad = resolve("1.2.3.4:99999").unwrap_err();
+        assert!(bad.contains("invalid port"), "{bad}");
+        let v6 = resolve("[::1]:5000").unwrap_err();
+        assert!(v6.contains("no IPv4"), "{v6}");
     }
 }

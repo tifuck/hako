@@ -178,6 +178,8 @@ pub enum Leds {
     Keyboard,
     K55,
     Mouse(&'static [u8]),
+    /// No colour control (single-colour backlight, none at all).
+    None,
 }
 
 pub struct Nxp {
@@ -211,6 +213,9 @@ impl Backend for Nxp {
         if self.software == Some(on) {
             return Ok(());
         }
+        if matches!(self.leds, Leds::None) {
+            return Ok(());
+        }
         if on {
             self.send(&special(true))?;
             std::thread::sleep(Duration::from_millis(30));
@@ -231,6 +236,7 @@ impl Backend for Nxp {
             Leds::Keyboard => keyboard_color(rgb).iter().try_for_each(|p| self.send(p)),
             Leds::K55 => self.send(&k55_color(rgb)),
             Leds::Mouse(zones) => self.send(&mouse_color(zones, rgb)),
+            Leds::None => Ok(()),
         }
     }
 

@@ -129,6 +129,26 @@ Features are discovered at runtime and shown in the UI per device.
 | Razer Diamondback Chroma | Mouse | `1532:004c` | Untested |
 | Razer Taipan | Mouse | `1532:0034` | Untested |
 | Razer Ouroboros | Mouse | `1532:0032` | Untested |
+| Razer Cobra (PID 00a2) | Mouse | `1532:00a2` | Untested |
+| Razer Jugan | Mouse | `1532:0063` | Untested |
+| Razer Abyssus Lite | Mouse | `1532:0074` | Untested |
+| Razer Naga Classic Edition | Mouse | `1532:0093` | Untested |
+| Razer Krakoff | Mouse | `1532:00dd` | Untested |
+| Razer Orochi V2 (PID 00e0) | Mouse | `1532:00e0` | Untested |
+| Razer Viper V4 Pro | Mouse | `1532:00e5` `1532:00e6` | Untested |
+| Razer Naga V3 Pro | Mouse | `1532:00e7` `1532:00e8` | Untested |
+| Razer Basilisk V4 HyperSpeed | Mouse | `1532:00eb` `1532:00ea` | Untested |
+| Razer DeathAdder V4 Pro Carbon Fiber Edition | Mouse | `1532:00ef` `1532:00f0` | Untested |
+| Razer Huntsman Essential | Keyboard | `1532:0250` | Untested |
+| Razer Huntsman V3 X Tenkeyless | Keyboard | `1532:02b1` | Untested |
+| Razer Reclusa X Mini 65% | Keyboard | `1532:02e3` | Untested |
+| Razer BlackWidow V4 Low-profile HyperSpeed | Keyboard | `1532:02cc` `1532:02c9` | Untested |
+| Razer BlackWidow V4 75% (Xbox Anniversary Edition) | Keyboard | `1532:02f0` | Untested |
+| Razer Huntsman V3 Pro Tenkeyless 8KHz | Keyboard | `1532:02d0` | Untested |
+| Razer Huntsman V3 Pro Mini 8KHz | Keyboard | `1532:02d1` | Untested |
+| Razer Huntsman V3 Tenkeyless 8KHz | Keyboard | `1532:02e5` | Untested |
+| Razer Huntsman V3 HE Magnetic Tenkeyless 8KHz | Keyboard | `1532:02ea` | Untested |
+| Razer Huntsman Signature Edition | Keyboard | `1532:02d8` | Untested |
 | Razer Kraken 7.1 | Headset | `1532:0501` `1532:0506` | Untested |
 | Razer Kraken 7.1 Chroma | Headset | `1532:0504` | Untested |
 | Razer Kraken 7.1 V2 | Headset | `1532:0510` | Untested |
@@ -137,6 +157,8 @@ Features are discovered at runtime and shown in the UI per device.
 | Razer Kraken Kitty V2 | Headset | `1532:0560` | Untested |
 | Razer BlackShark V2 Pro (PlayStation) | Headset | `1532:1014` | Untested |
 | Razer BlackShark V2 Pro (2023) | Headset | `1532:0555` | Untested |
+| Razer Barracuda Pro | Headset | `1532:0539` `1532:0583` | Untested |
+| Razer Barracuda 2.4 | Headset | `1532:053b` `1532:0584` | Untested |
 
 ## Logitech
 
@@ -154,6 +176,7 @@ Features are discovered at runtime and shown in the UI per device.
 | Logitech LIGHTSPEED Receiver | Receiver | `046d:c545` | Untested |
 | Logitech LIGHTSPEED Receiver | Receiver | `046d:c547` | Untested |
 | Logitech LIGHTSPEED Receiver | Receiver | `046d:c54d` | Untested |
+| Logitech LIGHTSPEED Receiver | Receiver | `046d:c54f` | Untested |
 | Logitech Nano Receiver | Receiver | `046d:c52f` | Untested |
 | Logitech Nano Receiver | Receiver | `046d:c518` | Untested |
 | Logitech Nano Receiver | Receiver | `046d:c51a` | Untested |
@@ -192,6 +215,18 @@ Features are discovered at runtime and shown in the UI per device.
 | Logitech G403 Prodigy | Mouse | `046d:c083` | Untested |
 | Logitech G303 Daedalus Apex | Mouse | `046d:c080` | Untested |
 | Logitech MX518 | Mouse | `046d:c08e` | Untested |
+| Logitech G302 | Mouse | `046d:c07f` | Untested |
+| Logitech G402 | Mouse | `046d:c07e` | Untested |
+| Logitech G303 Shroud Edition (wired) | Mouse | `046d:c097` | Untested |
+| Logitech G304 X LIGHTSPEED | Mouse | `046d:c0a7` | Untested |
+| Logitech G305 X SUPERLIGHT | Mouse | `046d:c0a4` | Untested |
+| Logitech G705 | Mouse | `046d:c096` | Untested |
+| Logitech G502 X PLUS Millennium Falcon | Mouse | `046d:c09e` | Untested |
+| Logitech PRO X SUPERLIGHT 2c | Mouse | `046d:c09f` | Untested |
+| Logitech PRO X SUPERLIGHT 2 DEX | Mouse | `046d:c0a0` | Untested |
+| Logitech PRO X2 SUPERSTRIKE | Mouse | `046d:c0a8` | Untested |
+| Logitech PRO X3 SUPERSTRIKE | Mouse | `046d:c0a9` | Untested |
+| Logitech PRO X1 SUPERSTRIKE | Mouse | `046d:c0b7` | Untested |
 | Logitech G915 X | Keyboard | `046d:c359` | Untested |
 | Logitech G915 X LIGHTSPEED | Keyboard | `046d:c356` | Untested |
 | Logitech G915 | Keyboard | `046d:c33e` | Untested |
@@ -210,6 +245,23 @@ Features are discovered at runtime and shown in the UI per device.
 | Logitech G610 | Keyboard | `046d:c333` | Untested |
 | Logitech G910 | Keyboard | `046d:c335` | Untested |
 | Logitech G910 Orion Spark | Keyboard | `046d:c32b` | Untested |
+| Logitech G310 | Keyboard | `046d:c32d` | Untested |
+| Logitech G410 | Keyboard | `046d:c330` | Untested |
+| Logitech G715 | Keyboard | `046d:c347` | Untested |
+| Logitech G713 | Keyboard | `046d:c348` | Untested |
+| Logitech PRO X 60 | Keyboard | `046d:c351` | Untested |
+| Logitech PRO X TKL | Keyboard | `046d:c352` | Untested |
+| Logitech G915 X LIGHTSPEED TKL | Keyboard | `046d:c357` | Untested |
+| Logitech G515 TKL | Keyboard | `046d:c358` | Untested |
+| Logitech G517 LIGHTSPEED TKL | Keyboard | `046d:c35a` | Untested |
+| Logitech G512 X 75 | Keyboard | `046d:c35f` | Untested |
+| Logitech G512 X 98 | Keyboard | `046d:c360` | Untested |
+| Logitech G316 X | Keyboard | `046d:c361` | Untested |
+| Logitech G515 RAPID TKL | Keyboard | `046d:c363` | Untested |
+| Logitech PRO X2 RAPID | Keyboard | `046d:c364` | Untested |
+| Logitech G316 | Keyboard | `046d:c366` | Untested |
+| Logitech G316 X 75 | Keyboard | `046d:c36a` | Untested |
+| Logitech G316 X 98 | Keyboard | `046d:c36b` | Untested |
 | Logitech PRO X 2 LIGHTSPEED | Headset | `046d:0af7` | Untested |
 | Logitech PRO X 3 LIGHTSPEED | Headset | `046d:0b45` | Untested |
 | Logitech G522 LIGHTSPEED | Headset | `046d:0b18` `046d:0b19` | Untested |
@@ -243,15 +295,23 @@ Features are discovered at runtime and shown in the UI per device.
 | Arctis Nova Pro Wireless X | Headset | `1038:12e5` | Verified |
 | Arctis Nova Pro Wireless | Headset | `1038:12e0` | Untested |
 | Arctis Nova Pro Wireless X (White) | Headset | `1038:225d` | Untested |
-| Arctis Nova 7 | Headset | `1038:2202` `1038:22a1` | Untested |
+| Arctis Nova 7 | Headset | `1038:2202` | Untested |
+| Arctis Nova 7 Upgrade | Headset | `1038:22a1` | Untested |
 | Arctis Nova 7 Gen 2 | Headset | `1038:227e` | Untested |
-| Arctis Nova 7X | Headset | `1038:2206` `1038:22a4` `1038:22a5` | Untested |
-| Arctis Nova 7X White | Headset | `1038:2258` `1038:22ad` | Untested |
+| Arctis Nova 7X | Headset | `1038:2206` `1038:22a4` | Untested |
+| Arctis Nova 7X Upgrade | Headset | `1038:22a5` | Untested |
+| Arctis Nova 7X White | Headset | `1038:2258` | Untested |
+| Arctis Nova 7X White Upgrade | Headset | `1038:22ad` | Untested |
 | Arctis Nova 7X Gen 2 | Headset | `1038:229e` | Untested |
-| Arctis Nova 7P | Headset | `1038:220a` `1038:22a7` | Untested |
+| Arctis Nova 7P | Headset | `1038:220a` | Untested |
+| Arctis Nova 7P Upgrade | Headset | `1038:22a7` | Untested |
 | Arctis Nova 7P Gen 2 | Headset | `1038:2298` | Untested |
-| Arctis Nova 7 Diablo IV | Headset | `1038:223a` `1038:22a9` | Untested |
-| Arctis Nova 7 WoW Edition | Headset | `1038:227a` `1038:22ab` | Untested |
+| Arctis Nova 7 Diablo IV | Headset | `1038:223a` | Untested |
+| Arctis Nova 7 Diablo IV Upgrade | Headset | `1038:22a9` | Untested |
+| Arctis Nova 7 WoW Edition | Headset | `1038:227a` | Untested |
+| Arctis Nova 7 WoW Edition Upgrade | Headset | `1038:22ab` | Untested |
+| Arctis Nova 4 | Headset | `1038:12f2` | Untested |
+| Arctis Nova 4X | Headset | `1038:12f6` | Untested |
 | Arctis Nova 5 | Headset | `1038:2232` | Untested |
 | Arctis Nova 5X | Headset | `1038:2253` | Untested |
 | Arctis Nova 5X White | Headset | `1038:2264` | Untested |
@@ -320,18 +380,25 @@ Features are discovered at runtime and shown in the UI per device.
 | Apex 3 | Keyboard | `1038:161a` | Untested |
 | Apex 3 TKL | Keyboard | `1038:1622` | Untested |
 | Apex 5 | Keyboard | `1038:161c` | Untested |
+| Apex 5 (2024) | Keyboard | `1038:1650` | Untested |
 | Apex 7 | Keyboard | `1038:1612` | Untested |
+| Apex 7 (2024) | Keyboard | `1038:1652` | Untested |
 | Apex 7 TKL | Keyboard | `1038:1618` | Untested |
 | Apex Pro | Keyboard | `1038:1610` | Untested |
 | Apex Pro 3 | Keyboard | `1038:1640` | Untested |
 | Apex Pro TKL | Keyboard | `1038:1614` | Untested |
 | Apex Pro TKL (2023) | Keyboard | `1038:1628` `1038:1630` `1038:1632` | Untested |
 | Apex Pro TKL Gen 3 | Keyboard | `1038:1642` `1038:1644` `1038:1646` | Untested |
+| Apex Pro TKL (2024) Cyber | Keyboard | `1038:1660` | Untested |
+| Apex Pro TKL (2024) Steel | Keyboard | `1038:1662` | Untested |
 | Apex 9 TKL | Keyboard | `1038:1634` | Untested |
 | Apex 9 Mini | Keyboard | `1038:1620` | Untested |
+| Apex Pro Mini | Keyboard | `1038:161e` `1038:1624` `1038:1626` | Untested |
+| Apex Pro Mini (2024) | Keyboard | `1038:1648` | Untested |
 | Apex M750 | Keyboard | `1038:0616` | Untested |
+| Apex M750 TKL | Keyboard | `1038:0617` `1038:0619` | Untested |
 | Apex (OG) / Apex Fnatic | Keyboard | `1038:1202` | Untested |
-| Apex 350 | Keyboard | `1038:1206` | Untested |
+| Apex 350 | Keyboard | `1038:1206` `1038:120a` | Untested |
 
 ## Corsair
 
@@ -350,7 +417,16 @@ Features are discovered at runtime and shown in the UI per device.
 | Corsair STRAFE RGB | Keyboard | `1b1c:1b20` | Untested |
 | Corsair STRAFE RGB MK.2 | Keyboard | `1b1c:1b48` | Untested |
 | Corsair K55 RGB | Keyboard | `1b1c:1b3d` | Untested |
-| Corsair M65 RGB ELITE | Mouse | `1b1c:1b5a` | Untested |
+| Corsair K70 RGB RAPIDFIRE SE | Keyboard | `1b1c:1b59` | Untested |
+| Corsair K70 RGB MK.2 IG | Keyboard | `1b1c:1b87` | Untested |
+| Corsair K70 LUX | Keyboard | `1b1c:1b36` | Untested |
+| Corsair K70 RAPIDFIRE | Keyboard | `1b1c:1b3a` | Untested |
+| Corsair K68 | Keyboard | `1b1c:1b3f` | Untested |
+| Corsair K68 SE | Keyboard | `1b1c:1ba5` | Untested |
+| Corsair K63 | Keyboard | `1b1c:1b40` | Untested |
+| Corsair K66 | Keyboard | `1b1c:1b41` | Untested |
+| Corsair STRAFE | Keyboard | `1b1c:1b44` `1b1c:1b15` | Untested |
+| Corsair M65 RGB ELITE | Mouse | `1b1c:1b5a` `1b1c:1b88` | Untested |
 | Corsair M65 PRO RGB | Mouse | `1b1c:1b2e` | Untested |
 | Corsair IRONCLAW RGB | Mouse | `1b1c:1b5d` | Untested |
 | Corsair SCIMITAR RGB ELITE | Mouse | `1b1c:1b8b` | Untested |
@@ -371,15 +447,15 @@ Features are discovered at runtime and shown in the UI per device.
 | Corsair K70 PRO OPTI-MECHANICAL | Keyboard | `1b1c:1bd4` | Untested |
 | Corsair K70 RGB TKL | Keyboard | `1b1c:1b73` | Untested |
 | Corsair K70 RGB TKL Champion Series | Keyboard | `1b1c:1bb9` | Untested |
-| Corsair K70 CORE RGB | Keyboard | `1b1c:1bfd` `1b1c:1bff` `1b1c:2b0a` | Untested |
+| Corsair K70 CORE RGB | Keyboard | `1b1c:1bfd` `1b1c:1bff` `1b1c:2b0a` `1b1c:2b09` | Untested |
 | Corsair K70 CORE TKL | Keyboard | `1b1c:2b01` | Untested |
 | Corsair K70 CORE TKL WIRELESS | Keyboard | `1b1c:2b02` | Untested |
 | Corsair K70 PRO TKL | Keyboard | `1b1c:2b14` | Untested |
-| Corsair K70 PRO MINI WIRELESS | Keyboard | `1b1c:1bb6` | Untested |
+| Corsair K70 PRO MINI WIRELESS | Keyboard | `1b1c:1bb6` `1b1c:1bd3` | Untested |
 | Corsair K70 MAX | Keyboard | `1b1c:1bc0` | Untested |
-| Corsair K65 RGB MINI | Keyboard | `1b1c:1baf` `1b1c:1bc3` `1b1c:1bcf` | Untested |
+| Corsair K65 RGB MINI | Keyboard | `1b1c:1baf` `1b1c:1bc3` `1b1c:1bcf` `1b1c:1bbd` | Untested |
 | Corsair K65 PRO MINI | Keyboard | `1b1c:1bd7` | Untested |
-| Corsair K65 PLUS WIRELESS | Keyboard | `1b1c:2b10` `1b1c:2b11` `1b1c:2b23` `1b1c:2b07` | Untested |
+| Corsair K65 PLUS WIRELESS | Keyboard | `1b1c:2b10` `1b1c:2b11` `1b1c:2b12` `1b1c:2b23` `1b1c:2b36` `1b1c:2b37` `1b1c:2b07` | Untested |
 | Corsair K100 RGB | Keyboard | `1b1c:1b7d` | Untested |
 | Corsair K100 RGB OPTICAL | Keyboard | `1b1c:1b7c` `1b1c:1bc5` | Untested |
 | Corsair K100 AIR WIRELESS | Keyboard | `1b1c:1bab` | Untested |
@@ -392,6 +468,15 @@ Features are discovered at runtime and shown in the UI per device.
 | Corsair K55 RGB PRO XT | Keyboard | `1b1c:1ba1` | Untested |
 | Corsair K55 CORE RGB | Keyboard | `1b1c:1bfe` `1b1c:2b05` | Untested |
 | Corsair K55 CORE TKL RGB | Keyboard | `1b1c:2b20` | Untested |
+| Corsair K60 PRO | Keyboard | `1b1c:1b83` | Untested |
+| Corsair SKIFF 100 | Keyboard | `1b1c:2b3d` | Untested |
+| Corsair SKIFF 100 PLUS | Keyboard | `1b1c:2b3e` | Untested |
+| Corsair VANGUARD 96 | Keyboard | `1b1c:2b0d` | Untested |
+| Corsair VANGUARD PRO 96 | Keyboard | `1b1c:2b0e` `1b1c:2b54` | Untested |
+| Corsair VANGUARD 96 WIRELESS | Keyboard | `1b1c:2b0f` | Untested |
+| Corsair VANGUARD AIR 99 | Keyboard | `1b1c:2b21` | Untested |
+| Corsair MAKR 75 | Keyboard | `1b1c:2b04` | Untested |
+| Corsair MAKR PRO 75 | Keyboard | `1b1c:2b1a` `1b1c:2b5b` | Untested |
 | Corsair K57 RGB WIRELESS | Keyboard | `1b1c:1b6e` `1b1c:1b62` | Untested |
 | Corsair DARK CORE RGB PRO | Mouse | `1b1c:1b80` `1b1c:1b81` | Untested |
 | Corsair DARK CORE RGB PRO SE | Mouse | `1b1c:1b7e` `1b1c:1b7f` | Untested |
@@ -401,12 +486,12 @@ Features are discovered at runtime and shown in the UI per device.
 | Corsair HARPOON V2 WIRELESS | Mouse | `1b1c:2b2e` | Untested |
 | Corsair KATAR PRO | Mouse | `1b1c:1b93` | Untested |
 | Corsair KATAR PRO XT | Mouse | `1b1c:1bac` | Untested |
-| Corsair KATAR PRO V2 | Mouse | `1b1c:1bba` | Untested |
-| Corsair KATAR PRO WIRELESS | Mouse | `1b1c:1b94` | Untested |
+| Corsair KATAR ELITE WIRELESS | Mouse | `1b1c:1bba` | Untested |
+| Corsair KATAR PRO WIRELESS | Mouse | `1b1c:1b94` `1b1c:1bae` | Untested |
 | Corsair M55 RGB PRO | Mouse | `1b1c:1b70` | Untested |
 | Corsair M55 | Mouse | `1b1c:2b03` | Untested |
-| Corsair M55 WIRELESS | Mouse | `1b1c:1bfb` | Untested |
-| Corsair M65 RGB ULTRA | Mouse | `1b1c:1b9e` | Untested |
+| Corsair M55 WIRELESS | Mouse | `1b1c:1bfb` `1b1c:2b1e` | Untested |
+| Corsair M65 RGB ULTRA | Mouse | `1b1c:1b9e` `1b1c:1bef` | Untested |
 | Corsair M65 RGB ULTRA WIRELESS | Mouse | `1b1c:1bb5` `1b1c:1bd6` | Untested |
 | Corsair M75 | Mouse | `1b1c:1bf0` | Untested |
 | Corsair M75 WIRELESS | Mouse | `1b1c:1bf1` `1b1c:2b08` | Untested |
@@ -421,22 +506,31 @@ Features are discovered at runtime and shown in the UI per device.
 | Corsair DARKSTAR RGB WIRELESS | Mouse | `1b1c:1bb2` | Untested |
 | Corsair SLIPSTREAM Wireless Receiver | Mouse | `1b1c:1ba6` | Untested |
 | Corsair SLIPSTREAM Wireless Receiver (2) | Mouse | `1b1c:1bdc` | Untested |
+| Corsair SLIPSTREAM Wireless Receiver V3 | Mouse | `1b1c:2b1b` `1b1c:2b3c` | Untested |
 | Corsair VOID Wireless | Headset | `1b1c:1b27` `1b1c:1b23` `1b1c:1b25` `1b1c:0a0c` `1b1c:0a2b` | Untested |
 | Corsair VOID PRO Wireless | Headset | `1b1c:0a14` `1b1c:0a16` `1b1c:0a1a` | Untested |
 | Corsair VOID ELITE Wireless | Headset | `1b1c:0a55` `1b1c:0a51` `1b1c:0a75` | Untested |
 | Corsair HS70 Wireless | Headset | `1b1c:0a38` | Untested |
 | Corsair HS70 PRO Wireless | Headset | `1b1c:0a4f` | Untested |
 | Corsair VOID USB | Headset | `1b1c:1b2a` `1b1c:1b29` `1b1c:1b1c` `1b1c:0a0f` | Untested |
-| Corsair VOID PRO USB | Headset | `1b1c:0a17` `1b1c:0a1d` | Untested |
+| Corsair VOID PRO USB | Headset | `1b1c:0a17` `1b1c:0a1d` `1b1c:0a1f` | Untested |
+| Corsair VOID SURROUND | Headset | `1b1c:0a30` `1b1c:0a31` | Untested |
+| Corsair VOID PRO SURROUND | Headset | `1b1c:0a18` `1b1c:0a1e` | Untested |
+| Corsair VOID ELITE SURROUND | Headset | `1b1c:0a53` `1b1c:0a57` | Untested |
 | Corsair VOID ELITE USB | Headset | `1b1c:0a52` `1b1c:0a56` | Untested |
-| Corsair VIRTUOSO RGB Wireless | Headset | `1b1c:0a42` `1b1c:0a44` `1b1c:0a41` `1b1c:0a43` | Untested |
-| Corsair VIRTUOSO RGB Wireless SE | Headset | `1b1c:0a3e` `1b1c:0a40` `1b1c:0a3d` `1b1c:0a3f` | Untested |
-| Corsair VIRTUOSO RGB Wireless XT | Headset | `1b1c:0a64` `1b1c:0a62` | Untested |
-| Corsair HS80 RGB Wireless | Headset | `1b1c:0a6b` `1b1c:0a69` `1b1c:0a73` | Untested |
-| Corsair HS80 MAX Wireless | Headset | `1b1c:0a97` `1b1c:2a0f` `1b1c:2a0c` | Untested |
-| Corsair VOID Wireless V2 | Headset | `1b1c:2a08` | Untested |
-| Corsair VOID MAX Wireless V2 | Headset | `1b1c:2a12` `1b1c:2a05` | Untested |
-| Corsair VIRTUOSO MAX Wireless | Headset | `1b1c:2a02` `1b1c:2a03` | Untested |
+| Corsair VIRTUOSO RGB Wireless | Headset | `1b1c:0a42` `1b1c:0a44` `1b1c:0a4a` `1b1c:0a4c` `1b1c:0a41` `1b1c:0a43` | Untested |
+| Corsair VIRTUOSO Wireless | Headset | `1b1c:0a67` `1b1c:0a5c` `1b1c:0a5a` | Untested |
+| Corsair VIRTUOSO RGB Wireless SE | Headset | `1b1c:0a3e` `1b1c:0a40` `1b1c:0a46` `1b1c:0a48` `1b1c:0a3d` `1b1c:0a3f` | Untested |
+| Corsair VIRTUOSO RGB Wireless XT | Headset | `1b1c:0a64` `1b1c:0a62` `1b1c:0a78` `1b1c:0a76` | Untested |
+| Corsair HS80 RGB Wireless | Headset | `1b1c:0a6b` `1b1c:0a69` `1b1c:0a73` `1b1c:0a71` | Untested |
+| Corsair HS55 Wireless | Headset | `1b1c:0a8f` `1b1c:0a8e` | Untested |
+| Corsair HS65 Wireless | Headset | `1b1c:0a92` `1b1c:0a91` | Untested |
+| Corsair HS55 CORE Wireless | Headset | `1b1c:0a95` `1b1c:0a94` | Untested |
+| Corsair HS80 MAX Wireless | Headset | `1b1c:0a97` `1b1c:2a0f` `1b1c:2a0c` `1b1c:0a96` `1b1c:2a0e` `1b1c:2a0b` | Untested |
+| Corsair HS80 V2 MAX Wireless | Headset | `1b1c:2a1a` `1b1c:2a1b` | Untested |
+| Corsair VOID Wireless V2 | Headset | `1b1c:2a08` `1b1c:2a09` | Untested |
+| Corsair VOID MAX Wireless V2 | Headset | `1b1c:2a12` `1b1c:2a05` `1b1c:2a10` `1b1c:2a07` | Untested |
+| Corsair VIRTUOSO MAX Wireless | Headset | `1b1c:2a02` `1b1c:2a03` `1b1c:2a00` `1b1c:2a01` | Untested |
 
 ## HyperX
 
@@ -445,7 +539,7 @@ Features are discovered at runtime and shown in the UI per device.
 | HyperX Cloud II Wireless | Headset | `0951:1718` `0951:0b92` | Untested |
 | HyperX Cloud II Wireless | Headset | `03f0:0696` `03f0:018b` | Untested |
 | HyperX Cloud Stinger 2 Wireless | Headset | `03f0:0d93` | Untested |
-| HyperX Cloud III Wireless | Headset | `03f0:05b7` `03f0:0c9d` | Untested |
+| HyperX Cloud III Wireless | Headset | `03f0:05b7` `03f0:0c9d` `03f0:06b7` `03f0:0e9d` | Untested |
 | HyperX Cloud III S Wireless | Headset | `03f0:06be` `03f0:02cc` | Untested |
 | HyperX Cloud II Core Wireless | Headset | `03f0:069f` `03f0:0995` | Untested |
 | HyperX Cloud Alpha Wireless | Headset | `03f0:098d` `03f0:1743` `03f0:1765` | Untested |
@@ -455,10 +549,24 @@ Features are discovered at runtime and shown in the UI per device.
 | HyperX Cloud Flight S | Headset | `0951:16ea` `0951:16eb` | Untested |
 | HyperX Cloud III | Headset | `03f0:089d` `03f0:03cc` | Untested |
 | HyperX Cloud Alpha S | Headset | `0951:16ed` | Untested |
-| HyperX Pulsefire Haste 2 Wireless | Mouse | `03f0:0f98` | Untested |
+| HyperX Cloud Alpha S | Headset | `03f0:0c91` | Untested |
+| HyperX Cloud II Wireless | Headset | `03f0:0c8a` | Untested |
+| HyperX Pulsefire Haste 2 Wireless | Mouse | `03f0:0f98` `03f0:0d97` | Untested |
 | HyperX Pulsefire Saga Pro | Mouse | `03f0:06bf` `03f0:04bf` | Untested |
+| HyperX Pulsefire Haste 2 | Mouse | `03f0:0b97` | Untested |
+| HyperX Pulsefire Haste 2 Mini Wireless | Mouse | `03f0:0da0` `03f0:0ba0` | Untested |
+| HyperX Pulsefire Haste 2 S Wireless | Mouse | `03f0:0bb8` `03f0:0ab8` | Untested |
+| HyperX Pulsefire Haste 2 Core | Mouse | `03f0:04b5` | Untested |
+| HyperX Pulsefire Haste 2 Core Wireless | Mouse | `03f0:0ab5` | Untested |
+| HyperX Pulsefire Haste 2 Pro | Mouse | `03f0:0cbd` `03f0:0abd` | Untested |
+| HyperX Pulsefire Fuse Wireless | Mouse | `03f0:0fbd` | Untested |
+| HyperX Pulsefire Saga | Mouse | `03f0:0ebe` | Untested |
+| HyperX Alloy Rise | Keyboard | `03f0:0fa0` | Untested |
+| HyperX Alloy Rise 75 | Keyboard | `03f0:02a1` | Untested |
+| HyperX Alloy Rise 75 Wireless | Keyboard | `03f0:01b9` `03f0:0eb8` | Untested |
 | HyperX Pulsefire Dart | Mouse | `0951:16e1` `0951:16e2` | Untested |
 | HyperX Pulsefire Dart | Mouse | `03f0:068e` `03f0:088e` | Untested |
+| HyperX Pulsefire Haste Wireless | Mouse | `03f0:028e` `03f0:048e` | Untested |
 | HyperX Pulsefire Haste | Mouse | `0951:1727` | Untested |
 | HyperX Pulsefire Haste | Mouse | `03f0:0f8f` | Untested |
 | HyperX Pulsefire Surge | Mouse | `0951:16d3` | Untested |
@@ -466,7 +574,9 @@ Features are discovered at runtime and shown in the UI per device.
 | HyperX Pulsefire Core | Mouse | `0951:16de` | Untested |
 | HyperX Pulsefire Core | Mouse | `03f0:0d8f` | Untested |
 | HyperX Pulsefire FPS Pro | Mouse | `0951:16d7` | Untested |
+| HyperX Pulsefire FPS Pro | Mouse | `03f0:0e8f` | Untested |
 | HyperX Pulsefire Raid | Mouse | `0951:16e4` | Untested |
+| HyperX Pulsefire Raid | Mouse | `03f0:0290` | Untested |
 | HyperX Alloy Origins | Keyboard | `0951:16e5` | Untested |
 | HyperX Alloy Origins | Keyboard | `03f0:0591` | Untested |
 | HyperX Alloy Origins Core | Keyboard | `0951:16e6` | Untested |
@@ -527,6 +637,14 @@ Features are discovered at runtime and shown in the UI per device.
 | ASUS TUF Gaming M5 | Mouse | `0b05:1898` | Untested |
 | ASUS ROG Gladius II Origin PNK LTD | Mouse | `0b05:18cd` | Untested |
 | ASUS ROG Strix Carry | Mouse | `0b05:18b4` | Untested |
+| ASUS ROG Gladius III Core | Mouse | `0b05:1c8d` | Untested |
+| ASUS ROG Harpe II Extreme Edition 2.0 | Mouse | `0b05:1d7a` | Untested |
+| ASUS ROG Gladius IV Ace | Mouse | `0b05:1db0` | Untested |
+| ASUS ROG Gladius IV Ace Max | Mouse | `0b05:1e4e` | Untested |
+| ASUS ROG Harpe II Ace Mini | Mouse | `0b05:1e2f` | Untested |
+| ASUS ROG Harpe II Ace Mini Demon1 Edition | Mouse | `0b05:1e51` | Untested |
+| ASUS ROG Harpe II Ace PBZ | Mouse | `0b05:1e4a` | Untested |
+| ASUS ROG Spatha X 65K | Mouse | `0b05:1dde` | Untested |
 | ASUS ROG Strix Scope | Keyboard | `0b05:18f8` | Untested |
 | ASUS ROG Strix Scope TKL | Keyboard | `0b05:190c` | Untested |
 | ASUS ROG Strix Scope TKL PNK LTD | Keyboard | `0b05:1954` | Untested |
@@ -561,9 +679,29 @@ Features are discovered at runtime and shown in the UI per device.
 | ASUS TUF Gaming K5 | Keyboard | `0b05:1899` | Untested |
 | ASUS TUF Gaming K7 | Keyboard | `0b05:18aa` | Untested |
 | ASUS TX 98 | Keyboard | `0b05:1b3a` | Untested |
+| ASUS ROG Azoth 96 HE | Keyboard | `0b05:1c10` | Untested |
+| ASUS ROG Falcata | Keyboard | `0b05:1c2f` | Untested |
+| ASUS ROG Azoth Extreme Edition 2.0 | Keyboard | `0b05:1da2` | Untested |
+| ASUS ROG Strix Morph 96 Wireless | Keyboard | `0b05:1ce8` | Untested |
+| ASUS ROG Strix Morph 96 X Wireless | Keyboard | `0b05:1e0a` | Untested |
+| ASUS ROG Strix Morph 96 Wireless PBZ | Keyboard | `0b05:1e5b` | Untested |
+| ASUS ProArt KD300 | Keyboard | `0b05:1d45` `0b05:1d47` | Untested |
+| ASUS TX75 Analog | Keyboard | `0b05:1d68` `0b05:1d6a` | Untested |
+| ASUS ROG Falchion Ace 75 HE | Keyboard | `0b05:1c7d` | Untested |
+| ASUS ROG Falchion Ace HFX Zywoo Edition | Keyboard | `0b05:1d1d` | Untested |
+| ASUS TX75 Core | Keyboard | `0b05:1df3` | Untested |
+| ASUS TUF Gaming K4 Magnetic | Keyboard | `0b05:1df5` | Untested |
+| ASUS TUF Gaming K4 Mechanical | Keyboard | `0b05:1df7` | Untested |
 | ASUS ROG Pelta | Headset | `0b05:1b84` | Untested |
 | ASUS ROG Delta II | Headset | `0b05:1afa` | Untested |
 | ASUS ROG Delta II KJP | Headset | `0b05:1d41` | Untested |
+| ASUS ROG Pelta (cable) | Headset | `0b05:1b82` | Untested |
+| ASUS ROG Pelta (rev. 2) | Headset | `0b05:1e1b` | Untested |
+| ASUS ROG Pelta (rev. 2, cable) | Headset | `0b05:1e1d` | Untested |
+| ASUS ROG Delta II PBZ | Headset | `0b05:1e6b` | Untested |
+| ASUS ROG Cetra Open Wireless | Headset | `0b05:1cac` | Untested |
+| ASUS ROG Cetra True Wireless II OLED | Headset | `0b05:1d18` | Untested |
+| ASUS ROG Delta II X | Headset | `0b05:1de5` | Untested |
 | ASUS ROG Omni Receiver | Mouse | `0b05:1ace` | Untested |
 
 ## ROCCAT
@@ -606,13 +744,14 @@ Features are discovered at runtime and shown in the UI per device.
 | Sony INZONE H5 | Headset | `054c:0ebf` | Untested |
 | Sony INZONE Buds | Headset | `054c:0ec2` | Untested |
 | Sony PULSE 3D | Headset | `054c:0d5e` | Untested |
+| Sony INZONE Mouse-A | Mouse | `054c:0fae` `054c:0faf` | Untested |
 
 ## Audeze
 
 | Device | Type | USB IDs | Status |
 |---|---|---|---|
 | Audeze Maxwell 2 | Headset | `3329:4b29` `3329:4b28` | Untested |
-| Audeze Maxwell | Headset | `3329:4b19` `3329:4b18` | Untested |
+| Audeze Maxwell | Headset | `3329:4b19` `3329:4b18` `3329:4b1a` `3329:4b1e` | Untested |
 
 ## Glorious
 
@@ -624,6 +763,16 @@ Features are discovered at runtime and shown in the UI per device.
 | Glorious Model O 2 Wireless | Mouse | `093a:822d` `093a:822a` | Untested |
 | Glorious Model O- Wireless | Mouse | `258a:2013` `258a:2024` | Untested |
 | Glorious Model D- Wireless | Mouse | `258a:2014` `258a:2025` | Untested |
+| Glorious Model O PRO Wireless | Mouse | `258a:2015` `258a:2027` | Untested |
+| Glorious Model D PRO Wireless | Mouse | `258a:2017` `258a:2029` | Untested |
+| Glorious Series One PRO Wireless | Mouse | `258a:2018` `258a:2031` | Untested |
+| Glorious Model O 2 PRO Wireless | Mouse | `258a:2019` `258a:2033` | Untested |
+| Glorious Model D 2 PRO Wireless | Mouse | `258a:201a` `258a:2034` | Untested |
+| Glorious Model O 2 PRO 4k/8k Wireless | Mouse | `258a:201b` `258a:2035` | Untested |
+| Glorious Model D 2 PRO 4k/8k Wireless | Mouse | `258a:201c` `258a:2036` | Untested |
+| Glorious Series 2 PRO Wireless | Mouse | `258a:201d` `258a:2039` | Untested |
+| Glorious Model D 2 Wireless | Mouse | `093a:824d` `093a:824a` | Untested |
+| Glorious Model O 2 Mini Wireless | Mouse | `093a:826d` `093a:826a` | Untested |
 | Glorious Model O / O- | Mouse | `258a:0036` | Untested |
 | Glorious Model D / D- | Mouse | `258a:0033` | Untested |
 
@@ -636,6 +785,13 @@ Features are discovered at runtime and shown in the UI per device.
 | Cooler Master MM720 | Mouse | `2516:0141` | Untested |
 | Cooler Master MM730 | Mouse | `2516:0165` | Untested |
 | Cooler Master MM530 | Mouse | `2516:0065` | Untested |
+| Cooler Master MM310 | Mouse | `2516:015f` | Untested |
+| Cooler Master MM310 SF6 Chun-Li | Mouse | `2516:01ec` | Untested |
+| Cooler Master MM712 wired | Mouse | `2516:01df` | Untested |
+| Cooler Master MM731 | Mouse | `2516:0167` | Untested |
+| Cooler Master MM712 LINE FRIENDS | Mouse | `2516:01f0` | Untested |
+| Cooler Master MM710 | Mouse | `2516:012f` | Untested |
+| Cooler Master MM311 | Mouse | `2516:0161` | Untested |
 | Cooler Master CK550 V2 | Keyboard | `2516:0145` | Untested |
 | Cooler Master CK530 V2 | Keyboard | `2516:0147` | Untested |
 | Cooler Master SK622 Black | Keyboard | `2516:0149` | Untested |
@@ -644,7 +800,15 @@ Features are discovered at runtime and shown in the UI per device.
 | Cooler Master CK530 | Keyboard | `2516:009f` | Untested |
 | Cooler Master MK730 | Keyboard | `2516:008f` | Untested |
 | Cooler Master SK652 | Keyboard | `2516:015d` | Untested |
-| Cooler Master SK653 | Keyboard | `2516:01ab` | Untested |
+| Cooler Master SK653 | Keyboard | `2516:01ab` `2516:015b` | Untested |
+| Cooler Master SK620 Space Grey | Keyboard | `2516:0157` | Untested |
+| Cooler Master SK620 Silver | Keyboard | `2516:0159` | Untested |
+| Cooler Master SK631 Black | Keyboard | `2516:008b` | Untested |
+| Cooler Master SK631 White | Keyboard | `2516:0125` | Untested |
+| Cooler Master SK651 Black | Keyboard | `2516:0091` | Untested |
+| Cooler Master SK651 White | Keyboard | `2516:0127` | Untested |
+| Cooler Master CK570 SF6 Chun-Li | Keyboard | `2516:01e8` | Untested |
+| Cooler Master CK720 | Keyboard | `2516:016b` | Untested |
 | Cooler Master MasterKeys Pro L | Keyboard | `2516:003b` | Untested |
 | Cooler Master MasterKeys Pro L White | Keyboard | `2516:0047` | Untested |
 | Cooler Master MasterKeys Pro S | Keyboard | `2516:003c` | Untested |
@@ -655,32 +819,50 @@ Features are discovered at runtime and shown in the UI per device.
 |---|---|---|---|
 | MSI Vigor GK30 | Keyboard | `0db0:0b30` | Untested |
 | MSI Clutch GM11 | Mouse | `0db0:0d11` | Untested |
+| MSI Clutch GM11 (04d9) | Mouse | `04d9:8022` | Untested |
 
 ## Redragon
 
 | Device | Type | USB IDs | Status |
 |---|---|---|---|
-| Redragon M711 Cobra | Mouse | `04d9:fc30` | Untested |
+| Redragon M711 Cobra / M711-FPS | Mouse | `04d9:fc30` | Untested |
 | Redragon M908 Impact | Mouse | `04d9:fc4d` | Untested |
 | Redragon M715 Dagger | Mouse | `04d9:fc39` | Untested |
 | Redragon M716 Inquisitor | Mouse | `04d9:fc3a` | Untested |
 | Redragon M602 / M607 Griffin | Mouse | `04d9:fc38` | Untested |
-| Redragon M808 Storm | Mouse | `04d9:fc5f` | Untested |
-| Redragon M801 Sniper | Mouse | `04d9:fc58` | Untested |
+| Redragon M808 Storm / M998-RGB | Mouse | `04d9:fc5f` | Untested |
+| Redragon M801 Sniper / M912-RGB | Mouse | `04d9:fc58` | Untested |
 | Redragon M810 Taipan | Mouse | `04d9:fa7e` | Untested |
 | Redragon M987 Reaping | Mouse | `04d9:fc69` | Untested |
-| Redragon M921 Azzinoth | Mouse | `04d9:fc40` | Untested |
-| Redragon M711-FPS-1 Cobra FPS | Mouse | `04d9:fc62` | Untested |
+| Redragon M901 Perdition / M921 Azzinoth | Mouse | `04d9:fc40` | Untested |
+| Redragon M711 Cobra FPS (2710-G) | Mouse | `04d9:fc62` | Untested |
 | Redragon M901-K-2 Perdition | Mouse | `04d9:fc5e` | Untested |
 | Redragon M719 Invader | Mouse | `04d9:fc4f` | Untested |
 | Redragon M709 Tiger | Mouse | `04d9:fc2a` | Untested |
 | Redragon M721-Pro Lonewolf2 | Mouse | `04d9:fc5c` | Untested |
 | Redragon M990 Legend | Mouse | `04d9:fc0f` `04d9:fc41` | Untested |
 | Redragon M702-2 Phoenix | Mouse | `04d9:fc2f` | Untested |
-| Redragon M909 Emperor / M802 Titanoboa 2 | Mouse | `04d9:fc42` | Untested |
+| Redragon M802 Titanoboa 2 | Mouse | `04d9:fc42` | Untested |
 | Redragon M612-RGB Predator | Mouse | `04d9:fc61` | Untested |
 | Redragon M901 Perdition | Mouse | `04d9:fc02` | Untested |
 | Redragon M910 Ranger | Mouse | `04d9:fc49` | Untested |
+| Redragon M909-RGB Emperor | Mouse | `04d9:fc4c` | Untested |
+| Redragon M907-RGB Inspirit 2 | Mouse | `04d9:fc3c` | Untested |
+| Redragon M701 Lavawolf | Mouse | `04d9:fc3e` | Untested |
+| Redragon M902-RGB Samsara 2 | Mouse | `04d9:fc3f` | Untested |
+| Redragon M801 Mammoth | Mouse | `04d9:fc56` | Untested |
+| Redragon M720-RGB Vampire | Mouse | `04d9:fc5d` | Untested |
+| Redragon mouse 2732 (fc3b) | Mouse | `04d9:fc3b` | Untested |
+| Redragon mouse 2866 (fc60) | Mouse | `04d9:fc60` | Untested |
+| Redragon mouse 2890 (fc65) | Mouse | `04d9:fc65` | Untested |
+| Redragon mouse 2825-A (fc66) | Mouse | `04d9:fc66` | Untested |
+| Redragon mouse 2903 (fc6b) | Mouse | `04d9:fc6b` | Untested |
+| Redragon mouse 2913-A (fc6d) | Mouse | `04d9:fc6d` | Untested |
+| Redragon mouse 2928 (fc6e) | Mouse | `04d9:fc6e` | Untested |
+| Redragon mouse 2713 (fc6f) | Mouse | `04d9:fc6f` | Untested |
+| Redragon mouse 2931-A (fc70) | Mouse | `04d9:fc70` | Untested |
+| Redragon G881-B / 2935 (fc71) | Mouse | `04d9:fc71` | Untested |
+| Redragon mouse 2915 (fc75) | Mouse | `04d9:fc75` | Untested |
 
 ## Wooting
 
@@ -691,6 +873,7 @@ Features are discovered at runtime and shown in the UI per device.
 | Wooting 60HE+ | Keyboard | `31e3:1320` `31e3:1321` `31e3:1322` | Untested |
 | Wooting 60HE V2 | Keyboard | `31e3:1340` `31e3:1341` `31e3:1342` | Untested |
 | Wooting 80HE | Keyboard | `31e3:1400` `31e3:1401` `31e3:1402` | Untested |
+| Wooting 80HE+ | Keyboard | `31e3:1410` `31e3:1411` `31e3:1412` | Untested |
 | Wooting Two HE | Keyboard | `31e3:1220` `31e3:1221` `31e3:1222` | Untested |
 | Wooting Two HE (ARM) | Keyboard | `31e3:1230` `31e3:1231` `31e3:1232` | Untested |
 | Wooting Two Lekker Edition | Keyboard | `31e3:1210` `31e3:1211` `31e3:1212` | Untested |
@@ -704,18 +887,344 @@ Features are discovered at runtime and shown in the UI per device.
 
 | Device | Type | USB IDs | Status |
 |---|---|---|---|
-| Turtle Beach Stealth 700X Gen 3 | Headset | `10f5:2251` `10f5:2253` | Untested |
-| Turtle Beach Stealth 600 Gen 3 (PC) | Headset | `10f5:224c` | Untested |
+| Turtle Beach Stealth 700X Gen 3 | Headset | `10f5:2251` `10f5:2250` `10f5:2253` | Untested |
+| Turtle Beach Stealth 700X Gen 3 (blue) | Headset | `10f5:2267` `10f5:2266` `10f5:2269` | Untested |
+| Turtle Beach Stealth 700 Gen 3 (PC) | Headset | `10f5:2262` `10f5:2264` | Untested |
+| Turtle Beach Stealth 700 Gen 3 (PlayStation) | Headset | `10f5:2256` `10f5:226b` `10f5:2258` `10f5:226d` | Untested |
+| Turtle Beach Stealth 600 Gen 3 (PC) | Headset | `10f5:224c` `10f5:225a` `10f5:224e` `10f5:225c` | Untested |
+| Turtle Beach Stealth 600 Gen 3 (PlayStation) | Headset | `10f5:2238` `10f5:2242` `10f5:223a` `10f5:2244` | Untested |
+| Turtle Beach Stealth 600 Gen 3 (Xbox) | Headset | `10f5:2233` `10f5:2232` `10f5:223d` `10f5:223c` `10f5:2235` `10f5:223f` `10f5:2278` | Untested |
+| Turtle Beach Stealth 500 (PC) | Headset | `10f5:2271` `10f5:2273` | Untested |
+| Turtle Beach Stealth 500 (PlayStation) | Headset | `10f5:222e` `10f5:2230` `10f5:2282` | Untested |
+| Turtle Beach Stealth 500 (Xbox) | Headset | `10f5:222a` `10f5:2229` `10f5:222c` `10f5:227e` | Untested |
+| Turtle Beach Stealth 500 (Switch 2) | Headset | `10f5:22a4` `10f5:22a6` `10f5:22a8` `10f5:22a5` `10f5:22a7` `10f5:22a9` | Untested |
+| Turtle Beach Atlas Air (PC) | Headset | `10f5:225e` `10f5:2260` | Untested |
+| Turtle Beach Stealth Pro II (PC) | Headset | `10f5:2288` `10f5:2287` `10f5:22a1` `10f5:2289` | Untested |
+| Turtle Beach Stealth Pro II (Xbox) | Headset | `10f5:2285` `10f5:2284` `10f5:2283` `10f5:229f` `10f5:229d` `10f5:229c` `10f5:229b` `10f5:22a0` `10f5:22b1` `10f5:22b0` `10f5:22af` `10f5:2286` `10f5:229e` `10f5:22b2` | Untested |
+| Turtle Beach Stealth Pro | Headset | `10f5:2196` `10f5:2197` `10f5:2216` | Untested |
 
 ## ATK / VXE / VGN / Lamzu (Compx)
 
 | Device | Type | USB IDs | Status |
 |---|---|---|---|
-| Lamzu Atlantis / Maya | Mouse | `3554:f50f` `3554:f510` `3554:f50d` | Untested |
+| Lamzu Atlantis / Maya | Mouse | `3554:f50f` `3554:f510` `3554:f50d` `3554:f517` | Untested |
 | VXE mouse (VXE 1K receiver) | Mouse | `3554:f58a` | Untested |
 | VGN / VXE mouse (Dragonfly 4K receiver) | Mouse | `3554:f505` | Untested |
 | VXE / ATK mouse (MAD 8K receiver) | Mouse | `373b:1040` | Untested |
 | ATK Dragonfly A9 Pro Max 2.0 | Mouse | `373b:1264` `373b:11dc` | Untested |
+| ATK Dragonfly F1 PRO | Mouse | `3554:f502` | Untested |
+| Mouse 1K Dongle [f503] | Mouse | `3554:f503` | Untested |
+| ATK Dragonfly F1 PRO MAX / ATK Dragonfly F1 MOBA / ATK D | Mouse | `3554:f506` | Untested |
+| ATK Dragonfly F1S / ATK Dragonfly Dragonfly F1S | Mouse | `3554:f50a` | Untested |
+| Mouse 1K Dongle [f50b] | Mouse | `3554:f50b` | Untested |
+| VXE R1 PRO / VXE R1 PRO MAX | Mouse | `3554:f58c` | Untested |
+| Mouse 4K Dongle [f58d] | Mouse | `3554:f58d` | Untested |
+| Mouse 1K Dongle [f58e] | Mouse | `3554:f58e` | Untested |
+| VXE R1 / VXE R1SE / VXE R1SE+ | Mouse | `3554:f58f` | Untested |
+| VXE Mouse 1K Dongle [fb12] | Mouse | `3554:fb12` | Untested |
+| ATK F1 PRO | Mouse | `373b:1014` | Untested |
+| ATK F1 PRO MAX | Mouse | `373b:1015` | Untested |
+| ATK X1 PRO | Mouse | `373b:1016` | Untested |
+| ATK X1 PRO MAX | Mouse | `373b:1017` | Untested |
+| ATK Z1 PRO | Mouse | `373b:1018` | Untested |
+| ATK Z1 PRO MAX | Mouse | `373b:1019` | Untested |
+| ATK Mouse 1K Dongle [101a] | Mouse | `373b:101a` | Untested |
+| ATK Mouse 8K Dongle [101b] | Mouse | `373b:101b` | Untested |
+| ATK F1 Ultimate | Mouse | `373b:102e` | Untested |
+| ATK X1 Ultra | Mouse | `373b:102f` | Untested |
+| ATK FIERCE X | Mouse | `373b:1030` | Untested |
+| ATK 8K Dongle Light Version [1031] | Mouse | `373b:1031` | Untested |
+| ATK F1 Ultra | Mouse | `373b:103c` | Untested |
+| ATK X1 Ultimate | Mouse | `373b:103d` | Untested |
+| MAD R MAJOR | Mouse | `373b:103e` | Untested |
+| MAD R | Mouse | `373b:103f` | Untested |
+| ATK F1 EXTREME | Mouse | `373b:1045` | Untested |
+| ATK Z1 Ultra | Mouse | `373b:104a` | Untested |
+| MAD R + | Mouse | `373b:104b` | Untested |
+| MAD R MAJOR+ | Mouse | `373b:104c` | Untested |
+| MAD 1K Dongle [104d] | Mouse | `373b:104d` | Untested |
+| ATK F1 LEVIATAN | Mouse | `373b:105b` | Untested |
+| VXE R1 NK | Mouse | `373b:1065` | Untested |
+| VXE R1 NK | Mouse | `373b:1066` | Untested |
+| R1 NK [1067] | Mouse | `373b:1067` | Untested |
+| R1 NK [1068] | Mouse | `373b:1068` | Untested |
+| R1 NK [1069] | Mouse | `373b:1069` | Untested |
+| R1 NK [106a] | Mouse | `373b:106a` | Untested |
+| VXE R1S+ | Mouse | `373b:1084` | Untested |
+| Wireless mouse 1k dongle [1085] | Mouse | `373b:1085` | Untested |
+| ATK U2 MINI | Mouse | `373b:1086` | Untested |
+| ATK U2 Ultimate | Mouse | `373b:1087` | Untested |
+| ATK U2 Ultra | Mouse | `373b:10ac` | Untested |
+| VXE R1 NK | Mouse | `373b:10c7` | Untested |
+| VXE R1 NK | Mouse | `373b:10c8` | Untested |
+| NK Mouse Dongle [10c9] | Mouse | `373b:10c9` | Untested |
+| R1 NK [10ca] | Mouse | `373b:10ca` | Untested |
+| R1 NK [10cb] | Mouse | `373b:10cb` | Untested |
+| R1 NK [10cc] | Mouse | `373b:10cc` | Untested |
+| VXE V3 NK | Mouse | `373b:10e7` | Untested |
+| VXE V3 PRO NK | Mouse | `373b:10e8` | Untested |
+| ATK X1 EXTREME | Mouse | `373b:10e9` | Untested |
+| ATK Y9 PRO MAX | Mouse | `373b:10fd` | Untested |
+| ATK X1 S NK | Mouse | `373b:1106` | Untested |
+| ATK X1 SE NK | Mouse | `373b:1107` | Untested |
+| ATK U2 Plus NK | Mouse | `373b:110d` | Untested |
+| ATK U2 NK | Mouse | `373b:110e` | Untested |
+| ATK A9 Plus NK | Mouse | `373b:1115` | Untested |
+| ATK A9 NK | Mouse | `373b:1116` | Untested |
+| ATK A9 Pro Max | Mouse | `373b:1117` | Untested |
+| ATK A9 Ultra | Mouse | `373b:1119` | Untested |
+| Wireless mouse -8K NANO dongle [111a] | Mouse | `373b:111a` | Untested |
+| Wireless mouse -8K NANO dongle [111b] | Mouse | `373b:111b` | Untested |
+| ATK A9 SE NK | Mouse | `373b:1135` | Untested |
+| ATK X1 Lite | Mouse | `373b:113e` | Untested |
+| ATK X1E | Mouse | `373b:113f` | Untested |
+| ATK U2 SE NK | Mouse | `373b:1149` | Untested |
+| DRAGONFLY F1 V2 Plus NK | Mouse | `373b:114a` | Untested |
+| DRAGONFLY F1 V2 NK | Mouse | `373b:114b` | Untested |
+| DRAGONFLY F1 V2 SE NK | Mouse | `373b:114c` | Untested |
+| ATK ZERO | Mouse | `373b:1154` | Untested |
+| Wireless mouse 8k dongle-L1 [1155] | Mouse | `373b:1155` | Untested |
+| ATK A9 | Mouse | `373b:1157` | Untested |
+| ATK U2 Pro Max | Mouse | `373b:1158` | Untested |
+| ATK 8K Dongle Light Version [1159] | Mouse | `373b:1159` | Untested |
+| ATK Y9 Plus NK | Mouse | `373b:115b` | Untested |
+| ATK Y9 NK | Mouse | `373b:115c` | Untested |
+| ATK Y9 SE NK | Mouse | `373b:115d` | Untested |
+| Wireless mouse 8k dongle [115e] | Mouse | `373b:115e` | Untested |
+| ATK A9 X | Mouse | `373b:11a0` | Untested |
+| ATK Duckbill Ultra | Mouse | `373b:11a6` | Untested |
+| ATK Mouse 8K Dongle [11a7] | Mouse | `373b:11a7` | Untested |
+| Wireless mouse 4k dongle [11a9] | Mouse | `373b:11a9` | Untested |
+| ATK U2 | Mouse | `373b:11aa` | Untested |
+| DRAGONFLY F1 V2 PRO MAX | Mouse | `373b:11ab` | Untested |
+| Flow 7 [11b3] | Mouse | `373b:11b3` | Untested |
+| ATK A9 Ultimate | Mouse | `373b:11b6` | Untested |
+| Wireless mouse -8K TypeC dongle [11c8] | Mouse | `373b:11c8` | Untested |
+| ATK ZERO EX | Mouse | `373b:11cc` | Untested |
+| Wireless mouse -8K TypeC dongle [11cd] | Mouse | `373b:11cd` | Untested |
+| Wireless mouse-8K NANO dongle [11ce] | Mouse | `373b:11ce` | Untested |
+| ATK Y9 Ultimate | Mouse | `373b:11cf` | Untested |
+| VXE R1 UlTRA | Mouse | `373b:11d2` | Untested |
+| Wireless mouse 8k dongle-H [11d8] | Mouse | `373b:11d8` | Untested |
+| Wireless mouse 8k dongle-L [11d9] | Mouse | `373b:11d9` | Untested |
+| ATK A9 Pro Max 2.0 NK | Mouse | `373b:11db` | Untested |
+| ATK A9 Ultra Max 2.0 | Mouse | `373b:11dd` | Untested |
+| ATK F1 EXTREME 2.0 | Mouse | `373b:11e3` | Untested |
+| ATK F1 Ultimate 2.0 | Mouse | `373b:11e4` | Untested |
+| ATK X1 EXTREME 2.0 | Mouse | `373b:11e5` | Untested |
+| ATK X1 Ultimate 2.0 | Mouse | `373b:11e7` | Untested |
+| ATK X1 Ultra Max 2.0 | Mouse | `373b:11ec` | Untested |
+| ATK F1 Ultra Max 2.0 | Mouse | `373b:11ed` | Untested |
+| ATK F1 LEVIATAN 2.0 | Mouse | `373b:11f0` | Untested |
+| ATK A9 Ultra Max 2.0 Tri-Mode | Mouse | `373b:11f2` | Untested |
+| ATK A9 NB ULTRA | Mouse | `373b:11f3` | Untested |
+| Wireless mouse -8K TOWER dongle [11f4] | Mouse | `373b:11f4` | Untested |
+| ATK U2 Ultimate 2.0 | Mouse | `373b:11f5` | Untested |
+| ATK U2 Mini 2.0 | Mouse | `373b:11f6` | Untested |
+| ATK U2 Ultra Max 2.0 | Mouse | `373b:11f7` | Untested |
+| VXE R1 Ultra | Mouse | `373b:11f9` | Untested |
+| Wireless mouse 8k NANO dongle-L [11fd] | Mouse | `373b:11fd` | Untested |
+| Wireless mouse 8k NANO dongle-L [11fe] | Mouse | `373b:11fe` | Untested |
+| ATK Z1 Ultimate 2.0 | Mouse | `373b:1201` | Untested |
+| ATK A9 Air | Mouse | `373b:120a` | Untested |
+| ATK X1 EXTREME GT | Mouse | `373b:120b` | Untested |
+| ATK Ghost EXTREME | Mouse | `373b:120d` | Untested |
+| ATK Ghost Ultimate | Mouse | `373b:120e` | Untested |
+| ATK A9 Ultimate 3.0 | Mouse | `373b:1211` | Untested |
+| VXE V3 NK | Mouse | `373b:1213` | Untested |
+| VXE V3 PRO NK | Mouse | `373b:1214` | Untested |
+| VXE V3 Plus | Mouse | `373b:1215` | Untested |
+| NK mouse NANO dongle [1216] | Mouse | `373b:1216` | Untested |
+| VXE R1 S NK | Mouse | `373b:121f` | Untested |
+| ATK A9 SE NK | Mouse | `373b:1222` | Untested |
+| ATK A9 2.0 NK | Mouse | `373b:1223` | Untested |
+| ATK A9 Plus NK | Mouse | `373b:1224` | Untested |
+| ATK Duckbill EXTREME | Mouse | `373b:1230` | Untested |
+| ATK Ghost Ultimate | Mouse | `373b:123a` | Untested |
+| ATK A9 NB | Mouse | `373b:1245` | Untested |
+| Wireless mouse -1K TOWER dongle [1246] | Mouse | `373b:1246` | Untested |
+| VXE X3 | Mouse | `373b:1248` | Untested |
+| VXE X3 Pro | Mouse | `373b:1249` | Untested |
+| VXE X3 Turbo | Mouse | `373b:124a` | Untested |
+| VXE R1 NK | Mouse | `373b:124c` | Untested |
+| VXE R1 S NK | Mouse | `373b:124d` | Untested |
+| ATK ZERO | Mouse | `373b:124e` | Untested |
+| Wireless mouse 8k dongle-L0 [124f] | Mouse | `373b:124f` | Untested |
+| ATK A9 Mini + | Mouse | `373b:1251` | Untested |
+| ATK A9 Mini | Mouse | `373b:1256` | Untested |
+| ATK A9 Mini | Mouse | `373b:125a` | Untested |
+| ATK A9 Plus NK | Mouse | `373b:1263` | Untested |
+| ATK PHANTOM EXTREME | Mouse | `373b:1266` | Untested |
+| ATK A9 Mini | Mouse | `373b:1268` | Untested |
+| ATK A9 Mini + | Mouse | `373b:1269` | Untested |
+| ATK U2 Plus NK | Mouse | `373b:126c` | Untested |
+| ATK U2 Pro Max | Mouse | `373b:126d` | Untested |
+| ATK F1 Ultra Max 2.0 | Mouse | `373b:126e` | Untested |
+| ATK A9 Ultra Max 2.0 | Mouse | `373b:126f` | Untested |
+| ATK A9 Ultra Max 2.0 Tri-Mode | Mouse | `373b:1270` | Untested |
+| VXE R1 | Mouse | `373b:1271` | Untested |
+| VXE R1 PRO | Mouse | `373b:1272` | Untested |
+| VXE R1 PRO MAX | Mouse | `373b:1273` | Untested |
+| ATK X1 Ultra Max 2.0 | Mouse | `373b:1274` | Untested |
+| Wireless mouse 8k dongle-L [1278] | Mouse | `373b:1278` | Untested |
+| Wireless mouse 8k NANO dongle-L [1279] | Mouse | `373b:1279` | Untested |
+| Wireless mouse 8k NANO dongle-L [127a] | Mouse | `373b:127a` | Untested |
+| VXE V3 PRO Max | Mouse | `373b:127b` | Untested |
+| ATK X1 Air + | Mouse | `373b:127c` | Untested |
+| ATK A9 Ultimate + | Mouse | `373b:127e` | Untested |
+| ATK A9 Air + | Mouse | `373b:127f` | Untested |
+| ATK X1 EXTREME 2.0 + | Mouse | `373b:1285` | Untested |
+| ATK X1 Ultimate 2.0 + | Mouse | `373b:1286` | Untested |
+| ATK A9 Ultimate + | Mouse | `373b:1287` | Untested |
+| ATK A9 Air + | Mouse | `373b:1288` | Untested |
+| ATK ZERO EX + | Mouse | `373b:1289` | Untested |
+| ATK Ghost EXTREME + | Mouse | `373b:128a` | Untested |
+| ATK Ghost Ultimate + | Mouse | `373b:128b` | Untested |
+| ATK U2 Ultimate 2.0 + | Mouse | `373b:128c` | Untested |
+| ATK U2 Mini 2.0 + | Mouse | `373b:128d` | Untested |
+| ATK A9 Mini + | Mouse | `373b:128e` | Untested |
+| ATK A9 Ultra Max 2.0 + | Mouse | `373b:128f` | Untested |
+| Wireless mouse 8k dongle-M1 [1290] | Mouse | `373b:1290` | Untested |
+| Wireless mouse 8k NANO dongle-M1 [1291] | Mouse | `373b:1291` | Untested |
+| ATK A9 Ultimate + | Mouse | `373b:1292` | Untested |
+| ATK A9 Air + | Mouse | `373b:1293` | Untested |
+| ATK PHANTOM ULTIMATE | Mouse | `373b:1296` | Untested |
+| ATK X1 SE Nearlink | Mouse | `373b:1299` | Untested |
+| VXE R1 PRO MAX 2.0 NK | Mouse | `373b:129a` | Untested |
+| ATK F1 V3 EXTREME + | Mouse | `373b:129b` | Untested |
+| ATK F1 Ultimate 2.0 + | Mouse | `373b:129c` | Untested |
+| ATK F1 V3 LEVIATAN + | Mouse | `373b:129d` | Untested |
+| ATK ZERO + | Mouse | `373b:129e` | Untested |
+| ATK X1 Air + | Mouse | `373b:12a2` | Untested |
+| Mouse | Mouse | `373b:12a3` | Untested |
+| ATK F1 V3 ULTIMATE + | Mouse | `373b:12a7` | Untested |
+| ATK F1 V3 ULTIMATE + | Mouse | `373b:12a8` | Untested |
+| ATK F1 V3 ULTIMATE + | Mouse | `373b:12a9` | Untested |
+| ATK A9 NB ULTRA + | Mouse | `373b:12ab` | Untested |
+| Wireless mouse 8k NANO dongle-L / ATK Y9 Ultimate + [12af] | Mouse | `373b:12af` | Untested |
+| ATK Z1 Ultimate 2.0 + | Mouse | `373b:12b0` | Untested |
+| VXE R2 SE NK | Mouse | `373b:12b1` | Untested |
+| ATK A9 Ultimate Silent | Mouse | `373b:12b3` | Untested |
+| ATK X1 Ultimate 2.0 Silent | Mouse | `373b:12b4` | Untested |
+| VXE R1SE+ Silent | Mouse | `373b:12bf` | Untested |
+| ATK A9 Wireless Charging | Mouse | `373b:12c6` | Untested |
+| Wireless mouse 8k dongle-H [12cc] | Mouse | `373b:12cc` | Untested |
+| Wireless mouse 8k NANO dongle-M1 [12cd] | Mouse | `373b:12cd` | Untested |
+| ATK PHANTOM ULTIMATE | Mouse | `373b:12ce` | Untested |
+| ATK A9 NB ULTRA | Mouse | `373b:12d0` | Untested |
+| Wireless mouse -8K TOWER dongle [12d1] | Mouse | `373b:12d1` | Untested |
+| VXE V3 NK | Mouse | `373b:12d2` | Untested |
+| Flow 7 | Mouse | `373b:12d7` | Untested |
+| Mouse | Mouse | `373b:12d8` | Untested |
+| ATK X1 ULTIMATE 2.0+ | Mouse | `373b:12d9` | Untested |
+| ATK Wireless Charging dongle [12da] | Mouse | `373b:12da` | Untested |
+| VXE R1 SE+ | Mouse | `373b:12dc` | Untested |
+| ATK X1 Ultra Max 2.0 + Tri-Mode | Mouse | `373b:12de` | Untested |
+| Mouse | Mouse | `373b:12e1` | Untested |
+| ATK U2 Plus NK | Mouse | `373b:12e3` | Untested |
+| Wireless mouse 8k NANO dongle-M [12e9] | Mouse | `373b:12e9` | Untested |
+| Wireless mouse 8k dongle-G [12ea] | Mouse | `373b:12ea` | Untested |
+| ATK X1 Air+ | Mouse | `373b:12ec` | Untested |
+| ATK A9 Ultimate + | Mouse | `373b:12f1` | Untested |
+| Wireless mouse 8k dongle-M1 [12f5] | Mouse | `373b:12f5` | Untested |
+| Mouse | Mouse | `373b:12f7` | Untested |
+| Mouse | Mouse | `373b:12f9` | Untested |
+| ATK F1 V3 ULTIMATE | Mouse | `373b:12fa` | Untested |
+| Mouse | Mouse | `373b:12fb` | Untested |
+| ATK X1 Ultra Max 2.0 | Mouse | `373b:12ff` | Untested |
+| ATK A9 Plus NK | Mouse | `373b:1300` | Untested |
+| ATK A9 Pro Max 2.0 NK | Mouse | `373b:1301` | Untested |
+| Wireless mouse 8k dongle-O [1302] | Mouse | `373b:1302` | Untested |
+| Wireless mouse 8k dongle-M [1303] | Mouse | `373b:1303` | Untested |
+| ATK F1 V3 ULTIMATE+ | Mouse | `373b:1304` | Untested |
+| ATK A9 3.0 NK | Mouse | `373b:1305` | Untested |
+| VXE V3 PRO NK | Mouse | `373b:1306` | Untested |
+| ATK F1 V3 ULTRA MAX | Mouse | `373b:1307` | Untested |
+| ATK F1 V3 ULTIMATE+ | Mouse | `373b:1308` | Untested |
+| Mouse | Mouse | `373b:130b` | Untested |
+| ATK X1 SE NK | Mouse | `373b:130e` | Untested |
+| ATK A9 SE 3.0 NK | Mouse | `373b:130f` | Untested |
+| VXE R1 S NK | Mouse | `373b:1310` | Untested |
+| VXE R1 NK | Mouse | `373b:1311` | Untested |
+| ATK PHANTOM ULTIMATE | Mouse | `373b:1312` | Untested |
+| ATK A9 Ultimate | Mouse | `373b:1314` | Untested |
+| Wireless mouse 8k NANO dongle-M1 [1315] | Mouse | `373b:1315` | Untested |
+| Mouse | Mouse | `373b:1316` | Untested |
+| ATK X1 S NK | Mouse | `373b:131a` | Untested |
+| Mouse | Mouse | `373b:1324` | Untested |
+| ATK F1 V3 PIKACHU Edition | Mouse | `373b:132a` | Untested |
+| MAD R | Mouse | `373b:132b` | Untested |
+| ATK ZERO + GENGAR EDITION | Mouse | `373b:1331` | Untested |
+| Wireless mouse 8k dongle-G [1332] | Mouse | `373b:1332` | Untested |
+| ATK A9 Plus 3.0 NK | Mouse | `373b:1337` | Untested |
+| ATK A9 Pro Max 3.0 NK | Mouse | `373b:1338` | Untested |
+| ATK A9 Mini SPRIGATITO Edition | Mouse | `373b:133b` | Untested |
+| Mouse | Mouse | `373b:133c` | Untested |
+| Mouse | Mouse | `373b:133d` | Untested |
+| Wireless mouse 8k NANO dongle-A1 [133e] | Mouse | `373b:133e` | Untested |
+| NK mouse NANO dongle [133f] | Mouse | `373b:133f` | Untested |
+| ATK A9 MAG | Mouse | `373b:1340` | Untested |
+| ATK X1 MAG | Mouse | `373b:1341` | Untested |
+| ATK Wireless Charging-S dongle [1342] | Mouse | `373b:1342` | Untested |
+| ATK A9 Air | Mouse | `373b:1343` | Untested |
+| ATK F1 V3 ULTIMATE | Mouse | `373b:1344` | Untested |
+| ATK F1 V3 ULTIMATE+ | Mouse | `373b:1345` | Untested |
+| Wireless mouse 8k dongle-M1 [1346] | Mouse | `373b:1346` | Untested |
+| Wireless mouse 8k NANO dongle-M1 [1347] | Mouse | `373b:1347` | Untested |
+| Wireless mouse 8k NANO dongle-M1 [1348] | Mouse | `373b:1348` | Untested |
+| Wireless mouse 8k dongle [134b] | Mouse | `373b:134b` | Untested |
+| Mouse | Mouse | `373b:134c` | Untested |
+| ATK A9 SE 3.0 NK | Mouse | `373b:134d` | Untested |
+| ATK A9 3.0 NK | Mouse | `373b:134e` | Untested |
+| ATK A9 Plus 3.0 NK | Mouse | `373b:134f` | Untested |
+| ATK A9 Pro Max 3.0 NK | Mouse | `373b:1350` | Untested |
+| Mouse | Mouse | `373b:1357` | Untested |
+| VXE R1SE+ | Mouse | `373b:1358` | Untested |
+| VXE R1SE+ Silent | Mouse | `373b:1359` | Untested |
+| VXE R1 S NK | Mouse | `373b:135b` | Untested |
+| VXE R1 NK | Mouse | `373b:135c` | Untested |
+| VXE V3 NK | Mouse | `373b:135d` | Untested |
+| Mouse | Mouse | `373b:135e` | Untested |
+| Mouse | Mouse | `373b:1363` | Untested |
+| VXE V3 Silent NK | Mouse | `373b:1366` | Untested |
+| VXE V3 Pro Silent NK | Mouse | `373b:1367` | Untested |
+| VXE R1 SE+ | Mouse | `373b:1368` | Untested |
+| Mouse | Mouse | `373b:1369` | Untested |
+| Mouse | Mouse | `373b:1371` | Untested |
+| Mouse | Mouse | `373b:1374` | Untested |
+| Wireless mouse 8k dongle-O [1375] | Mouse | `373b:1375` | Untested |
+| VGN F1 SE | Mouse | `3554:f511` | Untested |
+| VGN Y2 Ultra | Mouse | `3554:fb3d` | Untested |
+| VGN Y2 Ultra [fb3e] | Mouse | `3554:fb3e` | Untested |
+| VGN USB Receiver [fb49] | Mouse | `3554:fb49` | Untested |
+| UFO Pro [fb4a] | Mouse | `3554:fb4a` | Untested |
+| UFO Ultra [fb4b] | Mouse | `3554:fb4b` | Untested |
+| VGN F1 SE [fb50] | Mouse | `3554:fb50` | Untested |
+| VGN F1 SE | Mouse | `3554:fb51` | Untested |
+| VGN Y2 Master [fb52] | Mouse | `3554:fb52` | Untested |
+| VGN Y2 Master | Mouse | `3554:fb53` | Untested |
+| VGN Y2 Pro Max [fb54] | Mouse | `3554:fb54` | Untested |
+| VGN Y2 Pro Max | Mouse | `3554:fb55` | Untested |
+| VGN F2 Master [fb56] | Mouse | `3554:fb56` | Untested |
+| VGN F2 Master | Mouse | `3554:fb57` | Untested |
+| VGN USB Receiver [fb58] | Mouse | `3554:fb58` | Untested |
+| Dragonfly 3 Master | Mouse | `3554:fb59` | Untested |
+| Dragonfly 3 Master | Mouse | `391d:1005` | Untested |
+| Dragonfly 3 MasterGT [101d] | Mouse | `391d:101d` | Untested |
+| Dragonfly F2 MasterGT [102d] | Mouse | `391d:102d` | Untested |
+| Dragonfly F2 MasterGT [1032] | Mouse | `391d:1032` | Untested |
+| Dragonfly Y2 V2 MasterGT [1034] | Mouse | `391d:1034` | Untested |
+| Dragonfly F2 Turbo [1035] | Mouse | `391d:1035` | Untested |
+| Dragonfly F2 Turbo+ [1036] | Mouse | `391d:1036` | Untested |
+| Dragonfly F1 V2 SE+ [1038] | Mouse | `391d:1038` | Untested |
+| Dragonfly 3 MINI SE+ [1039] | Mouse | `391d:1039` | Untested |
+| VGN USB Receiver [1a05] | Mouse | `391d:1a05` | Untested |
+| Dragonfly 3 MasterGT [1a1a] | Mouse | `391d:1a1a` | Untested |
+| Dragonfly Y2 V2 MasterGT [1a2f] | Mouse | `391d:1a2f` | Untested |
+| Dragonfly F2 Turbo [1a30] | Mouse | `391d:1a30` | Untested |
+| Dragonfly F2 Turbo+ [1a31] | Mouse | `391d:1a31` | Untested |
+| Dragonfly F1 V2 SE+ [1a32] | Mouse | `391d:1a32` | Untested |
+| Dragonfly 3 MINI SE+ [1a33] | Mouse | `391d:1a33` | Untested |
 
 ## Pulsar
 
@@ -735,6 +1244,9 @@ Features are discovered at runtime and shown in the UI per device.
 | Pulsar X2 CrazyLight Wired | Mouse | `3710:3414` | Untested |
 | Pulsar X3 LHD CrazyLight Medium Wired | Mouse | `3710:3527` | Untested |
 | Pulsar Feinmann F01 Noctua Edition | Mouse | `3710:5504` `3710:7507` | Untested |
+| Pulsar Mouse | Mouse | `3710:3415` `3710:3501` `3710:3502` `3710:3503` `3710:3504` `3710:3505` `3710:3506` `3710:3507` `3710:3508` `3710:3509` `3710:3510` `3710:3511` `3710:3512` `3710:3513` `3710:3514` `3710:3515` `3710:3516` `3710:3517` `3710:3518` `3710:3519` `3710:3524` `3710:3525` `3710:3526` `3710:3528` `3710:3529` `3710:3601` `3710:3603` `3710:3604` `3710:3605` `3710:3606` `3710:3607` `3710:3608` `3710:3609` `3710:3610` `3710:3611` `3710:3612` `3710:3613` `3710:3614` `3710:3615` `3710:3618` `3710:3619` `3710:7501` `3710:7502` `3710:7503` `3710:7504` `3710:7505` `3710:7506` `3710:7508` `3710:7509` `3710:7510` `3710:7601` `3710:7602` `3710:7603` `3710:7604` `3710:7605` `3710:9502` `3710:9503` `3710:9601` | Untested |
+| Pulsar Wireless Mouse | Mouse | `3710:5407` `3710:5501` `3710:5502` `3710:5601` `3710:5603` | Untested |
+| Pulsar Mouse (Nordic) | Mouse | `3554:f40a` | Untested |
 | Pulsar Wireless (Nordic) | Mouse | `3554:f507` `3554:f508` `3554:f509` | Untested |
 
 ## Endgame Gear

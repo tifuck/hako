@@ -70,7 +70,13 @@ enum DefaultOwner {
 struct DefaultState {
     session_original: Option<String>,
     claims: Vec<(DefaultOwner, String)>,
+    /// A release whose restore failed: (hako's sink, where the default
+    /// goes, next try), retried by `retry_restore` until done or claimed again.
+    pending: Option<(String, Restore, Instant)>,
 }
+
+/// How long a failed default-output restore waits before it is tried again.
+const RESTORE_RETRY: Duration = Duration::from_secs(10);
 
 impl DefaultState {
     /// An original a failed restore left is still the one to go back to.
@@ -83,6 +89,7 @@ impl DefaultState {
         }
         self.claims.retain(|(held, _)| *held != owner);
         self.claims.push((owner, sink));
+        self.pending = None;
     }
 
     /// `None` when `owner` did not hold the default; else the sink to make
@@ -116,6 +123,7 @@ impl DefaultState {
 
     fn restore(&mut self) -> Option<String> {
         self.claims.clear();
+        self.pending = None;
         self.session_original.take()
     }
 }
@@ -341,10 +349,12 @@ impl AudioService {
             state.chatmix_error = Some("audio state mutex was poisoned; recovered state".into());
             state
         });
-        StateGuard {
+        let mut guard = StateGuard {
             state,
             status: &self.status,
-        }
+        };
+        retry_restore(&mut guard.defaults);
+        guard
     }
 
     /// The last published status, refreshed first when no audio work runs
@@ -424,7 +434,9 @@ impl AudioService {
             return Ok(());
         }
         state.chatmix_set_default = on;
-        if !state.chatmix.active() && !state.mixer_game {
+        // A claim can outlive the loopbacks (they exited, a restart failed).
+        let idle = !state.chatmix.active() && !state.mixer_game;
+        if idle && (on || state.defaults.held().is_none()) {
             return Ok(());
         }
         let result = if on {
@@ -655,13 +667,13 @@ fn spawn_chatmix(state: &mut AudioState, sink: &str) -> Result<()> {
     let mut chat = match spawn_loopback(CHATMIX_CHAT, "hako Chat", sink, state.latency) {
         Ok(child) => child,
         Err(error) => {
-            let _ = stop_child(&mut game);
+            let _ = stop_or_reap(game);
             return Err(error);
         }
     };
     if let Err(error) = wait_for_chatmix_nodes(&mut game, &mut chat) {
-        let _ = stop_child(&mut game);
-        let _ = stop_child(&mut chat);
+        let _ = stop_or_reap(game);
+        let _ = stop_or_reap(chat);
         return Err(error);
     }
     state.chatmix = ChatMixState {
@@ -696,13 +708,13 @@ fn destroy_chatmix_locked(state: &mut AudioState) -> Result<()> {
     let mut first_error = release_default(&mut state.defaults, DefaultOwner::ChatMix).err();
     state.chatmix.sink = None;
     state.chatmix.volumes = None;
-    if let Some(mut child) = state.chatmix.game.take() {
-        if let Err(error) = stop_child(&mut child) {
+    if let Some(child) = state.chatmix.game.take() {
+        if let Err(error) = stop_or_reap(child) {
             first_error.get_or_insert(error);
         }
     }
-    if let Some(mut child) = state.chatmix.chat.take() {
-        if let Err(error) = stop_child(&mut child) {
+    if let Some(child) = state.chatmix.chat.take() {
+        if let Err(error) = stop_or_reap(child) {
             first_error.get_or_insert(error);
         }
     }
@@ -713,11 +725,11 @@ fn destroy_chatmix_locked(state: &mut AudioState) -> Result<()> {
 fn cleanup_chatmix_children(chatmix: &mut ChatMixState) {
     chatmix.sink = None;
     chatmix.volumes = None;
-    for mut child in [chatmix.game.take(), chatmix.chat.take()]
+    for child in [chatmix.game.take(), chatmix.chat.take()]
         .into_iter()
         .flatten()
     {
-        let _ = stop_child(&mut child);
+        let _ = stop_or_reap(child);
     }
 }
 
@@ -803,13 +815,42 @@ fn release_default(defaults: &mut DefaultState, owner: DefaultOwner) -> Result<(
     } else if let Some(target) =
         restore_target(next, configured_default().as_deref(), load_original())
     {
-        restore_default_sink(&target)?;
+        if let Err(e) = restore_default_sink(&target) {
+            defaults.pending = ours.map(|ours| (ours, target, Instant::now() + RESTORE_RETRY));
+            return Err(e);
+        }
     }
     defaults.restored();
     if defaults.held().is_none() {
         persist_original(None);
     }
     Ok(())
+}
+
+/// Try again what a failed `release_default` could not restore, unless the
+/// user picked another output since.
+fn retry_restore(defaults: &mut DefaultState) {
+    let Some((ours, target, at)) = defaults.pending.take() else {
+        return;
+    };
+    if Instant::now() < at {
+        defaults.pending = Some((ours, target, at));
+        return;
+    }
+    let moved = user_moved_default(
+        &ours,
+        resolve_node_id(&ours).is_ok(),
+        current_default_sink().ok().as_deref(),
+    );
+    if !moved {
+        if let Err(e) = restore_default_sink(&target) {
+            warn!("giving the default output back: {e:#}");
+            defaults.pending = Some((ours, target, Instant::now() + RESTORE_RETRY));
+            return;
+        }
+    }
+    defaults.restored();
+    persist_original(None);
 }
 
 /// Make a sink the configured default again, present or not (WirePlumber
@@ -1045,6 +1086,16 @@ fn stop_child(child: &mut Child) -> Result<()> {
     Ok(())
 }
 
+/// [`stop_child`] for a child nothing keeps: one that did not exit is
+/// reaped by a thread whenever it does, not left a zombie.
+fn stop_or_reap(mut child: Child) -> Result<()> {
+    let result = stop_child(&mut child);
+    if result.is_err() {
+        std::thread::spawn(move || child.wait());
+    }
+    result
+}
+
 fn reap_exited(child: &mut Option<Child>) {
     // `try_wait()` returns Ok(None) while the child is still running — that is
     // not an exit. Dropping it here used to make ChatMix look dead every tick
@@ -1079,7 +1130,16 @@ fn kill_aux_dsp_orphan() {
 /// Signals every matching process of the user, a live hakod's children too.
 #[cfg(not(test))]
 fn pkill(pattern: &str) {
-    let _ = Command::new("pkill").args(["-f", pattern]).status();
+    // Exit 1: nothing matched.
+    match output_within(Command::new("pkill").args(["-f", pattern]), CMD_TIMEOUT) {
+        Ok(output) if matches!(output.status.code(), Some(0 | 1)) => {}
+        Ok(output) => warn!(
+            "pkill -f {pattern:?} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(e) => warn!("pkill -f {pattern:?}: {e:#}"),
+    }
 }
 
 /// Unit tests run next to the user's hakod: count instead of signalling.
@@ -1543,11 +1603,11 @@ fn output_within(cmd: &mut Command, timeout: Duration) -> Result<Output> {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => {}
             Ok(None) => {
-                let _ = stop_child(&mut child);
+                let _ = stop_or_reap(child);
                 bail!("{bin} did not finish within {timeout:?}");
             }
             Err(e) => {
-                let _ = stop_child(&mut child);
+                let _ = stop_or_reap(child);
                 return Err(e).with_context(|| format!("wait for {bin}"));
             }
         }
@@ -2326,10 +2386,12 @@ mod tests {
     thread_local! {
         /// `amixer` calls of this test thread: `card args...`.
         pub(super) static AMIXER: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+        /// `sset` fails while set.
+        pub(crate) static SSET_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     /// `amixer` for unit tests: card 7 is the ALC897 above, card 8 the USB
-    /// headset; every call is recorded, `sset` succeeds.
+    /// headset; every call is recorded, `sset` succeeds (unless `SSET_FAILS`).
     pub(crate) fn fake_amixer(card: &str, args: &[&str]) -> Result<String> {
         AMIXER.with(|calls| {
             calls
@@ -2343,6 +2405,7 @@ mod tests {
             ("8", ["scontrols"]) => Ok(USB_SCONTROLS.into()),
             ("4", ["scontrols"]) => Ok(SWITCH_SCONTROLS.into()),
             ("4", ["sget", "Capture"]) => Ok(SWITCH_CAPTURE.into()),
+            (_, ["sset", ..]) if SSET_FAILS.get() => bail!("amixer: card {card} is busy"),
             (_, ["sset", ..]) => Ok(String::new()),
             _ => bail!("amixer: no such card {card}"),
         }
@@ -2589,6 +2652,30 @@ mod tests {
         assert_eq!(defaults.release(DefaultOwner::ChatMix), Some(s("speakers")));
         defaults.restored();
         assert_eq!(defaults.restore(), None);
+    }
+
+    /// A release whose restore failed is retried until a new claim or the
+    /// kill-switch takes over.
+    #[test]
+    fn a_failed_restore_stays_pending_until_claimed_or_reset() {
+        let later = Instant::now() + RESTORE_RETRY;
+        let pending = || Some(("game".to_string(), Restore::To("speakers".into()), later));
+        let mut defaults = DefaultState {
+            pending: pending(),
+            ..DefaultState::default()
+        };
+        defaults.claim(DefaultOwner::ChatMix, "game".into(), None);
+        assert_eq!(defaults.pending, None);
+        defaults.pending = pending();
+        defaults.restore();
+        assert_eq!(defaults.pending, None);
+        // Nothing pending: no PipeWire call.
+        retry_restore(&mut defaults);
+        assert_eq!(defaults.pending, None);
+        // Not due yet: no PipeWire call either, still pending.
+        defaults.pending = pending();
+        retry_restore(&mut defaults);
+        assert_eq!(defaults.pending, pending());
     }
 
     thread_local! {

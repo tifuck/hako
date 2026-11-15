@@ -9,7 +9,7 @@ hit() {
   echo "check-public: $*"
   fail=1
 }
-skip=(-path ./.git -prune -o -path ./target -prune -o -path ./.publish -prune -o)
+skip=(-path ./.git -prune -o -path ./target -prune -o -path ./.publish -prune -o -path ./vendor-re -prune -o)
 
 while IFS= read -r f; do hit "forbidden file: $f"; done < <(find . "${skip[@]}" -type f \( \
   -name '.env*' -o -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' \
@@ -43,7 +43,7 @@ if [ -z "${CI:-}" ]; then
 fi
 
 for p in "${patterns[@]}"; do
-  if out=$(grep -rnIE --exclude-dir=.git --exclude-dir=target --exclude-dir=.publish \
+  if out=$(grep -rnIE --exclude-dir=.git --exclude-dir=target --exclude-dir=.publish --exclude-dir=vendor-re \
     --exclude=check-public.sh -e "$p" . 2>/dev/null); then
     hit "matches /$p/:"
     echo "$out" | cut -c1-200 | head -20

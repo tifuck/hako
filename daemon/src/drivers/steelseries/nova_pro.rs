@@ -1,8 +1,8 @@
 //! Arctis Nova Pro Wireless (0x12e0 / 0x12e5) — port of known HID protocol.
 //! Base (`12e0`) and X (`12e5`) GameDACs speak the same protocol. The X
-//! (white) `225d` shares it per Linux-Arctis-Manager `nova_pro_wireless.yaml`
-//! (same variant list and interface 4), the only source listing that PID, so
-//! it never gets the `06 09` flash save.
+//! (white) `225d` shares it: Linux-Arctis-Manager `nova_pro_wireless.yaml`
+//! (same variant list and interface 4) and SteelSeries GG's definition (same
+//! base file as `12e0` / `12e5`, `06 09` save).
 //!
 //! Setters are volatile and re-sent on open. "Save changes to device memory"
 //! (`save_to_device`, behind the owner's onboard-memory opt-in) adds the
@@ -26,6 +26,9 @@ const CHATMIX_RETRY: Duration = Duration::from_secs(5);
 /// failure up to `INIT_RETRY_MAX`.
 const INIT_RETRY: Duration = Duration::from_secs(5);
 const INIT_RETRY_MAX: Duration = Duration::from_secs(60);
+/// Status polls in a row without a `06 b0` reply before the battery levels
+/// are cleared.
+const STATUS_MISSES: u8 = 3;
 /// ChatMix target: the analog output, else any Nova Pro sink.
 const CHATMIX_SINKS: &[&str] = &[
     r"alsa_output\.usb-SteelSeries_Arctis_Nova_Pro_Wireless.*analog",
@@ -52,6 +55,8 @@ pub struct SteelSeriesAdapter {
     last_poll: Instant,
     last_chatmix_try: Instant,
     poll_failures: u8,
+    /// Status polls in a row that got no `06 b0` reply.
+    status_misses: u8,
     /// Why the last init sequence failed; it is re-sent from `tick` until it
     /// goes through, and shown until then.
     init_error: Option<String>,
@@ -60,6 +65,8 @@ pub struct SteelSeriesAdapter {
     audio: Arc<AudioService>,
     /// A dial report arrived since the ChatMix volumes were last pushed.
     mix_dirty: bool,
+    /// The last ChatMix volume push failed: retried with the status poll.
+    mix_failed: bool,
     paths: ConfigPaths,
 }
 
@@ -112,11 +119,13 @@ impl SteelSeriesAdapter {
             last_poll: Instant::now() - Duration::from_secs(10),
             last_chatmix_try: Instant::now(),
             poll_failures: 0,
+            status_misses: 0,
             init_error: None,
             init_failures: 0,
             last_init_try: Instant::now(),
             audio,
             mix_dirty: false,
+            mix_failed: false,
             paths,
         };
         adapter.try_init();
@@ -228,42 +237,66 @@ impl SteelSeriesAdapter {
         }
     }
 
+    /// Ask for the `06 b0` status. A poll without a reply is a miss, not an
+    /// error: after [`STATUS_MISSES`] in a row the battery levels are cleared.
     fn poll_status(&mut self) -> Result<()> {
-        self.write_cmd(&[0x06, 0xb0])?;
-        self.drain_reports(Duration::from_millis(80))?;
+        // A failed poll waits for the next poll period too.
         self.last_poll = Instant::now();
+        self.write_cmd(&[0x06, 0xb0])?;
+        if self.drain_reports(Duration::from_millis(80))? {
+            self.status_misses = 0;
+            return Ok(());
+        }
+        self.status_misses = self.status_misses.saturating_add(1);
+        if self.status_misses >= STATUS_MISSES {
+            for b in &mut self.batteries {
+                b.percent = None;
+                b.charging = false;
+            }
+        }
         Ok(())
     }
 
     /// Handle every pending input report (ChatMix dial, status replies) without
     /// blocking. With a non-zero `status_wait`, keep reading up to that long
-    /// until the 0x06 0xb0 status reply has been seen.
-    fn drain_reports(&mut self, status_wait: Duration) -> Result<()> {
+    /// until the 0x06 0xb0 status reply has been seen. Returns whether one
+    /// was; a read error other than a timeout (device gone) is an error.
+    fn drain_reports(&mut self, status_wait: Duration) -> Result<bool> {
         let deadline = Instant::now() + status_wait;
-        let mut got_status = status_wait.is_zero();
+        let mut seen = false;
         let mut buf = [0u8; 64];
+        let mut read = Ok(());
         for _ in 0..64 {
-            let timeout = if got_status {
+            let timeout = if seen || status_wait.is_zero() {
                 Duration::ZERO
             } else {
                 deadline.saturating_duration_since(Instant::now())
             };
             let dev = self.dev.as_mut().context("no device")?;
-            let Ok(n) = dev.read_timeout(&mut buf, timeout) else {
-                break;
+            let n = match dev.read_timeout(&mut buf, timeout) {
+                Ok(n) => n,
+                // `read_timeout` reports a timeout as a plain message.
+                Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
+                    read = Err(e.context("hid read"));
+                    break;
+                }
+                Err(_) => break,
             };
-            got_status |= self.handle_report(&buf[..n]);
+            seen |= self.handle_report(&buf[..n]);
         }
-        // One volume update for however many dial reports were queued.
-        if std::mem::take(&mut self.mix_dirty) {
-            if let Err(e) = self
+        // One volume update for however many dial reports were queued; a
+        // failed one is tried again with the next status poll.
+        let retry = self.mix_failed && !status_wait.is_zero();
+        if std::mem::take(&mut self.mix_dirty) || retry {
+            let pushed = self
                 .audio
-                .set_chatmix_volumes(self.game_mix as f32, self.chat_mix as f32)
-            {
+                .set_chatmix_volumes(self.game_mix as f32, self.chat_mix as f32);
+            if let Err(e) = &pushed {
                 warn!("chatmix volumes: {e}");
             }
+            self.mix_failed = pushed.is_err();
         }
-        Ok(())
+        read.map(|()| seen)
     }
 
     /// Returns true for a status (0x06 0xb0) reply.
@@ -351,12 +384,6 @@ fn init_retry_after(failures: u32) -> Duration {
         .min(INIT_RETRY_MAX)
 }
 
-/// `225d` is listed by one source only: its setters stay volatile (they are
-/// re-sent on open).
-fn saves_after_set(pid: u16) -> bool {
-    pid != 0x225d
-}
-
 /// Headset (percent, charging, online) from status byte \[15\]:
 /// 0x01 offline, 0x02 cable charging, 0x04 charged, 0x08 discharging.
 fn headset_battery(data: &[u8]) -> (Option<u8>, bool, bool) {
@@ -385,12 +412,16 @@ fn model_name(pid: u16) -> &'static str {
 }
 
 fn defaults_into(s: &mut SettingsMap) {
+    // The dial position is live: shown from the first dial report, at unity
+    // (where the audio starts) until then.
     for key in [
         "aux_gate_enabled",
         "aux_gate_threshold",
         "aux_comp_enabled",
         "aux_comp_threshold",
         "aux_comp_ratio",
+        SettingKey::ChatMixGame.as_str(),
+        SettingKey::ChatMixChat.as_str(),
     ] {
         s.remove(key);
     }
@@ -408,14 +439,9 @@ fn defaults_into(s: &mut SettingsMap) {
     }
 }
 
-fn controls(pid: u16) -> Vec<SettingMeta> {
+fn controls(_pid: u16) -> Vec<SettingMeta> {
     use SettingKey::*;
     let save = SettingMeta::toggle(SaveToDevice, "Save changes to device memory").persistent();
-    let save = if saves_after_set(pid) {
-        save
-    } else {
-        save.blocked("only Linux-Arctis-Manager lists this PID's flash save")
-    };
     // Labels are section-relative (the UI card header supplies context), so they
     // stay short and the control column lines up. Order = non-mic first.
     vec![
@@ -477,10 +503,9 @@ impl DeviceAdapter for SteelSeriesAdapter {
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
         let mut proposed = self.settings.clone();
         merge_setting(&mut proposed, key, value.clone());
-        let save = saves_after_set(self.id.product_id)
-            && get_setting(&proposed, SettingKey::SaveToDevice)
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+        let save = get_setting(&proposed, SettingKey::SaveToDevice)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let cmd = match key {
             // Turning it on saves once; if that fails the mode stays off.
             SettingKey::SaveToDevice => {
@@ -584,12 +609,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_white_x_skips_the_flash_save() {
-        assert!(saves_after_set(0x12e0) && saves_after_set(0x12e5));
-        assert!(!saves_after_set(0x225d));
-    }
-
-    #[test]
     fn headset_status_byte_15() {
         let mut d = [0u8; 16];
         d[6] = 4;
@@ -645,11 +664,13 @@ mod tests {
             last_poll: Instant::now(),
             last_chatmix_try: Instant::now(),
             poll_failures: 0,
+            status_misses: 0,
             init_error: None,
             init_failures: 0,
             last_init_try: Instant::now(),
             audio: Arc::new(AudioService::new()),
             mix_dirty: false,
+            mix_failed: false,
             paths,
         }
     }
@@ -702,12 +723,19 @@ mod tests {
         }
         a.set(SettingKey::SaveToDevice, Bool(false)).unwrap();
         assert!(written(&a, &mut seen).is_empty());
-        // The white X never gets the flash save.
+        // The white X (GG: same base definition as `12e0` / `12e5`) saves too.
         let mut white = adapter(0x225d, &root);
         let mut seen = 0;
         white.set(SettingKey::SaveToDevice, Bool(true)).unwrap();
         white.set(SettingKey::MicVolume, Int(4)).unwrap();
-        assert_eq!(written(&white, &mut seen), [report(&[0x06, 0x37, 0x04])]);
+        assert_eq!(
+            written(&white, &mut seen),
+            [
+                report(&[0x06, 0x09, 0x00]),
+                report(&[0x06, 0x37, 0x04]),
+                report(&[0x06, 0x09, 0x00])
+            ]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -761,6 +789,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A poll without a status reply is no error and keeps the device; only
+    /// a run of them clears the battery levels.
+    #[test]
+    fn missed_status_replies_clear_the_batteries() {
+        let root = std::env::temp_dir().join(format!("hako-nova-miss-{}", std::process::id()));
+        let mut a = adapter(0x12e5, &root);
+        let status = [
+            0x06, 0xb0, 0, 0, 0, 0, 0x06, 0x03, 0, 0, 0, 0x07, 0x02, 0x01, 0, 0x02,
+        ];
+        a.handle_report(&status);
+        let levels = |a: &SteelSeriesAdapter| (a.batteries[0].percent, a.batteries[1].percent);
+        // The fake node never answers.
+        for _ in 1..STATUS_MISSES {
+            a.poll_status().unwrap();
+            assert_eq!(levels(&a), (Some(75), Some(38)));
+        }
+        a.poll_status().unwrap();
+        assert_eq!(levels(&a), (None, None));
+        assert!(!a.batteries[0].charging);
+        assert!(a.dev.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A dial position saved with the settings is not shown as live.
+    #[test]
+    fn a_saved_dial_position_loads_at_unity() {
+        let mut s = SettingsMap::new();
+        merge_setting(&mut s, SettingKey::ChatMixGame, SettingValue::Float(0.2));
+        merge_setting(&mut s, SettingKey::ChatMixChat, SettingValue::Float(0.7));
+        merge_setting(&mut s, SettingKey::MicVolume, SettingValue::Int(4));
+        defaults_into(&mut s);
+        for key in [SettingKey::ChatMixGame, SettingKey::ChatMixChat] {
+            assert_eq!(get_setting(&s, key), Some(&SettingValue::Float(1.0)));
+        }
+        assert_eq!(
+            get_setting(&s, SettingKey::MicVolume),
+            Some(&SettingValue::Int(4))
+        );
+    }
+
     #[test]
     fn controls_only_list_supported_keys() {
         let keys: Vec<_> = controls(0x12e5)
@@ -787,7 +855,7 @@ mod tests {
                 .unwrap()
         };
         assert!(save(0x12e5).persistent && save(0x12e5).blocked.is_none());
-        assert!(save(0x225d).blocked.is_some());
+        assert!(save(0x225d).persistent && save(0x225d).blocked.is_none());
         assert!(controls(0x12e5)
             .into_iter()
             .filter(|control| control.read_only)

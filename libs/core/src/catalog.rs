@@ -85,6 +85,7 @@ setting_keys! {
     DpiStage4 = "dpi_stage_4" => Performance,
     DpiStage5 = "dpi_stage_5" => Performance,
     DpiStageActive = "dpi_stage_active" => Performance,
+    DpiStageCount = "dpi_stage_count" => Performance,
     BluetoothCallVolume = "bluetooth_call_volume" => Audio,
     ActuationPoint = "actuation_point" => Performance,
     RapidTap = "rapid_tap" => Performance,

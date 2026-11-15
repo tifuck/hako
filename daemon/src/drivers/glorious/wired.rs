@@ -52,8 +52,8 @@ const SETTLE: Duration = Duration::from_millis(50);
 
 const CONFIG_BLOCKED: &str = "rewriting the configuration block broke Model O/D mice \
 (OpenRGB #1223, #2083, fix 96e198ad)";
-const LOD_BLOCKED: &str = "sources disagree on the offset (libratbag 129, gloriousctl and \
-magnificent 130)";
+const LOD_BLOCKED: &str = "the offset is block byte 129 (libratbag and the Glorious software \
+agree), but the value encoding is unconfirmed";
 
 /// Feature-report access, so the write sequence can run against a fake.
 trait Feature {

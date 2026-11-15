@@ -69,6 +69,40 @@ pub const HEADSETS: &[HeadsetSpec] = &[
         link_check: false,
         extras: false,
     },
+    // The rows below follow ASUS Gear Link's Audio Companion `Device/<pid>.ini`
+    // files (`DeprecatedProtocol=703`: this `12 xx` command set, usage page
+    // 0xFF00, report 0xCC) and its Pelta / Delta II protocol tables.
+    // [GL 7042: Pelta cable]
+    HeadsetSpec {
+        name: "ASUS ROG Pelta (cable)",
+        pids: &[0x1b82],
+        iface: None,
+        link_check: false,
+        extras: true,
+    },
+    // [GL 7707 / 7709: Pelta revision, dongle and cable]
+    HeadsetSpec {
+        name: "ASUS ROG Pelta (rev. 2)",
+        pids: &[0x1e1b],
+        iface: None,
+        link_check: true,
+        extras: true,
+    },
+    HeadsetSpec {
+        name: "ASUS ROG Pelta (rev. 2, cable)",
+        pids: &[0x1e1d],
+        iface: None,
+        link_check: false,
+        extras: true,
+    },
+    // [GL 7787]
+    HeadsetSpec {
+        name: "ASUS ROG Delta II PBZ",
+        pids: &[0x1e6b],
+        iface: None,
+        link_check: false,
+        extras: false,
+    },
 ];
 
 pub fn find(pid: u16) -> Option<&'static HeadsetSpec> {
@@ -83,6 +117,8 @@ pub struct HeadsetAdapter {
     battery: BatteryState,
     /// Low-battery level and voice prompt from `12 07`, resent with the sleep timer.
     power: Option<(u8, u8)>,
+    /// Lighting switch (`51 10`) as last written; unknown after a (re)connect.
+    led_on: Option<bool>,
     online: bool,
     last_poll: Instant,
     last_error: Option<String>,
@@ -114,6 +150,7 @@ impl HeadsetAdapter {
                 present: false,
             },
             power: None,
+            led_on: None,
             online: false,
             last_poll: Instant::now(),
             last_error: None,
@@ -176,11 +213,12 @@ impl HeadsetAdapter {
     }
 
     fn connect(&mut self) {
+        self.led_on = None;
+        let mut errors = Vec::new();
         if let Err(e) = self.read_unset() {
-            self.last_error = Some(format!("read settings: {e}"));
+            errors.push(format!("read settings: {e}"));
         }
         lighting_defaults(&mut self.settings, false);
-        let mut errors = Vec::new();
         for key in [
             SettingKey::Effect,
             SettingKey::MicSideTone,
@@ -254,9 +292,23 @@ impl HeadsetAdapter {
                 let effect = effect_wire(self.spec, &self.settings);
                 let brightness = int_of(&self.settings, SettingKey::Brightness, 100) as u8;
                 let rgb = rgb_of(&self.settings);
-                self.t()?
-                    .transact(&p::hs_led(effect, brightness, rgb))
-                    .map(drop)
+                // ASUS's software turns the lights off with the switch at
+                // brightness 0 and back on with the next effect; a headset
+                // that refuses the switch gets brightness 0 as before.
+                let on = brightness > 0;
+                let mut switched = false;
+                if self.led_on != Some(on) {
+                    switched = self.t()?.transact(&p::hs_led_switch(on)).is_ok();
+                    if switched {
+                        self.led_on = Some(on);
+                    }
+                }
+                if on || !switched {
+                    self.t()?
+                        .transact(&p::hs_led(effect, brightness, rgb))
+                        .map(drop)?;
+                }
+                Ok(())
             }
             SettingKey::MicSideTone => {
                 let Some(level) = get_setting(&self.settings, key).and_then(|v| v.as_int()) else {

@@ -111,6 +111,8 @@ struct ClientState {
     /// `GetConfig` / `SetConfig` answer (a refused one too).
     settings: Option<AppSettings>,
     settings_rev: u64,
+    /// Why the last `GetConfig` brought no settings.
+    settings_error: Option<String>,
     error: Option<String>,
     /// Command outcomes waiting to be shown as toasts.
     notices: Notices,
@@ -392,6 +394,7 @@ impl eframe::App for App {
                 self.settings_rev = st.settings_rev;
                 self.ui.settings = st.settings.clone();
             }
+            self.ui.settings_error = st.settings_error.clone();
             {
                 // Levels only for the meters the page asked for last frame.
                 let m = self.meters.lock().unwrap();
@@ -831,12 +834,7 @@ async fn session(
 ) -> Result<(), String> {
     refresh(stream, state).await?;
     *answered = true;
-    let resp = call(stream, Method::GetConfig, serde_json::Value::Null).await?;
-    if let Some(cfg) = resp.result.and_then(|r| serde_json::from_value(r).ok()) {
-        let mut s = state.lock().unwrap();
-        s.settings = Some(cfg);
-        s.settings_rev += 1;
-    }
+    fetch_config(stream, state).await?;
     fetch_mixer(stream, state).await?;
     fetch_net(stream, state).await?;
     let mut events = tokio::spawn(subscribe(socket.to_path_buf(), state.clone()));
@@ -853,6 +851,10 @@ async fn session(
             _ = tokio::time::sleep(Duration::from_secs(2)) => {
                 let polled = async {
                     refresh(stream, state).await?;
+                    let unknown = state.lock().unwrap().settings.is_none();
+                    if unknown {
+                        fetch_config(stream, state).await?;
+                    }
                     fetch_mixer(stream, state).await?;
                     fetch_net(stream, state).await
                 };
@@ -1018,6 +1020,30 @@ async fn refresh(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> Re
             s.error = None;
         }
         Err(e) => s.error = Some(e),
+    }
+    Ok(())
+}
+
+/// Load the app settings, or keep why hakod could not give them (e.g. an
+/// unparsable `config.toml`). Fails when the connection is unusable.
+async fn fetch_config(
+    stream: &mut UnixStream,
+    state: &Arc<Mutex<ClientState>>,
+) -> Result<(), String> {
+    let resp = call(stream, Method::GetConfig, serde_json::Value::Null).await?;
+    let cfg = match (resp.result, resp.error) {
+        (Some(r), _) if resp.ok => serde_json::from_value(r)
+            .map_err(|e| format!("hakod sent settings this UI cannot read ({e}); update both")),
+        (_, e) => Err(e.map_or_else(|| "no reason given".into(), |e| e.message)),
+    };
+    let mut s = state.lock().unwrap();
+    match cfg {
+        Ok(cfg) => {
+            s.settings = Some(cfg);
+            s.settings_error = None;
+            s.settings_rev += 1;
+        }
+        Err(e) => s.settings_error = Some(e),
     }
     Ok(())
 }

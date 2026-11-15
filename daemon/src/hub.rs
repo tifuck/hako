@@ -41,6 +41,8 @@ pub const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 pub const DISCOVERY_PERIOD: Duration = Duration::from_secs(3);
 /// Longest wait between attempts to open a model that keeps failing.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// Longest shutdown waits for a discovery pass in flight.
+const PASS_WAIT: Duration = Duration::from_secs(10);
 
 /// Every hidraw node.
 type Present = Vec<HidDeviceInfo>;
@@ -143,9 +145,16 @@ impl DaemonHub {
         if self.stopping.load(Ordering::Relaxed) {
             return;
         }
-        let Ok(Ok(present)) = tokio::task::spawn_blocking(present_nodes).await else {
-            warn!("hidraw enumeration failed; skipping discovery");
-            return;
+        let present = match tokio::task::spawn_blocking(present_nodes).await {
+            Ok(Ok(present)) => present,
+            Ok(Err(e)) => {
+                warn!("hidraw enumeration failed; skipping discovery: {e:#}");
+                return;
+            }
+            Err(e) => {
+                warn!("hidraw enumeration crashed; skipping discovery: {e}");
+                return;
+            }
         };
         self.discover(present).await;
     }
@@ -631,13 +640,14 @@ impl DaemonHub {
                 let aux = load_app_config(&self.paths).map(|c| c.aux);
                 let reset = tokio::task::spawn_blocking(move || {
                     // Its processes go first: the sweep below spares none.
-                    mixer.reset();
+                    // Not stopped, the rest is still reset, and the reply says so.
+                    let mixer = mixer.reset();
                     audio.reset_all()?;
                     // Links a crashed daemon left are not in this one's state.
-                    match aux {
-                        Ok(aux) => audio.remove_orphan_aux_links(&aux),
-                        Err(_) => Ok(()),
+                    if let Ok(aux) = aux {
+                        audio.remove_orphan_aux_links(&aux)?;
                     }
+                    mixer
                 })
                 .await
                 .unwrap_or_else(|e| Err(anyhow::anyhow!("reset task: {e}")));
@@ -814,6 +824,8 @@ impl DaemonHub {
         let _one_at_a_time = self.profiles.lock().await;
         let profile = load_profile(&self.paths, name)?;
         let mut failures = Vec::new();
+        // Something was written: a partial apply is still this profile's.
+        let mut landed = false;
         for h in self.handles() {
             let snap = h.snapshot();
             let saving = snap
@@ -860,6 +872,7 @@ impl DaemonHub {
                         .map(|_| ()),
                     None => Err(anyhow::anyhow!("unknown setting")),
                 };
+                landed |= result.is_ok();
                 if let Err(error) = result {
                     // A worker that does not answer would make every later
                     // key wait out its own timeout.
@@ -879,14 +892,30 @@ impl DaemonHub {
             // Waits for the graph (child processes): off the runtime.
             let mixer = self.mixer.clone();
             match tokio::task::spawn_blocking(move || mixer.set_live(layout)).await {
-                Ok(Ok(_)) => {}
+                Ok(Ok(_)) => landed = true,
                 Ok(Err(PatchError::Invalid(e))) => failures.push(format!("mixer layout: {e}")),
                 Ok(Err(PatchError::Io(e))) => failures.push(format!("mixer layout: {e:#}")),
                 Err(e) => failures.push(format!("mixer task: {e}")),
             }
         }
         if !failures.is_empty() {
-            anyhow::bail!("profile partially applied: {}", failures.join("; "));
+            let error = anyhow::anyhow!("profile partially applied: {}", failures.join("; "));
+            // The live state is part this profile's now, not the old one's:
+            // the next start must not apply the old one over it. (At start
+            // `name` is the last profile already; it is tried again next time.)
+            if landed && !startup {
+                let recorded = update_app_config(&self.paths, |cfg| {
+                    cfg.last_profile = Some(name.to_string());
+                    cfg.last_profile_modified = true;
+                    Ok(())
+                });
+                if let Err(e) = recorded {
+                    return Err(error.context(format!(
+                        "it could not be recorded as the last profile either: {e:#}"
+                    )));
+                }
+            }
+            return Err(error);
         }
         set_last_profile(&self.paths, name)?;
         info!("applied profile {name}");
@@ -987,18 +1016,21 @@ impl DaemonHub {
             mixer: profile_layout(&state.file).or(old_mixer),
         };
         save_profile(&self.paths, &profile)?;
-        set_last_profile(&self.paths, name)
+        set_last_profile(&self.paths, name).with_context(|| {
+            format!("saved {name:?}, but it could not be recorded as the last profile")
+        })
     }
 
     pub async fn shutdown(&self) {
         // A pass in flight finishes first: what it opened is in `devices`
         // below, and no driver open (ChatMix) lands after the audio reset.
+        // Bounded: a stop that outlasts systemd's timeout restores no audio.
         self.stopping.store(true, Ordering::Relaxed);
-        let _pass = self.discovering.lock().await;
+        let _pass = tokio::time::timeout(PASS_WAIT, self.discovering.lock())
+            .await
+            .inspect_err(|_| warn!("shutdown: a discovery pass still runs; not waiting for it"));
         let handles: Vec<_> = lock(&self.devices).drain().map(|(_, h)| h).collect();
         stop_all(&handles).await;
-        let net = self.net.clone();
-        let _ = tokio::task::spawn_blocking(move || net.shutdown()).await;
         let mixer = self.mixer.clone();
         let _ = tokio::task::spawn_blocking(move || mixer.shutdown()).await;
         // Tests share the session's audio with the running hakod: never torn down.
@@ -1007,6 +1039,9 @@ impl DaemonHub {
                 warn!("audio teardown: {e:#}");
             }
         }
+        // After the audio: its threads are joined (no bound).
+        let net = self.net.clone();
+        let _ = tokio::task::spawn_blocking(move || net.shutdown()).await;
         self.remap.shutdown();
         let _ = self.events.send(AdapterEvent::ShuttingDown);
     }
@@ -1552,6 +1587,10 @@ pub(crate) mod tests {
         let e = hub.delete_profile("p").unwrap_err();
         assert!(format!("{e:#}").contains("deleted \"p\", but"), "{e:#}");
         assert!(list_profiles(&hub.paths).unwrap().is_empty());
+        let e = hub.save_profile("r").await.unwrap_err();
+        assert!(format!("{e:#}").contains("saved \"r\", but"), "{e:#}");
+        assert_eq!(list_profiles(&hub.paths).unwrap(), ["r"]);
+        std::fs::remove_file(hub.paths.profiles_dir.join("r.toml")).unwrap();
 
         std::fs::remove_file(&hub.paths.config_toml).unwrap();
         std::fs::write(hako_core::mixer::mixer_path(&hub.paths), "version = \"x\"").unwrap();
@@ -1914,8 +1953,7 @@ pub(crate) mod tests {
         assert!(!modified());
 
         hub.save_profile("p").await.unwrap();
-        // A profile's own writes are not the user's (this one fails part-way,
-        // so nothing clears the flag after its DPI write).
+        let last = || load_app_config(&hub.paths).unwrap().last_profile;
         let settings = [
             ("dpi".to_string(), TomlSetting::Int(800)),
             ("bogus".to_string(), TomlSetting::Int(1)),
@@ -1927,8 +1965,18 @@ pub(crate) mod tests {
             mixer: None,
         };
         save_profile(&hub.paths, &bad).unwrap();
-        assert!(hub.apply_profile("bad", false).await.is_err());
+        // A profile's own writes are not the user's (the start's apply of
+        // this one fails part-way, so nothing clears the flag after its DPI
+        // write; the start records nothing).
+        assert!(hub.apply_profile("bad", true).await.is_err());
         assert!(!modified());
+        assert_eq!(last().as_deref(), Some("p"));
+        // Applied by the user, what landed is its: the last profile, marked
+        // modified, so the next start applies neither it nor "p" over it.
+        assert!(hub.apply_profile("bad", false).await.is_err());
+        assert_eq!(last().as_deref(), Some("bad"));
+        assert!(modified());
+        hub.save_profile("p").await.unwrap();
         // Neither is the onboard-writes opt-in.
         hub.mark_profile_modified(&[SettingKey::OnboardWrites], &[])
             .await;

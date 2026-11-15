@@ -18,6 +18,11 @@
 //!   the slot, the adapter lets go of the device and shows as disconnected,
 //!   so it never talks to the new device with the old one's feature map; the
 //!   receiver's next rescan opens whatever is paired there now.
+//! - Link events are read from the node: receiver notifications 0x41 / 0x40
+//!   and feature 0x1D4B (wireless status) make the adapter ping at once; a
+//!   connection or a 0x1D4B "config needed" flag re-applies the settings (the
+//!   way G HUB re-configures a device after wake). Flag layout and the use of
+//!   0x1D4B: `docs/vendor-re/logitech.md` section 2.3.
 //! - Keyboards with 0x8081 get the static colour on every key as well (range
 //!   update + FrameEnd, Solaar's single-colour path), since per-key paint
 //!   overrides the zone colour.
@@ -82,6 +87,8 @@ struct Features {
     /// 0x1F20 version 2+ (auto-off timer).
     adc_power: Option<u8>,
     equalizer: Option<u8>,
+    /// 0x1D4B wireless status (wake / settings-lost events).
+    wireless: Option<u8>,
 }
 
 impl Features {
@@ -120,6 +127,7 @@ impl Features {
             FEAT_SIDETONE => self.sidetone = Some(idx),
             FEAT_PER_KEY => self.perkey = Some(idx),
             FEAT_EQUALIZER => self.equalizer = Some(idx),
+            FEAT_WIRELESS_STATUS => self.wireless = Some(idx),
             _ => {}
         }
         if fid == FEAT_ADC && version >= 2 {
@@ -207,6 +215,8 @@ pub struct HidppAdapter {
     last_ping: Instant,
     last_sync: Instant,
     last_probe: Instant,
+    /// Link events read from the node, waiting for the next tick.
+    events: Vec<hidpp::LinkEvent>,
 }
 
 impl HidppAdapter {
@@ -258,6 +268,7 @@ impl HidppAdapter {
             last_ping: Instant::now(),
             last_sync: Instant::now(),
             last_probe: Instant::now(),
+            events: Vec::new(),
         };
         if a.ping() {
             a.link_up();
@@ -270,8 +281,27 @@ impl HidppAdapter {
     }
 
     fn call(&mut self, feat: u8, fnid: u8, params: &[u8]) -> Result<[u8; 20]> {
+        // A request drains the queue: keep the link events in it first.
+        self.poll_events();
         let dev = self.dev.as_mut().context("device closed")?;
         hidpp::request(dev, self.index, feat, fnid, params)
+    }
+
+    /// Move the link events (receiver 0x40 / 0x41, 0x1D4B) among the queued
+    /// reports to `events`; everything else is dropped.
+    fn poll_events(&mut self) {
+        let Some(dev) = self.dev.as_mut() else {
+            return;
+        };
+        let mut buf = [0u8; 64];
+        for _ in 0..32 {
+            let Ok(n) = dev.read_timeout(&mut buf, Duration::from_millis(1)) else {
+                break;
+            };
+            if let Some(e) = hidpp::parse_event(&buf[..n], self.index, self.feat.wireless) {
+                self.events.push(e);
+            }
+        }
     }
 
     /// ROOT GetProtocolVersion; an offline device gets an error from its receiver.
@@ -660,7 +690,12 @@ impl HidppAdapter {
             }
         }
         if let Some(idx) = self.feat.adc_power {
-            if let Ok(r) = self.call(idx, 0x01, &[]) {
+            // A value the dropdown does not offer is not shown.
+            if let Some(r) = self
+                .call(idx, 0x01, &[])
+                .ok()
+                .filter(|r| AUTO_OFF_MIN.contains(&r[4]))
+            {
                 merge_setting(
                     &mut self.settings,
                     SettingKey::PmShutdown,
@@ -762,6 +797,9 @@ impl HidppAdapter {
             .filter(|_| effect == MouseEffectKind::Static)
             .zip(self.feat.perkey);
         if targets.is_empty() && perkey.is_none() {
+            if self.zones.is_empty() && !self.probed {
+                bail!("lighting effects not read from the device yet");
+            }
             return Ok(());
         }
         self.ensure_host_mode()?;
@@ -1036,6 +1074,20 @@ impl DeviceAdapter for HidppAdapter {
 
     fn tick(&mut self) -> Result<()> {
         if self.dev.is_none() {
+            return Ok(());
+        }
+        self.poll_events();
+        let (check, resend) = hidpp::wake_plan(&std::mem::take(&mut self.events));
+        if check {
+            // The link changed or the device lost its settings: look now.
+            if self.ping() {
+                if resend || !self.online {
+                    info!("{} link event; initialising", self.name);
+                    self.link_up();
+                }
+            } else {
+                self.link_down();
+            }
             return Ok(());
         }
         if !self.online {

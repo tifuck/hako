@@ -154,9 +154,10 @@ impl Lights for Elo {
             _ => bail!("{} is not supported", key.as_str()),
         };
         self.dev.write(&inactive_report(minutes))?;
-        // HeadsetControl reads one reply before pausing.
-        read_until(&mut self.dev, Duration::from_millis(500), |_| true)?;
+        // HeadsetControl reads one reply before pausing, and fails without one.
+        let reply = read_until(&mut self.dev, Duration::from_millis(500), |_| true)?;
         std::thread::sleep(self.family.pause());
+        reply.context("the headset did not confirm the auto-off time")?;
         Ok(())
     }
 }

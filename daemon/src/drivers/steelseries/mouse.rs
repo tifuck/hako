@@ -514,6 +514,9 @@ fn battery_request(kind: Battery) -> Vec<u8> {
 fn parse_battery(kind: Battery, r: &[u8]) -> Option<(u8, bool)> {
     let (level, charging) = match kind {
         Battery::Aerox => {
+            if r.first() == Some(&DONGLE_UNREACHED) {
+                return None;
+            }
             let v = *r.get(1)?;
             ((i16::from(v & 0x7f) - 1) * 5, v & 0x80 != 0)
         }
@@ -522,6 +525,26 @@ fn parse_battery(kind: Battery, r: &[u8]) -> Option<(u8, bool)> {
     (0..=100)
         .contains(&level)
         .then_some((level as u8, charging))
+}
+
+/// Echo byte a dongle answers with when it could not reach the mouse
+/// (asleep or switched off) instead of the command's own opcode.
+const DONGLE_UNREACHED: u8 = 0x40;
+
+/// Whether `r` is the dongle's answer to a command sent as `frame` (opcode
+/// `frame[1]`): the echoed opcode, or [`DONGLE_UNREACHED`].
+fn is_dongle_answer(frame: &[u8], r: &[u8]) -> bool {
+    r.first()
+        .is_some_and(|&b| b == frame[1] || b == DONGLE_UNREACHED)
+}
+
+/// Check a dongle answer: `[opcode echo] [error code]`. The error code is
+/// not acted on (its values are only documented for the newest mice).
+fn check_dongle_answer(r: &[u8]) -> Result<()> {
+    if r.first() == Some(&DONGLE_UNREACHED) {
+        bail!("the dongle could not reach the mouse (asleep or switched off?)");
+    }
+    Ok(())
 }
 
 /// Report id 0 + payload zero-padded to `len`; the dongle wants bit 6 set
@@ -883,10 +906,12 @@ impl MouseAdapter {
             if feature {
                 dev.set_feature(&mut frame(p, false, len))?;
             } else if wireless {
-                // The dongle answers every command; take the answer off the
-                // queue. No answer: the mouse did not get it.
-                request(dev, &frame(p, true, len), |_| true, REPLY_TIMEOUT)?
+                // The dongle answers every command with the echoed opcode
+                // (`0x40 | op`); `0x40` instead means the mouse did not get it.
+                let f = frame(p, true, len);
+                let answer = request(dev, &f, |r| is_dongle_answer(&f, r), REPLY_TIMEOUT)?
                     .context("no answer from the mouse (asleep or switched off?)")?;
+                check_dongle_answer(&answer)?;
             } else {
                 dev.write(&frame(p, false, len))?;
             }
@@ -977,7 +1002,24 @@ impl DeviceAdapter for MouseAdapter {
             if payloads.is_empty() {
                 bail!("unsupported setting {}", key.as_str());
             }
-            self.write_all(&payloads, self.feature(key))?;
+            if let Err(e) = self.write_all(&payloads, self.feature(key)) {
+                // Zone colours, per-preset DPI and steady + colour may stop
+                // midway: send the old value back when there is one.
+                let stored = |k: &SettingKey| get_setting(&self.settings, *k).is_some();
+                let old = if !LIGHT_KEYS.contains(&key) || LIGHT_KEYS.iter().any(stored) {
+                    self.payloads(&self.settings, key)
+                } else {
+                    vec![]
+                };
+                if !old.is_empty() {
+                    if let Err(re) = self.write_all(&old, self.feature(key)) {
+                        return Err(anyhow!(
+                            "{e:#}; restoring the previous value also failed ({re:#}), the mouse may hold part of the change"
+                        ));
+                    }
+                }
+                return Err(e);
+            }
         }
         // The mouse has the value: keep it even if the file cannot be written.
         self.settings = proposed;
@@ -1461,6 +1503,20 @@ mod tests {
     }
 
     #[test]
+    fn dongle_answers_echo_the_opcode_or_flag_an_unreachable_mouse() {
+        let f = frame(&[0x2d, 1, 2], true, 0);
+        assert_eq!(f[1], 0x6d);
+        assert!(is_dongle_answer(&f, &[0x6d, 0x00]));
+        assert!(is_dongle_answer(&f, &[0x40, 0x00]));
+        // Another command's answer or a stray report is not ours.
+        assert!(!is_dongle_answer(&f, &[0x6b, 0x00]));
+        assert!(!is_dongle_answer(&f, &[]));
+        assert!(check_dongle_answer(&[0x6d, 0x00]).is_ok());
+        let e = check_dongle_answer(&[0x40, 0x00]).unwrap_err();
+        assert!(e.to_string().contains("could not reach"), "{e}");
+    }
+
+    #[test]
     fn wireless_frame_and_battery() {
         assert_eq!(frame(&[0x92], false, 0), vec![0x00, 0x92]);
         assert_eq!(frame(&[0x92], true, 0), vec![0x00, 0xd2]);
@@ -1478,8 +1534,78 @@ mod tests {
             Some((50, false))
         );
         assert_eq!(parse_battery(Battery::Aerox, &[0x92, 0]), None);
+        // The dongle's "mouse unreachable" echo is not a level.
+        assert_eq!(parse_battery(Battery::Aerox, &[0x40, 21]), None);
         assert_eq!(parse_battery(Battery::Rival, &[64, 0, 1]), Some((64, true)));
         assert_eq!(parse_battery(Battery::Rival, &[200, 0, 0]), None);
+    }
+
+    /// A failed multi-report write sends the old value again; a key with no
+    /// old value is left alone.
+    #[test]
+    fn a_failed_write_sends_the_old_value_back() {
+        static SPEC: MouseSpec = MouseSpec {
+            interface: 0,
+            wireless: &[],
+            dpi: Dpi::Preset {
+                head: &[0x03],
+                tail: &[],
+                codes: RANGE_12000,
+            },
+            rate: Some(Rate {
+                cmd: &[0x04, 0x00],
+                zero_based: false,
+            }),
+            light: Light::NONE,
+            battery: None,
+            sleep: None,
+            packet_len: 0,
+            save: MouseSave::Blocked("x"),
+        };
+        let root = std::env::temp_dir().join(format!("hako-ss-mouse-{}", std::process::id()));
+        let mut settings = SettingsMap::new();
+        merge_setting(&mut settings, SettingKey::Dpi, SettingValue::Int(800));
+        // Every write to /dev/full fails.
+        let mut a = MouseAdapter {
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: 0,
+                instance: "fake".into(),
+            },
+            name: "Mouse",
+            spec: &SPEC,
+            wireless: false,
+            dev: Some(HidrawDevice::open(std::path::Path::new("/dev/full")).unwrap()),
+            settings: settings.clone(),
+            battery: BatteryState {
+                label: "Mouse".into(),
+                percent: None,
+                charging: false,
+                present: false,
+            },
+            last_error: None,
+            last_battery: Instant::now(),
+            failures: 0,
+            restore_pending: false,
+            paths: ConfigPaths {
+                config_toml: root.join("config.toml"),
+                devices_dir: root.join("devices"),
+                profiles_dir: root.join("profiles"),
+                remaps_dir: root.join("remaps"),
+                root: root.clone(),
+            },
+        };
+        let e = a.set(SettingKey::Dpi, SettingValue::Int(1600)).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("restoring the previous value"),
+            "{e:#}"
+        );
+        assert_eq!(a.settings, settings);
+        let e = a
+            .set(SettingKey::ReportRate, SettingValue::Int(500))
+            .unwrap_err();
+        assert!(!format!("{e:#}").contains("restoring"), "{e:#}");
+        assert!(!root.exists());
     }
 
     #[test]

@@ -70,6 +70,7 @@ pub const MODELS: &[Model] = &[
     model(VID, "Wooting 60HE+", &[0x1320, 0x1321, 0x1322]),
     model(VID, "Wooting 60HE V2", &[0x1340, 0x1341, 0x1342]),
     model(VID, "Wooting 80HE", &[0x1400, 0x1401, 0x1402]),
+    model(VID, "Wooting 80HE+", &[0x1410, 0x1411, 0x1412]),
     model(VID, "Wooting Two HE", &[0x1220, 0x1221, 0x1222]),
     model(VID, "Wooting Two HE (ARM)", &[0x1230, 0x1231, 0x1232]),
     model(VID, "Wooting Two Lekker Edition", &[0x1210, 0x1211, 0x1212]),
@@ -90,7 +91,7 @@ fn layout(canonical: u16) -> Option<(usize, bool)> {
         0x1230 => (21, true),
         0x1300 | 0x1340 => (14, false),
         0x1310 | 0x1320 => (14, true),
-        0x1400 => (17, false),
+        0x1400 | 0x1410 => (17, false),
         0x1510 => (7, true),
         _ => return None,
     })
@@ -127,6 +128,34 @@ fn small_packets(desc: &[u8]) -> Option<bool> {
         0x96 => Some(false),
         _ => None,
     })
+}
+
+const RESULT_OK: u8 = 0x88;
+const RESULT_BUSY: u8 = 0x77;
+const BUSY_RETRIES: usize = 5;
+
+fn result_name(code: u8) -> String {
+    match code {
+        0x66 => "unknown command".into(),
+        0x99 => "overflow".into(),
+        0xaa => "unsupported".into(),
+        0xff => "error".into(),
+        c => format!("result {c:#04x}"),
+    }
+}
+
+/// Failure code of a reply `magic(2) | command | result | ...` (a numbered
+/// report may carry its report id first). Firmware that does not echo the
+/// command id answers `0xff` there; anything not recognisably a reply is
+/// ignored, as before.
+fn reply_failure(reply: &[u8], cmd: u8) -> Option<u8> {
+    let at = [0usize, 1].into_iter().find(|&o| {
+        reply.len() > o + 3
+            && matches!(&reply[o..o + 2], [0xd0 | 0xd1, 0xda])
+            && (reply[o + 2] == cmd || reply[o + 2] == 0xff)
+    })?;
+    let code = reply[at + 3];
+    (code != RESULT_OK).then_some(code)
 }
 
 /// Feature report for a parameterless command (`wooting_usb_send_feature_buff`).
@@ -374,9 +403,25 @@ impl Wooting {
             .unwrap_or("onboard")
     }
 
-    /// Send a command and wait for its reply (contents unused), as
-    /// `wooting_usb_send_feature` does.
+    /// Send a command and wait for its reply, as `wooting_usb_send_feature`
+    /// does. A reply carrying a result code other than success is an error;
+    /// "busy" is retried a few times (Wootility 5.4.2 result codes).
     fn command(&mut self, cmd: u8) -> Result<()> {
+        for attempt in 0..BUSY_RETRIES {
+            match self.command_once(cmd)? {
+                Some(RESULT_BUSY) if attempt + 1 < BUSY_RETRIES => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Some(RESULT_BUSY) => bail!("command {cmd}: keyboard busy"),
+                Some(code) => bail!("command {cmd}: {}", result_name(code)),
+                None => return Ok(()),
+            }
+        }
+        Ok(())
+    }
+
+    /// One attempt; `Some(code)` when the reply reports a failure.
+    fn command_once(&mut self, cmd: u8) -> Result<Option<u8>> {
         let dev = self.dev.as_mut().context("not connected")?;
         dev.drain(Duration::ZERO);
         dev.set_feature(&mut command(self.proto, cmd))?;
@@ -389,7 +434,7 @@ impl Wooting {
                 break;
             }
         }
-        Ok(())
+        Ok(reply_failure(&reply[..got.min(reply.len())], cmd))
     }
 
     fn apply(&mut self) -> Result<()> {
@@ -532,6 +577,19 @@ mod tests {
         assert_eq!(a.settings, settings);
         assert!(a.last_error.is_some());
         assert!(!dir.exists(), "nothing saved");
+    }
+
+    #[test]
+    fn reply_result_codes() {
+        let ok = [0xd0, 0xda, 33, 0x88, 0, 0];
+        assert_eq!(reply_failure(&ok, 33), None);
+        let busy = [0xd0, 0xda, 33, 0x77, 0, 0];
+        assert_eq!(reply_failure(&busy, 33), Some(RESULT_BUSY));
+        let v3 = [1, 0xd1, 0xda, 32, 0xaa, 0, 0];
+        assert_eq!(reply_failure(&v3, 32), Some(0xaa));
+        assert_eq!(reply_failure(&busy, 32), None);
+        assert_eq!(reply_failure(&[0; 8], 33), None);
+        assert_eq!(result_name(0x99), "overflow");
     }
 
     #[test]

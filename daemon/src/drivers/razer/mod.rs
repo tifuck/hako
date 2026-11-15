@@ -50,7 +50,7 @@ use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
 use protocol::{
     check_response, make_report, Effect as KbEffectKind, BACKLIGHT_LED, NOSTORE, VARSTORE,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const VID: u16 = 0x1532;
 const PID: u16 = 0x026b;
@@ -160,7 +160,10 @@ impl Transport {
             Transport::Hidraw(dev) => {
                 // buf[0] = report id in, report data comes back at buf[1..].
                 let mut buf = [0u8; FEATURE_LEN];
-                dev.get_feature(&mut buf)?;
+                let n = dev.get_feature_len(&mut buf)?;
+                if n < FEATURE_LEN {
+                    bail!("HIDIOCGFEATURE: short reply ({n} of {FEATURE_LEN} bytes)");
+                }
                 resp.copy_from_slice(&buf[1..]);
             }
             #[cfg(test)]
@@ -196,6 +199,8 @@ pub struct RazerKeyboardAdapter {
     transport: Option<Transport>,
     settings: SettingsMap,
     last_error: Option<String>,
+    /// Why the last read-back in `tick` failed, until one succeeds.
+    read_error: Option<String>,
     paths: ConfigPaths,
     last_poll: std::time::Instant,
 }
@@ -222,6 +227,7 @@ impl RazerKeyboardAdapter {
             transport: Some(transport),
             settings,
             last_error: None,
+            read_error: None,
             paths,
             last_poll: std::time::Instant::now(),
         };
@@ -366,18 +372,15 @@ fn open_transport() -> Result<(Transport, String)> {
     let probe = make_report(TXN_STD, 0x00, 0x81, &[0x00, 0x00]);
     let mut errs = Vec::new();
 
-    // 1) Preferred: hidraw on interface 3 (usbhid stays bound).
+    // 1) Preferred: hidraw on interface 3 (usbhid stays bound). A node that
+    //    is there but fails is an error: usbfs would take it from usbhid.
     match find_hidraw(VID, PID, Some(u32::from(REPORT_IFACE))) {
-        Ok(info) => match HidrawDevice::open(&info.path) {
-            Ok(dev) => {
-                let mut t = Transport::Hidraw(dev);
-                match t.transact(&probe) {
-                    Ok(_) => return Ok((t, info.path.display().to_string())),
-                    Err(e) => errs.push(format!("{}: {e}", info.path.display())),
-                }
-            }
-            Err(e) => errs.push(e.to_string()),
-        },
+        Ok(info) => {
+            let mut t = Transport::Hidraw(HidrawDevice::open(&info.path)?);
+            t.transact(&probe)
+                .with_context(|| format!("no Razer control path ({})", info.path.display()))?;
+            return Ok((t, info.path.display().to_string()));
+        }
         Err(e) => errs.push(format!("hidraw iface {REPORT_IFACE}: {e}")),
     }
 
@@ -386,7 +389,8 @@ fn open_transport() -> Result<(Transport, String)> {
     match find_usb_device_path(VID, PID).and_then(|p| UsbDevice::open(&p).map(|d| (p, d))) {
         Ok((path, mut dev)) => {
             if let Err(e) = dev.claim_interface(REPORT_IFACE) {
-                warn!("USB claim iface {REPORT_IFACE} failed: {e}");
+                errs.push(format!("{}: {e}", path.display()));
+                bail!("no Razer control path ({})", errs.join("; "));
             }
             let mut t = Transport::Usb {
                 dev,
@@ -507,7 +511,7 @@ impl DeviceAdapter for RazerKeyboardAdapter {
                     .and_then(|v| v.as_str())
                     .unwrap_or("static"),
             )),
-            last_error: self.last_error.clone(),
+            last_error: self.last_error.clone().or_else(|| self.read_error.clone()),
         }
     }
 
@@ -561,33 +565,50 @@ impl DeviceAdapter for RazerKeyboardAdapter {
             return Ok(());
         }
         self.last_poll = std::time::Instant::now();
+        let mut failed = None;
         // VARSTORE reads the stored brightness: current only in save mode.
-        if let Some(Ok(Some(br))) = self.saving().then(|| self.read_brightness_pct()) {
-            let cur = get_setting(&self.settings, SettingKey::Brightness)
-                .and_then(|v| v.as_int())
-                .unwrap_or(-1);
-            if cur != br as i64 {
-                merge_setting(
-                    &mut self.settings,
-                    SettingKey::Brightness,
-                    SettingValue::Int(br as i64),
-                );
+        match self.saving().then(|| self.read_brightness_pct()) {
+            Some(Ok(Some(br))) => {
+                let cur = get_setting(&self.settings, SettingKey::Brightness)
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(-1);
+                if cur != br as i64 {
+                    merge_setting(
+                        &mut self.settings,
+                        SettingKey::Brightness,
+                        SettingValue::Int(br as i64),
+                    );
+                }
             }
+            Some(Err(e)) => failed = Some(e),
+            _ => {}
         }
         // Game mode also follows the keyboard's own key.
-        if let Ok((hz, game)) = self.read_misc() {
-            if let Some(hz) = hz {
+        match self.read_misc() {
+            Ok((hz, game)) => {
+                if let Some(hz) = hz {
+                    merge_setting(
+                        &mut self.settings,
+                        SettingKey::ReportRate,
+                        SettingValue::Int(i64::from(hz)),
+                    );
+                }
                 merge_setting(
                     &mut self.settings,
-                    SettingKey::ReportRate,
-                    SettingValue::Int(i64::from(hz)),
+                    SettingKey::GameMode,
+                    SettingValue::Bool(game),
                 );
             }
-            merge_setting(
-                &mut self.settings,
-                SettingKey::GameMode,
-                SettingValue::Bool(game),
-            );
+            Err(e) => failed = failed.or(Some(e)),
+        }
+        match failed {
+            None => self.read_error = None,
+            // Busy now, asked again at the next poll.
+            Some(e) if e.to_string().contains("busy") => {}
+            Some(e) => {
+                debug!("razer read-back: {e:#}");
+                self.read_error = Some(format!("reading the keyboard failed: {e:#}"));
+            }
         }
         Ok(())
     }
@@ -891,6 +912,7 @@ mod tests {
             transport: Some(Transport::Fake(fake.clone())),
             settings,
             last_error: None,
+            read_error: None,
             paths,
             last_poll: std::time::Instant::now(),
         }
@@ -982,6 +1004,26 @@ mod tests {
             Some(&SettingValue::Int(80))
         );
         assert!(a.last_error.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A failed read-back shows until a later one succeeds.
+    #[test]
+    fn huntsman_failed_read_back_is_shown() {
+        let root = std::env::temp_dir().join(format!("hako-huntsman-read-{}", std::process::id()));
+        let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake {
+            fail: Some((0x00, 0xc0)),
+            ..Fake::default()
+        }));
+        let mut a = huntsman(&fake, &root);
+        a.last_poll -= BRIGHTNESS_POLL;
+        a.tick().unwrap();
+        let err = a.snapshot().last_error.unwrap();
+        assert!(err.contains("reading the keyboard"), "{err}");
+        fake.lock().unwrap().fail = None;
+        a.last_poll -= BRIGHTNESS_POLL;
+        a.tick().unwrap();
+        assert_eq!(a.snapshot().last_error, None);
         let _ = std::fs::remove_dir_all(root);
     }
 

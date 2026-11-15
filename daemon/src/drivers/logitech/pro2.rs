@@ -30,8 +30,9 @@ use anyhow::{bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
 use hako_core::device::{BatteryState, DeviceId, DeviceKind, DeviceSnapshot};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const RX_VID: u16 = 0x046d;
 pub(super) const RX_PID: u16 = 0xc543;
@@ -85,10 +86,16 @@ fn open(_pid: u16, ctx: &DriverCtx) -> Opened {
         Err(e) if out.is_empty() && pro2_err.is_none() => return Err(e),
         Err(e) => warn!("PRO 2 receiver: other slots: {e}"),
     }
+    // Every rescan without a PRO 2 paired fails the same way: warn once.
+    static WARNED: AtomicBool = AtomicBool::new(false);
     match pro2_err {
         Some(e) if out.is_empty() && held.is_none() => Err(e),
         Some(e) => {
-            warn!("PRO 2: {e}");
+            if WARNED.swap(true, Ordering::Relaxed) {
+                debug!("PRO 2: {e}");
+            } else {
+                warn!("PRO 2: {e}");
+            }
             Ok(out)
         }
         None => Ok(out),
@@ -115,7 +122,8 @@ pub struct LogitechMouseAdapter {
     rgb_slots: std::collections::HashMap<u16, u8>,
     /// Report rates (Hz) the device advertises.
     rr_hz: Vec<u32>,
-    /// Link state from the kernel hidpp battery node (`online`).
+    /// Link state from the kernel hidpp battery node (`online`), else
+    /// whether the mouse answers.
     online: bool,
     last_probe: Instant,
     /// `device_index` answered a ping (false: a guess, rediscovered on link-up).
@@ -567,6 +575,9 @@ impl LogitechMouseAdapter {
                 .and_then(|v| v.as_str())
                 .unwrap_or("static"),
         );
+        if self.rgb_slots.is_empty() {
+            bail!("lighting effects not read from the mouse yet");
+        }
         // Resolve the cluster slot for this effect. Only effects the device
         // enumerated are offered in the UI, so an unknown id means "nothing to
         // do" — never fall back to a guessed slot (that lights the wrong effect).
@@ -600,6 +611,23 @@ impl LogitechMouseAdapter {
         // SetRgbClusterEffect = fn 0x10.
         self.hidpp_long(idx, 0x01, &payload)?;
         Ok(())
+    }
+
+    /// A ROOT ping (or the index lookup) gets an answer; a receiver's
+    /// offline error is none. Without one the next try is a sync period away.
+    fn answers(&mut self) -> bool {
+        let up = if self.index_known {
+            match self.hidpp_long(0x00, 0x01, &[0x00, 0x00, 0x88]) {
+                Ok(_) => true,
+                Err(e) => !hidpp::unanswered(&e),
+            }
+        } else {
+            self.dev.as_mut().is_some_and(|d| discover_index(d).is_ok())
+        };
+        if !up {
+            self.last_sync = Instant::now();
+        }
+        up
     }
 
     fn persist(&self) -> Result<()> {
@@ -973,7 +1001,13 @@ impl DeviceAdapter for LogitechMouseAdapter {
 
     fn tick(&mut self) -> Result<()> {
         // sysfs reads are cached kernel state (no device I/O), cheap per tick.
-        let online = read_sysfs_battery().map(|b| b.online).unwrap_or(true);
+        let online = match read_sysfs_battery() {
+            Some(b) => b.online,
+            // No kernel node to ask: the mouse is up while it answers,
+            // checked as often as it is synced.
+            None if self.last_sync.elapsed() > Duration::from_secs(8) => self.answers(),
+            None => self.online,
+        };
         let came_up = online && !self.online;
         self.online = online;
         // Anything still unknown is looked up again, at most every 30 s.

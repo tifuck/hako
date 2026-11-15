@@ -72,6 +72,16 @@ enum AutoSleep {
     WithLightTimers,
 }
 
+impl AutoSleep {
+    /// Longest auto-off the control offers, minutes.
+    fn max(self) -> u8 {
+        match self {
+            AutoSleep::Minutes => 255,
+            AutoSleep::WithLightTimers => 90,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Spec {
     pid: u16,
@@ -504,7 +514,7 @@ impl CenturionHeadset {
             }
         }
         if let Ok(p) = self.call(FEAT_AUTO_SLEEP, 0x00, &[]) {
-            if let Some(&m) = p.first() {
+            if let Some(&m) = p.first().filter(|&&m| m <= self.spec.auto_sleep.max()) {
                 merge_setting(
                     &mut self.settings,
                     SettingKey::PmShutdown,
@@ -565,10 +575,7 @@ impl CenturionHeadset {
                 1.0,
             ));
         }
-        let max = match self.spec.auto_sleep {
-            AutoSleep::Minutes => 255.0,
-            AutoSleep::WithLightTimers => 90.0,
-        };
+        let max = self.spec.auto_sleep.max().into();
         c.push(SettingMeta::slider(PmShutdown, "Auto-off", 0.0, max, 1.0).unit("min"));
         if self.spec.voice_prompts {
             c.push(SettingMeta::toggle(VoicePrompts, "Voice prompts"));

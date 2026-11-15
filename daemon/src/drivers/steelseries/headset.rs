@@ -13,6 +13,11 @@
 //!   only (HeadsetControl has no wired Nova Pro); the hardware-verified
 //!   wireless sibling (`nova_pro.rs`) sends the same two commands.
 //!
+//! Reply layouts (`connection == 3` means linked, Arctis 9 `00 20`, Arctis 7
+//! `06 14`) and the save commands of several models come from SteelSeries GG's
+//! device definitions (`docs/vendor-re/steelseries.md`), recorded from static
+//! analysis; nothing of GG is included.
+//!
 //! Cross-checked against Linux-Arctis-Manager `daemon/device-configs/*.yaml`
 //! (github.com/elegos/Linux-Arctis-Manager); where the two disagree the
 //! feature is left out (see `models.rs`). Arctis 7+ mic level (`00 37`, 1-7)
@@ -40,6 +45,13 @@
 //!   offsets in both sources and the proposed kernel `hid-steelseries` patch
 //!   (lore: 20260227235042.410062-1-srimanachanta@gmail.com).
 //!
+//! - Arctis 9: `00 09 00`, 65 bytes (SteelSeries GG `arctis-9-tx` and
+//!   Linux-Arctis-Manager `base_arctis_9.yaml`; HeadsetControl differs).
+//! - Nova 7 gen 1, Nova 5, Nova 3P/3X: `00 09`, 64 bytes; Nova 7 gen 2 and
+//!   "upgrade" PIDs as `227e`; Nova 3 wired and Nova Pro wired: `06 09`
+//!   output (SteelSeries GG definitions, `docs/vendor-re/steelseries.md`,
+//!   with Linux-Arctis-Manager and the kernel patch agreeing on the bytes).
+//!
 //! Elsewhere the control is shown blocked with the reason.
 //!
 //! ChatMix: the Arctis 7 / Pro / 9 present separate Game and Chat playback
@@ -65,6 +77,8 @@ const POLL: Duration = Duration::from_secs(5);
 /// Dial poll period when the dial drives the host mix.
 const MIX_POLL: Duration = Duration::from_millis(450);
 const REPLY_TIMEOUT: Duration = Duration::from_millis(200);
+/// Status replies missed in a row before the headset counts as offline.
+const OFFLINE_AFTER: u8 = 3;
 
 /// Wire protocol of a headset family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +247,10 @@ pub enum Save {
     Nova,
     /// `00 09`, then 1.5 s busy; settings frames read back (Nova 7 Gen 2).
     NovaGen2,
+    /// `00 09 00`, 64 bytes after the report id (Arctis 9).
+    Arctis9,
+    /// `06 09`, 64-byte output report (Nova 3 wired, Nova Pro wired).
+    Report06,
 }
 
 impl Save {
@@ -240,6 +258,8 @@ impl Save {
         match self {
             Save::Legacy => Some(Packet::Output(pad(&[0x06, 0x09], 31))),
             Save::Nova | Save::NovaGen2 => Some(Packet::Output(pad(&[0x00, 0x09], 64))),
+            Save::Arctis9 => Some(Packet::Output(pad(&[0x00, 0x09, 0x00], 65))),
+            Save::Report06 => Some(Packet::Output(pad(&[0x06, 0x09], 64))),
             Save::None | Save::Blocked(_) => None,
         }
     }
@@ -271,12 +291,13 @@ pub struct HeadsetSpec {
     pub save: Save,
 }
 
-/// Nova 7 PIDs that report battery in 0-4 steps (HeadsetControl
-/// `DISCRETE_BATTERY_PIDS`); later firmware reports a percentage.
-const NOVA7_DISCRETE: &[u16] = &[0x2202, 0x2206, 0x220a, 0x223a, 0x227a, 0x22a4];
-/// HeadsetControl reads a percentage here, Linux-Arctis-Manager 0-4 steps:
-/// the level is not shown.
-const NOVA7_BATTERY_UNKNOWN: &[u16] = &[0x2258];
+/// Nova 7 / Nova 4 PIDs that report battery in 0-4 steps (HeadsetControl
+/// `DISCRETE_BATTERY_PIDS`; GG's `base_arctis_nova_7_tx` / `base_arctis_nova_4_tx`
+/// definitions, which also put the 7X White `2258` here); later firmware
+/// (GG's gen 2 / "upgrade" base) reports a percentage.
+const NOVA7_DISCRETE: &[u16] = &[
+    0x2202, 0x2206, 0x220a, 0x223a, 0x227a, 0x22a4, 0x2258, 0x12f2, 0x12f6,
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Packet {
@@ -409,6 +430,28 @@ fn mix(game: u8, chat: u8, max: u8) -> Option<(f64, f64)> {
     Some((level(game), level(chat)))
 }
 
+/// Connection byte value of a linked headset (dongle status replies).
+const CONNECTED: u8 = 3;
+
+/// Arctis 9 battery from the 16-bit cell voltage (10 mV steps) and the
+/// battery status byte: the GG icon steps 25 / 50 / 75 / 100 % start at
+/// 365 / 369 / 382 / 397; status 2 shows full, 3 empty.
+fn arctis9_percent(volt: u16, status: u8) -> u8 {
+    match (status, volt) {
+        (2, _) => 100,
+        (3, _) | (_, 0..=364) => 0,
+        (_, 365..=368) => 25,
+        (_, 369..=381) => 50,
+        (_, 382..=396) => 75,
+        _ => 100,
+    }
+}
+
+/// Reply to the Arctis 7 `06 14` connection request: `[2]` 3 = connected.
+fn parse_arctis7_connection(r: &[u8]) -> Option<bool> {
+    (r.len() >= 3 && r[..2] == [0x06, 0x14]).then(|| r[2] == CONNECTED)
+}
+
 /// First status request of a family (`None`: nothing to poll).
 fn status_request(family: Family) -> Option<Vec<u8>> {
     match family {
@@ -426,24 +469,26 @@ fn status_request(family: Family) -> Option<Vec<u8>> {
 /// Parse the reply to [`status_request`]; `None` = not that reply.
 fn parse_status(family: Family, discrete: bool, r: &[u8]) -> Option<Status> {
     let st = match family {
-        // [2] battery percent; no status byte.
-        Family::Arctis7 if r.len() >= 3 => Status {
+        // `06 18` echoed, [2] battery percent; no status byte.
+        Family::Arctis7 if r.len() >= 3 && r[..2] == [0x06, 0x18] => Status {
             online: true,
             percent: Some(r[2].min(100)),
             ..Status::default()
         },
-        // [2] 0x01 = offline, [3] battery percent.
-        Family::Arctis1 if r.len() >= 4 => Status {
-            online: r[2] != 0x01,
+        // `06 12` echoed, [2] connection (3 = connected), [3] battery percent.
+        Family::Arctis1 if r.len() >= 4 && r[..2] == [0x06, 0x12] => Status {
+            online: r[2] == CONNECTED,
             percent: Some(r[3].min(100)),
             ..Status::default()
         },
-        // [3] battery 0x64-0x9a, [4] 0x01 charging / 0xff offline, [9]/[10] dial 0-19.
+        // No opcode echo. [1] rf status (1 = headset linked), [2]/[3] battery
+        // voltage (big endian), [4] battery status (0x01 charging, 0x02 full,
+        // 0x03 empty, 0xff offline), [9] chat / [10] game dial 0-19.
         Family::Arctis9 if r.len() >= 11 => Status {
-            online: r[4] != 0xff,
-            percent: Some(percent(r[3], 0x64, 0x9a)),
+            online: r[1] == 0x01 && r[4] != 0xff,
+            percent: Some(arctis9_percent(u16::from_be_bytes([r[2], r[3]]), r[4])),
             charging: r[4] == 0x01,
-            chatmix: mix(r[9], r[10], 19),
+            chatmix: mix(r[10], r[9], 19),
             buds: None,
         },
         // [0] 0x02 = offline, 0x04 = online (battery is a second request).
@@ -451,17 +496,19 @@ fn parse_status(family: Family, discrete: bool, r: &[u8]) -> Option<Status> {
             online: r[0] != 0x02,
             ..Status::default()
         },
-        // [1] 0x01 offline, [2] battery 0-4, [3] 0x01 charging, [4]/[5] dial 0-100.
+        // [1] connection (3 = connected), [2] battery 0-4, [3] 0x01 charging,
+        // [4]/[5] dial 0-100.
         Family::Arctis7Plus if r.len() >= 6 && r[0] == 0xb0 => Status {
-            online: r[1] != 0x01,
+            online: r[1] == CONNECTED,
             percent: Some(percent(r[2], 0, 4)),
             charging: r[3] == 0x01,
             chatmix: mix(r[4], r[5], 100),
             buds: None,
         },
-        // [3] 0x00 offline / 0x01-0x02 charging, [2] battery, [4]/[5] dial 0-100.
+        // [1] connection (3 = connected), [2] battery, [3] 0x01-0x02 charging,
+        // [4]/[5] dial 0-100.
         Family::Nova7 if r.len() >= 6 && r[0] == 0xb0 => Status {
-            online: r[3] != 0x00,
+            online: r[1] == CONNECTED,
             percent: Some(if discrete {
                 percent(r[2], 0, 4)
             } else {
@@ -471,9 +518,10 @@ fn parse_status(family: Family, discrete: bool, r: &[u8]) -> Option<Status> {
             chatmix: mix(r[4], r[5], 100),
             buds: None,
         },
-        // [1] 0x02 offline, [3] battery percent, [4] 0x01 charging, [5]/[6] dial 0-100.
+        // [1] connection (3 = connected), [3] battery percent, [4] 0x01
+        // charging, [5]/[6] dial 0-100.
         Family::Nova5 if r.len() >= 7 && r[0] == 0xb0 => Status {
-            online: r[1] != 0x02,
+            online: r[1] == CONNECTED,
             percent: Some(r[3].min(100)),
             charging: r[4] == 0x01,
             chatmix: mix(r[5], r[6], 100),
@@ -505,7 +553,18 @@ fn parse_arctis7_chatmix(r: &[u8]) -> Option<(f64, f64)> {
         0 => 1.0,
         v => f64::from(percent(v, 191, 255)) / 100.0,
     };
-    (r.len() >= 4).then(|| (level(r[2]), level(r[3])))
+    (r.len() >= 4 && r[..2] == [0x06, 0x24]).then(|| (level(r[2]), level(r[3])))
+}
+
+/// The status to show for a poll's `reply`; `None` keeps the last one. A
+/// missing reply counts as offline only after [`OFFLINE_AFTER`] in a row.
+fn status_or_keep(reply: Option<Status>, misses: &mut u8) -> Option<Status> {
+    if reply.is_some() {
+        *misses = 0;
+        return reply;
+    }
+    *misses = misses.saturating_add(1);
+    (*misses >= OFFLINE_AFTER).then(Status::default)
 }
 
 /// What the save sequence needs from the device (a fake in tests).
@@ -817,6 +876,8 @@ pub struct HeadsetAdapter {
     last_poll: Instant,
     last_chatmix_try: Instant,
     failures: u8,
+    /// Status polls in a row without a reply.
+    misses: u8,
     paths: ConfigPaths,
     audio: Arc<AudioService>,
 }
@@ -864,6 +925,7 @@ impl HeadsetAdapter {
             last_poll: Instant::now(),
             last_chatmix_try: Instant::now(),
             failures: 0,
+            misses: 0,
             paths,
             audio,
         };
@@ -924,17 +986,38 @@ impl HeadsetAdapter {
         };
         let discrete = self.discrete;
         let dev = self.dev.as_mut().context("no device")?;
-        let mut st = request(
+        let reply = request(
             dev,
             &req,
             |r| parse_status(family, discrete, r).is_some(),
             REPLY_TIMEOUT,
         )?
-        .and_then(|r| parse_status(family, discrete, &r))
-        .unwrap_or_default();
+        .and_then(|r| parse_status(family, discrete, &r));
+        let Some(mut st) = status_or_keep(reply, &mut self.misses) else {
+            return Ok(());
+        };
         if family == Family::Arctis7 && self.spec.chatmix != ChatMix::None {
-            st.chatmix = request(dev, &[0x06, 0x24], |r| r.len() >= 4, REPLY_TIMEOUT)?
-                .and_then(|r| parse_arctis7_chatmix(&r));
+            st.chatmix = request(
+                dev,
+                &[0x06, 0x24],
+                |r| parse_arctis7_chatmix(r).is_some(),
+                REPLY_TIMEOUT,
+            )?
+            .and_then(|r| parse_arctis7_chatmix(&r));
+        }
+        if family == Family::Arctis7 && st.online {
+            // `06 18` carries only the battery; the link state is `06 14`.
+            let linked = request(
+                dev,
+                &[0x06, 0x14],
+                |r| parse_arctis7_connection(r).is_some(),
+                REPLY_TIMEOUT,
+            )?
+            .and_then(|r| parse_arctis7_connection(&r));
+            if linked == Some(false) {
+                st.online = false;
+                st.percent = None;
+            }
         }
         if family == Family::ProWireless && st.online {
             // [0] battery 0-4.
@@ -945,9 +1028,6 @@ impl HeadsetAdapter {
                 REPLY_TIMEOUT,
             )?
             .map(|r| percent(r[0], 0, 4));
-        }
-        if NOVA7_BATTERY_UNKNOWN.contains(&self.id.product_id) {
-            st.percent = None;
         }
         if let Some((game, chat)) = st.chatmix.filter(|_| self.spec.chatmix != ChatMix::None) {
             merge_setting(
@@ -1340,9 +1420,9 @@ mod tests {
 
     #[test]
     fn status_replies_decode() {
-        // Nova 7, discrete battery 3/4, discharging, dial 100/40.
+        // Nova 7, connected, discrete battery 3/4, discharging, dial 100/40.
         let mut r = [0u8; 8];
-        r[..6].copy_from_slice(&[0xb0, 0x00, 0x03, 0x03, 100, 40]);
+        r[..6].copy_from_slice(&[0xb0, 0x03, 0x03, 0x03, 100, 40]);
         let st = parse_status(Family::Nova7, true, &r).unwrap();
         assert_eq!(
             st,
@@ -1359,41 +1439,88 @@ mod tests {
             parse_status(Family::Nova7, false, &r).unwrap().percent,
             Some(64)
         );
-        r[3] = 0x00; // offline
-        let st = parse_status(Family::Nova7, false, &r).unwrap();
-        assert!(!st.online && st.percent.is_none());
+        // Paired but not connected (2), searching (1), unpaired (0): offline,
+        // whatever the charging byte says.
+        for conn in [0, 1, 2] {
+            r[1] = conn;
+            let st = parse_status(Family::Nova7, false, &r).unwrap();
+            assert!(!st.online && st.percent.is_none(), "conn {conn}");
+        }
+        r[1] = 3;
         r[0] = 0x07; // not a status reply
         assert!(parse_status(Family::Nova7, false, &r).is_none());
 
-        // Nova 5: [1] 0x02 offline, [3] percent, [4] charging.
-        let r = [0xb0, 0x00, 0x00, 80, 0x01, 50, 100];
+        // Nova 5: [1] connection, [3] percent, [4] charging.
+        let r = [0xb0, 0x03, 0x00, 80, 0x01, 50, 100];
         let st = parse_status(Family::Nova5, false, &r).unwrap();
         assert_eq!(
             (st.percent, st.charging, st.chatmix),
             (Some(80), true, Some((0.5, 1.0)))
         );
+        // Searching (1) was "online" before: only 3 is connected.
+        let r = [0xb0, 0x01, 0x00, 80, 0x00, 50, 100];
+        assert!(!parse_status(Family::Nova5, false, &r).unwrap().online);
         // Arctis 7+: battery 0-4.
-        let r = [0xb0, 0x00, 0x02, 0x01, 0, 0];
+        let r = [0xb0, 0x03, 0x02, 0x01, 0, 0];
         assert_eq!(
             parse_status(Family::Arctis7Plus, false, &r)
                 .unwrap()
                 .percent,
             Some(50)
         );
-        // Arctis 1: [2] 0x01 offline.
-        assert!(
-            !parse_status(Family::Arctis1, false, &[0x06, 0x12, 0x01, 50])
+        // Paired, not connected (2): offline (it was online before).
+        let r = [0xb0, 0x02, 0x02, 0x01, 0, 0];
+        assert!(!parse_status(Family::Arctis7Plus, false, &r).unwrap().online);
+        // Arctis 1: [2] connection, 3 = connected.
+        for (conn, online) in [(1, false), (2, false), (3, true)] {
+            let st = parse_status(Family::Arctis1, false, &[0x06, 0x12, conn, 50]).unwrap();
+            assert_eq!(st.online, online, "conn {conn}");
+        }
+        // Arctis 7: `06 14` [2] connection.
+        assert_eq!(parse_arctis7_connection(&[0x06, 0x14, 3]), Some(true));
+        assert_eq!(parse_arctis7_connection(&[0x06, 0x14, 1]), Some(false));
+        assert_eq!(parse_arctis7_connection(&[0x06, 0x18, 3]), None);
+        // Legacy replies echo their request: another reply is not a status.
+        assert!(parse_status(Family::Arctis1, false, &[0x06, 0x24, 0x00, 50]).is_none());
+        assert_eq!(
+            parse_status(Family::Arctis7, false, &[0x06, 0x18, 75])
                 .unwrap()
-                .online
+                .percent,
+            Some(75)
         );
-        // Arctis 9: 0x64-0x9a battery, 0-19 dial.
+        assert!(parse_status(Family::Arctis7, false, &[0x06, 0x14, 0x03]).is_none());
+        assert!(parse_arctis7_chatmix(&[0x06, 0x18, 75, 0]).is_none());
+        // Arctis 9 (GG `info_table`): rf [1], voltage [2..4], status [4],
+        // chat [9] / game [10] dial 0-19.
         let mut r = [0u8; 12];
-        r[3] = 0x9a;
+        r[1] = 1;
+        r[2] = 0x01;
+        r[3] = 0x9a; // 410 -> 100 %
         r[4] = 0x01;
         r[9] = 19;
         let st = parse_status(Family::Arctis9, false, &r).unwrap();
-        assert_eq!((st.percent, st.charging), (Some(100), true));
-        assert_eq!(st.chatmix, Some((1.0, 0.0)));
+        assert_eq!(
+            (st.online, st.percent, st.charging),
+            (true, Some(100), true)
+        );
+        assert_eq!(st.chatmix, Some((0.0, 1.0)));
+        r[10] = 19;
+        r[9] = 0;
+        assert_eq!(
+            parse_status(Family::Arctis9, false, &r).unwrap().chatmix,
+            Some((1.0, 0.0))
+        );
+        // Not linked (rf 0), or the 0xff offline marker.
+        r[1] = 0;
+        assert!(!parse_status(Family::Arctis9, false, &r).unwrap().online);
+        r[1] = 1;
+        r[4] = 0xff;
+        assert!(!parse_status(Family::Arctis9, false, &r).unwrap().online);
+        // Voltage steps (GG: 365 / 369 / 382 / 397) and the status overrides.
+        for (v, p) in [(364, 0), (365, 25), (369, 50), (382, 75), (397, 100)] {
+            assert_eq!(arctis9_percent(v, 0), p, "{v}");
+        }
+        assert_eq!((arctis9_percent(300, 2), arctis9_percent(400, 3)), (100, 0));
         // Arctis 7 ChatMix: 0 and 255 are full, 191 muted.
         assert_eq!(
             parse_arctis7_chatmix(&[0x06, 0x24, 0, 191]),
@@ -1410,6 +1537,28 @@ mod tests {
         assert_eq!(st.percent, Some(60));
         let st = parse_status(Family::GameBuds, false, &[0xb0, 1, 1, 0x02, 0x02, 0, 0]).unwrap();
         assert!(!st.online && st.percent.is_none());
+    }
+
+    /// One missed status reply keeps what was shown; only a run of misses
+    /// (or an offline reply) takes the headset offline.
+    #[test]
+    fn a_missed_status_reply_keeps_the_last_status() {
+        let online = || Status {
+            online: true,
+            percent: Some(80),
+            ..Status::default()
+        };
+        let mut misses = 0;
+        assert_eq!(status_or_keep(Some(online()), &mut misses), Some(online()));
+        for _ in 1..OFFLINE_AFTER {
+            assert_eq!(status_or_keep(None, &mut misses), None);
+        }
+        assert_eq!(status_or_keep(None, &mut misses), Some(Status::default()));
+        assert_eq!(status_or_keep(None, &mut misses), Some(Status::default()));
+        // A reply resets the count.
+        assert_eq!(status_or_keep(Some(online()), &mut misses), Some(online()));
+        assert_eq!(misses, 0);
+        assert_eq!(status_or_keep(None, &mut misses), None);
     }
 
     /// Records packets; answers `ask` from a script.
@@ -1448,6 +1597,13 @@ mod tests {
         nova.resize(64, 0);
         assert_eq!(Save::Nova.packet(), Some(Packet::Output(nova.clone())));
         assert_eq!(Save::NovaGen2.packet(), Some(Packet::Output(nova.clone())));
+        // SteelSeries GG: Arctis 9 `00 09 00` (65), wired Nova `06 09` (64).
+        let mut a9 = vec![0x00, 0x09, 0x00];
+        a9.resize(65, 0);
+        assert_eq!(Save::Arctis9.packet(), Some(Packet::Output(a9)));
+        let mut r06 = vec![0x06, 0x09];
+        r06.resize(64, 0);
+        assert_eq!(Save::Report06.packet(), Some(Packet::Output(r06)));
         assert_eq!(Save::Blocked("x").packet(), None);
         assert_eq!(Save::None.packet(), None);
 

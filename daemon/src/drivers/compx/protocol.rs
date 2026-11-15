@@ -17,9 +17,17 @@ const SUM: u8 = 0x55;
 pub const FRAME: usize = 17;
 pub const V2_FRAME: usize = 64;
 
+/// Link type, CID and MID (the vendor apps call it `EncryptionData`; the four
+/// request bytes are never checked).
+pub const CMD_LINK: u8 = 0x01;
+/// Whether the mouse behind a receiver is linked (awake).
+pub const CMD_ONLINE: u8 = 0x03;
 pub const CMD_BATTERY: u8 = 0x04;
 pub const CMD_WRITE: u8 = 0x07;
 pub const CMD_READ: u8 = 0x08;
+/// Unsolicited: something changed on the mouse.
+pub const CMD_STATUS: u8 = 0x0a;
+pub const CMD_CID_MID: u8 = 0x10;
 /// EEPROM bytes one read / write frame carries.
 const CHUNK: usize = 10;
 
@@ -40,6 +48,11 @@ pub const RATES: [(i64, u8); 7] = [
 ];
 
 const V2_MARK: u8 = 0x72;
+/// Byte 2 of a v2 device-initiated frame.
+const V2_EVENT: u8 = 0x73;
+/// The dongle sees a mouse (target 0), then the mouse's own state (target 1).
+pub const V2_DONGLE_LINK: u8 = 0x81;
+pub const V2_MOUSE_ONLINE: u8 = 0x23;
 pub const V2_BATTERY: u8 = 0x07;
 pub const V2_CHARGING: u8 = 0x0f;
 /// v2 `target`: the dongle itself / a cabled mouse, or the mouse behind a dongle.
@@ -89,7 +102,8 @@ pub fn reply(raw: &[u8], cmd: u8, addr: u16) -> Option<Result<&[u8]>> {
     if raw.len() < FRAME || raw[0] != REPORT_ID || raw[1] != cmd {
         return None;
     }
-    if cmd != CMD_BATTERY && u16::from_be_bytes([raw[3], raw[4]]) != addr {
+    let eeprom = cmd == CMD_READ || cmd == CMD_WRITE;
+    if eeprom && u16::from_be_bytes([raw[3], raw[4]]) != addr {
         return None;
     }
     Some(if add(&raw[..FRAME]) != SUM {
@@ -221,7 +235,7 @@ fn query(link: &mut impl Link, report: &[u8; FRAME], min_len: u8) -> Result<[u8;
             reply(raw, cmd, addr).map(|r| {
                 r.and_then(|d| {
                     ensure!(
-                        cmd == CMD_BATTERY || raw[5] >= min_len,
+                        cmd != CMD_READ || raw[5] >= min_len,
                         "short reply ({} of {min_len} bytes)",
                         raw[5]
                     );
@@ -245,6 +259,140 @@ pub fn read_row(link: &mut impl Link) -> Result<Row> {
     parse_row(&query(link, &read_frame(ADDR_RATE, ROW_LEN), ROW_LEN)?)
 }
 
+/// What the mouse's link is: (CID, MID, link type). Types: 0 dongle 1K,
+/// 1 dongle 4K, 2 wired 1K, 3 wired 8K, 4 dongle 2K, 5 dongle 8K, 6 wired
+/// 2K, 7 wired 4K, 8 NearLink.
+pub fn read_link(link: &mut impl Link) -> Result<(u8, u8, u8)> {
+    // The mouse ignores the content; vary it like the vendor apps do.
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0x3c, |d| d.subsec_nanos() as u8);
+    let data = [seed, seed ^ 0x5a, seed.wrapping_add(7), 0xa5];
+    let d = query(link, &frame(CMD_LINK, 0, 8, &data), 0)?;
+    Ok((d[4], d[5], d[6]))
+}
+
+/// Highest report rate a link type carries (ATK HUB's lists: wired 2K / 4K
+/// links offer nothing above 1000 Hz there).
+pub fn link_ceiling(link_type: u8) -> Option<i64> {
+    match link_type {
+        0 | 2 | 6 | 7 => Some(1000),
+        1 => Some(4000),
+        4 => Some(2000),
+        3 | 5 | 8 => Some(8000),
+        _ => None,
+    }
+}
+
+/// CID and MID of the mouse (behind a receiver: the paired one), with the
+/// four-byte unique id some firmwares report.
+pub fn read_cid_mid(link: &mut impl Link) -> Result<(u8, u8)> {
+    let d = query(link, &frame(CMD_CID_MID, 0, 0, &[]), 0)?;
+    Ok((d[0], d[1]))
+}
+
+/// Whether a receiver currently has its mouse (awake and linked).
+pub fn read_online(link: &mut impl Link) -> Result<bool> {
+    let d = query(link, &frame(CMD_ONLINE, 0, 0, &[]), 0)?;
+    Ok(d[0] == 1)
+}
+
+/// `n` bytes at `addr` (at most 10).
+pub fn read_bytes(link: &mut impl Link, addr: u16, n: u8) -> Result<[u8; 10]> {
+    query(link, &read_frame(addr, n), n)
+}
+
+/// The `[value, ~value]` pair at `addr`; `None` if the stored bytes are not a
+/// valid pair.
+pub fn read_pair(link: &mut impl Link, addr: u16) -> Result<Option<u8>> {
+    Ok(unpair(&read_bytes(link, addr, 2)?))
+}
+
+fn send_write(link: &mut impl Link, addr: u16, data: &[u8]) -> Result<()> {
+    // Some receivers acknowledge (echo) the write, some do not: the read-back
+    // decides.
+    exchange(link, &write_frame(addr, data), TIMEOUT, |raw| {
+        reply(raw, CMD_WRITE, addr).map(|r| r.map(|_| ()))
+    })?;
+    Ok(())
+}
+
+/// Writes one `[value, ~value]` pair anywhere (debounce, lift-off, ...): read
+/// and validate the stored pair, let `check` veto the old value, write only
+/// the pair, read back. Returns the value as stored.
+pub fn write_pair_at(
+    link: &mut impl Link,
+    addr: u16,
+    value: u8,
+    check: impl Fn(u8) -> Result<()>,
+) -> Result<u8> {
+    let stored = |link: &mut _| -> Result<u8> {
+        let d = read_bytes(link, addr, 2)?;
+        unpair(&d).ok_or_else(|| anyhow::anyhow!("corrupt stored pair {:02x?}", &d[..2]))
+    };
+    let old = stored(link).map_err(|e| e.context("not writing: stored value unreadable"))?;
+    check(old)?;
+    if old == value {
+        return Ok(old);
+    }
+    send_write(link, addr, &pair(value))?;
+    let back = stored(link).map_err(|e| e.context("written, but the read-back failed"))?;
+    ensure!(
+        back == value,
+        "the mouse kept {back:#04x} instead of {value:#04x}"
+    );
+    Ok(back)
+}
+
+/// Replaces a 4-byte record (a DPI stage): read it, let `check` veto the
+/// stored bytes (checksum / codec), write, read back.
+pub fn write_record(
+    link: &mut impl Link,
+    addr: u16,
+    rec: [u8; 4],
+    check: impl Fn(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let d = read_bytes(link, addr, 4)
+        .map_err(|e| e.context("not writing: stored record unreadable"))?;
+    check(&d[..4])?;
+    if d[..4] == rec {
+        return Ok(());
+    }
+    send_write(link, addr, &rec)?;
+    let back =
+        read_bytes(link, addr, 4).map_err(|e| e.context("written, but the read-back failed"))?;
+    ensure!(
+        back[..4] == rec,
+        "the mouse kept {:02x?} instead of {rec:02x?}",
+        &back[..4]
+    );
+    Ok(())
+}
+
+/// What changed, from an unsolicited v1 status report (bit 0 DPI, 1 rate,
+/// 2 profile, 6 battery).
+pub fn status_flags(raw: &[u8]) -> Option<u8> {
+    (raw.len() >= FRAME
+        && raw[0] == REPORT_ID
+        && raw[1] == CMD_STATUS
+        && raw[2] == 0
+        && add(&raw[..FRAME]) == SUM)
+        .then_some(raw[6])
+}
+
+/// A v2 device-initiated frame: `Some(true)` the mouse woke, `Some(false)` it
+/// went to sleep.
+pub fn v2_wake_event(raw: &[u8]) -> Option<bool> {
+    if raw.len() < 4 || raw[0] != REPORT_ID || raw[2] != V2_EVENT {
+        return None;
+    }
+    match raw[3] {
+        4 => Some(false),
+        5 => Some(true),
+        _ => None,
+    }
+}
+
 /// Writes one `[value, ~value]` pair of the rate row (`addr` 0 rate, 4 active
 /// stage): read and check the row, let `check` veto, write only that pair,
 /// read back. Returns the row as stored.
@@ -261,11 +409,7 @@ pub fn write_pair(
     if row[field] == value {
         return Ok(row);
     }
-    // Some receivers acknowledge (echo) the write, some do not: the read-back
-    // decides.
-    exchange(link, &write_frame(addr, &pair(value)), TIMEOUT, |raw| {
-        reply(raw, CMD_WRITE, addr).map(|r| r.map(|_| ()))
-    })?;
+    send_write(link, addr, &pair(value))?;
     let back = read_row(link).map_err(|e| e.context("written, but the read-back failed"))?;
     ensure!(
         back[field] == value,
@@ -273,6 +417,23 @@ pub fn write_pair(
         back[field]
     );
     Ok(back)
+}
+
+/// v2 receivers: (a mouse is linked, it is awake). Wired devices have no
+/// receiver to ask.
+pub fn read_v2_online(link: &mut impl Link) -> Result<bool> {
+    let mut ask = |cmd, target| -> Result<u8> {
+        for _ in 0..2 {
+            let r = exchange(link, &v2_frame(cmd, 3, 1, target), TIMEOUT, |raw| {
+                v2_reply(raw, cmd)
+            })?;
+            if let Some(v) = r {
+                return Ok(v);
+            }
+        }
+        bail!(ASLEEP)
+    };
+    Ok(ask(V2_DONGLE_LINK, V2_LOCAL)? != 0 && ask(V2_MOUSE_ONLINE, V2_REMOTE)? == 0)
 }
 
 pub fn read_v2_battery(link: &mut impl Link, target: u8) -> Result<(u8, bool)> {
@@ -394,7 +555,7 @@ mod tests {
     /// A v1 mouse with a 10-byte rate row; `stuck` ignores writes, `ack`
     /// echoes them.
     struct Fake {
-        eeprom: [u8; 10],
+        eeprom: [u8; 0x100],
         queue: VecDeque<Vec<u8>>,
         writes: Vec<Vec<u8>>,
         stuck: bool,
@@ -403,7 +564,7 @@ mod tests {
 
     impl Fake {
         fn new(row: [u8; 6]) -> Self {
-            let mut eeprom = [0u8; 10];
+            let mut eeprom = [0u8; 0x100];
             eeprom[..6].copy_from_slice(&row);
             Fake {
                 eeprom,
@@ -512,5 +673,144 @@ mod tests {
         let e = read_battery(&mut Gone).unwrap_err();
         assert!(!e.to_string().contains("asleep"), "{e}");
         assert!(read_v2_battery(&mut Gone, V2_LOCAL).is_err());
+    }
+
+    /// Replies to the non-EEPROM commands, canned.
+    struct Canned(Vec<Vec<u8>>, VecDeque<Vec<u8>>);
+
+    impl Link for Canned {
+        fn send(&mut self, r: &[u8]) -> Result<()> {
+            let v2 = r.len() == V2_FRAME;
+            let cmd = if v2 { r[6] } else { r[1] };
+            if let Some(a) = self.0.iter().find(|a| a[if v2 { 5 } else { 1 }] == cmd) {
+                self.1.push_back(a.clone());
+            }
+            Ok(())
+        }
+        fn recv(&mut self, buf: &mut [u8], _: Duration) -> Result<usize> {
+            let r = self.1.pop_front().context("timeout")?;
+            buf[..r.len()].copy_from_slice(&r);
+            Ok(r.len())
+        }
+    }
+
+    #[test]
+    fn link_online_and_cid_mid_replies_are_parsed() {
+        // ATK HUB / VGN HUB: cid, mid, type at data[4..7]; online = data[0].
+        let link = v1_reply(CMD_LINK, 0, 0, &[1, 2, 3, 4, 2, 77, 5]);
+        let mut m = Canned(vec![link], VecDeque::new());
+        assert_eq!(read_link(&mut m).unwrap(), (2, 77, 5));
+        let mut m = Canned(
+            vec![v1_reply(CMD_CID_MID, 0, 0, &[1, 121, 0, 0])],
+            VecDeque::new(),
+        );
+        assert_eq!(read_cid_mid(&mut m).unwrap(), (1, 121));
+        let mut up = Canned(
+            vec![v1_reply(CMD_ONLINE, 0, 0, &[1, 9, 8, 7])],
+            VecDeque::new(),
+        );
+        assert!(read_online(&mut up).unwrap());
+        let mut down = Canned(
+            vec![v1_reply(CMD_ONLINE, 0, 0, &[0, 0, 0, 0])],
+            VecDeque::new(),
+        );
+        assert!(!read_online(&mut down).unwrap());
+        // A refusing mouse (status 1) is an error, not "offline".
+        let mut no = Canned(vec![v1_reply(CMD_ONLINE, 1, 0, &[])], VecDeque::new());
+        assert!(read_online(&mut no).is_err());
+        assert_eq!(link_ceiling(5), Some(8000));
+        assert_eq!(link_ceiling(1), Some(4000));
+        assert_eq!(link_ceiling(0), Some(1000));
+        assert_eq!(link_ceiling(9), None);
+    }
+
+    #[test]
+    fn v2_online_needs_a_linked_and_awake_mouse() {
+        let reply = |cmd: u8, v: u8| {
+            let mut r = vec![0u8; 64];
+            r[..8].copy_from_slice(&[0x08, 0x72, 0, 0, 0, cmd, 1, v]);
+            r
+        };
+        let mut m = Canned(
+            vec![reply(V2_DONGLE_LINK, 1), reply(V2_MOUSE_ONLINE, 0)],
+            VecDeque::new(),
+        );
+        assert!(read_v2_online(&mut m).unwrap());
+        let mut m = Canned(
+            vec![reply(V2_DONGLE_LINK, 1), reply(V2_MOUSE_ONLINE, 1)],
+            VecDeque::new(),
+        );
+        assert!(!read_v2_online(&mut m).unwrap(), "linked but asleep");
+        let mut m = Canned(vec![reply(V2_DONGLE_LINK, 0)], VecDeque::new());
+        assert!(!read_v2_online(&mut m).unwrap(), "no mouse");
+    }
+
+    #[test]
+    fn unsolicited_reports_are_recognised() {
+        let st = v1_reply(CMD_STATUS, 0, 0, &[0x41]);
+        assert_eq!(status_flags(&st), Some(0x41));
+        let mut bad = st.clone();
+        bad[16] ^= 1;
+        assert_eq!(status_flags(&bad), None);
+        assert_eq!(status_flags(&v1_reply(CMD_BATTERY, 0, 0, &[1])), None);
+        let ev = |t: u8| {
+            let mut r = vec![0u8; 64];
+            r[..4].copy_from_slice(&[0x08, 0x00, 0x73, t]);
+            r
+        };
+        assert_eq!(v2_wake_event(&ev(4)), Some(false));
+        assert_eq!(v2_wake_event(&ev(5)), Some(true));
+        assert_eq!(v2_wake_event(&ev(1)), None);
+        // A normal reply is not an event.
+        assert_eq!(v2_wake_event(&[0x08, 0x72, 0, 0, 0, 7, 1, 90]), None);
+    }
+
+    #[test]
+    fn write_pair_at_validates_writes_one_pair_and_verifies() {
+        let mut m = Fake::new(ROW);
+        m.eeprom[0xa9..0xab].copy_from_slice(&pair(4));
+        m.eeprom[0xab..0xad].copy_from_slice(&pair(1));
+        assert_eq!(write_pair_at(&mut m, 0xa9, 8, |_| Ok(())).unwrap(), 8);
+        assert_eq!(m.writes.len(), 1);
+        assert_eq!(m.writes[0][3..9], [0x00, 0xa9, 0x02, 0x08, 0x4d, 0x00]);
+        assert_eq!(
+            m.eeprom[0xa9..0xad],
+            [8, 0x4d, 1, 0x54],
+            "neighbour untouched"
+        );
+        // Same value: nothing written. A veto and a corrupt pair stop before it.
+        write_pair_at(&mut m, 0xa9, 8, |_| Ok(())).unwrap();
+        assert_eq!(m.writes.len(), 1);
+        assert!(write_pair_at(&mut m, 0xa9, 2, |_| bail!("no")).is_err());
+        m.eeprom[0xab] = 9;
+        assert!(write_pair_at(&mut m, 0xab, 0, |_| Ok(())).is_err());
+        assert_eq!(m.writes.len(), 1);
+        let mut m = Fake::new(ROW);
+        m.eeprom[0xa9..0xab].copy_from_slice(&pair(4));
+        m.stuck = true;
+        let e = write_pair_at(&mut m, 0xa9, 8, |_| Ok(())).unwrap_err();
+        assert!(e.to_string().contains("kept"), "{e}");
+    }
+
+    #[test]
+    fn write_record_checks_the_stored_bytes_and_reads_back() {
+        let mut m = Fake::new(ROW);
+        let old = [15, 15, 0, 0x55 - 30];
+        m.eeprom[0x0c..0x10].copy_from_slice(&old);
+        let new = [31, 31, 0, 0x55 - 62];
+        write_record(&mut m, 0x0c, new, |d| {
+            ensure!(d == old, "unexpected");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(m.eeprom[0x0c..0x10], new);
+        assert_eq!(m.writes.len(), 1);
+        assert_eq!(m.writes[0][5], 4, "four data bytes");
+        // A vetoed record is not written.
+        assert!(write_record(&mut m, 0x0c, old, |_| bail!("not recognised")).is_err());
+        assert_eq!(m.writes.len(), 1);
+        m.stuck = true;
+        let e = write_record(&mut m, 0x0c, old, |_| Ok(())).unwrap_err();
+        assert!(e.to_string().contains("kept"), "{e}");
     }
 }

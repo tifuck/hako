@@ -114,7 +114,7 @@ const ARCTIS7: HeadsetSpec = HeadsetSpec {
 const ARCTIS_PRO: HeadsetSpec = HeadsetSpec {
     battery: false,
     save: Save::Blocked(
-        "Linux-Arctis-Manager drives this model with the Arctis 5 protocol, not the Arctis 7 one",
+        "SteelSeries GG and Linux-Arctis-Manager drive this model with the Arctis 5 protocol, not the Arctis 7 one",
     ),
     ..ARCTIS7
 };
@@ -124,18 +124,11 @@ const ARCTIS1: HeadsetSpec = HeadsetSpec {
     chatmix: ChatMix::None,
     ..ARCTIS7
 };
-/// Only Linux-Arctis-Manager lists these PIDs.
-const ARCTIS1_CYBERPUNK: HeadsetSpec = HeadsetSpec {
-    save: Save::Blocked("only Linux-Arctis-Manager sends 06 09 to this PID"),
-    ..ARCTIS1
-};
 const ARCTIS9: HeadsetSpec = HeadsetSpec {
     interface: 0,
     family: Family::Arctis9,
     sidetone: Some(0xfd - 0xc0),
-    save: Save::Blocked(
-        "sources disagree: HeadsetControl sends 90 00, Linux-Arctis-Manager 00 09 00",
-    ),
+    save: Save::Arctis9,
     ..ARCTIS7
 };
 const PRO_WIRELESS: HeadsetSpec = HeadsetSpec {
@@ -145,7 +138,7 @@ const PRO_WIRELESS: HeadsetSpec = HeadsetSpec {
     sidetone: Some(9),
     auto_off: &[0, 10, 20, 30, 60, 90],
     save: Save::Blocked(
-        "sources disagree: HeadsetControl sends 90 aa, Linux-Arctis-Manager 00 05 aa 00",
+        "sources disagree: SteelSeries GG sends 00 09 aa (33 bytes), HeadsetControl 90 aa, Linux-Arctis-Manager 00 05 aa 00",
     ),
     ..ARCTIS7
 };
@@ -181,15 +174,31 @@ const NOVA7: HeadsetSpec = HeadsetSpec {
     eq: None,
     volume_limiter: true,
     bt_call: true,
-    save: Save::Blocked(
-        "HeadsetControl saves only the Gen 2 (227e); 00 09 here rests on Linux-Arctis-Manager and an unmerged kernel patch",
-    ),
+    save: Save::Nova,
     ..ARCTIS7_PLUS
+};
+/// Gen 2 firmware (`227e`, and GG's "upgrade" PIDs): `00 09`, then 1.5 s busy,
+/// settings frames read back around it.
+const NOVA7_GEN2: HeadsetSpec = HeadsetSpec {
+    save: Save::NovaGen2,
+    ..NOVA7
 };
 /// The 7P dial drives sidetone in hardware; neither sidetone nor ChatMix work.
 const NOVA7P: HeadsetSpec = HeadsetSpec {
     chatmix: ChatMix::None,
     sidetone: None,
+    ..NOVA7
+};
+const NOVA7P_GEN2: HeadsetSpec = HeadsetSpec {
+    save: Save::NovaGen2,
+    ..NOVA7P
+};
+/// Nova 4 / 4X: Nova 7 gen 1 commands without Bluetooth (GG
+/// `base_arctis_nova_4_tx`: `37` 0-7, `39` 0-3, `3a`, `a3`, `ae` 0-3, `b0`).
+const NOVA4: HeadsetSpec = HeadsetSpec {
+    chatmix: ChatMix::None,
+    bt_call: false,
+    save: Save::Blocked("only SteelSeries GG lists the Nova 4 save (00 09)"),
     ..NOVA7
 };
 const NOVA5: HeadsetSpec = HeadsetSpec {
@@ -199,9 +208,9 @@ const NOVA5: HeadsetSpec = HeadsetSpec {
     mic_volume: Some(15),
     eq: Some(&headset::EQ_NOVA5),
     bt_call: false,
-    save: Save::Blocked(
-        "sources disagree: HeadsetControl adds 00 35 01 after 00 09, Linux-Arctis-Manager has no save",
-    ),
+    // `00 35 01` (HeadsetControl) is the separate range-extend setter, not
+    // part of the save (GG `base_arctis_nova_5_tx`).
+    save: Save::Nova,
     ..NOVA7
 };
 /// HeadsetControl reads no dial here; Linux-Arctis-Manager lists one.
@@ -211,9 +220,7 @@ const NOVA3P: HeadsetSpec = HeadsetSpec {
     auto_off: &[0, 1, 5, 10, 15, 30, 45, 60, 75, 90],
     eq: Some(&headset::EQ_NOVA3P),
     volume_limiter: false,
-    save: Save::Blocked(
-        "sources disagree on the report type (output vs feature) and the output path is untested on Linux",
-    ),
+    save: Save::Nova,
     ..NOVA5
 };
 const NOVA3: HeadsetSpec = HeadsetSpec {
@@ -228,9 +235,9 @@ const NOVA3: HeadsetSpec = HeadsetSpec {
     eq: Some(&headset::EQ_NOVA3),
     volume_limiter: false,
     bt_call: false,
-    save: Save::Blocked(
-        "sources disagree: HeadsetControl sends 06 09 as a feature report, Linux-Arctis-Manager as an output report",
-    ),
+    // SteelSeries GG and Linux-Arctis-Manager: output report (HeadsetControl
+    // sends it as a feature report).
+    save: Save::Report06,
 };
 /// Wired GameDAC: volatile mic level and sidetone only.
 const NOVA_PRO_WIRED: HeadsetSpec = HeadsetSpec {
@@ -245,7 +252,7 @@ const NOVA_PRO_WIRED: HeadsetSpec = HeadsetSpec {
     eq: None,
     volume_limiter: false,
     bt_call: false,
-    save: Save::Blocked("only Linux-Arctis-Manager sends 06 09 to the wired GameDAC"),
+    save: Save::Report06,
 };
 const GAMEBUDS: HeadsetSpec = HeadsetSpec {
     interface: 3,
@@ -276,9 +283,9 @@ const RATE_0: Rate = Rate {
 /// Save commands only rivalcfg sends for that model (see the dossier).
 const ONLY_RIVALCFG: MouseSave =
     MouseSave::Blocked("only rivalcfg sends the save command for this model");
-/// Aerox / Prime Wireless / Prime Mini / Rival 3 Gen 2 `11 00`.
-const SAVE_11: MouseSave =
-    MouseSave::Blocked("only rivalcfg sends 11 00; OpenRGB copies it and notes it is unconfirmed");
+/// Aerox / Prime Wireless / Prime Mini / Rival 3 Gen 2 `11 00` (rivalcfg and
+/// SteelSeries GG; the dongle sends it as `51 00` and answers with a read-back).
+const SAVE_11: MouseSave = MouseSave::Command(&[0x11, 0x00]);
 /// OpenRGB carries the bytes but marks saving unsupported on these.
 const ONLY_RIVALCFG_OPENRGB_X: MouseSave = MouseSave::Blocked(
     "only rivalcfg confirms the save for this model; OpenRGB's copy is marked unsupported",
@@ -322,7 +329,9 @@ const RIVAL3_WIRELESS: MouseSpec = MouseSpec {
     }),
     light: Light::NONE,
     battery: Some(Battery::Rival),
-    save: MouseSave::Blocked("OpenRGB deliberately disables saving on the Rival 3 Wireless"),
+    save: MouseSave::Blocked(
+        "SteelSeries GG and rivalcfg define 09, but OpenRGB deliberately disables saving on the Rival 3 Wireless",
+    ),
     ..RIVAL3
 };
 const AEROX3: MouseSpec = MouseSpec {
@@ -398,7 +407,7 @@ const RIVAL5: MouseSpec = MouseSpec {
         steady: &[],
     },
     save: MouseSave::Blocked(
-        "sources disagree: rivalcfg sends 11 00, OpenRGB says the Rival 5 has no save",
+        "SteelSeries GG and rivalcfg define 11 00, but OpenRGB says the Rival 5 has no save",
     ),
     ..AEROX5
 };
@@ -426,7 +435,8 @@ const PRIME: MouseSpec = MouseSpec {
     battery: None,
     sleep: None,
     packet_len: 0,
-    save: ONLY_RIVALCFG,
+    // rivalcfg and SteelSeries GG `prime_base`.
+    save: MouseSave::Command(&[0x59, 0x00]),
 };
 const PRIME_MINI: MouseSpec = MouseSpec {
     interface: 3,
@@ -495,7 +505,8 @@ const SENSEI_TEN: MouseSpec = MouseSpec {
         zero_based: false,
     }),
     light: LIGHT_310,
-    save: ONLY_RIVALCFG_OPENRGB_X,
+    // rivalcfg and SteelSeries GG (`rival-310` base).
+    save: MouseSave::Command(&[0x59, 0x00]),
     ..PRIME
 };
 const RIVAL310: MouseSpec = MouseSpec {
@@ -608,7 +619,8 @@ const RIVAL95: MouseSpec = MouseSpec {
     battery: None,
     sleep: None,
     packet_len: 0,
-    save: ONLY_RIVALCFG,
+    // rivalcfg and SteelSeries GG (`rival-100` definition, shared by the 95).
+    save: MouseSave::Command(&[0x09, 0x00]),
 };
 /// `05 00 rgb` color; `07 00 01` = steady (not breathing).
 const RIVAL100: MouseSpec = MouseSpec {
@@ -632,7 +644,6 @@ const RIVAL110: MouseSpec = MouseSpec {
         codes: Codes::Sensor(Sensor::Pmw3326),
     },
     packet_len: 32,
-    save: ONLY_RIVALCFG_OPENRGB_X,
     ..RIVAL100
 };
 /// Logo (`08 01`) and wheel (`08 02`) LEDs.
@@ -688,6 +699,8 @@ const KANA2: MouseSpec = MouseSpec {
         rainbow: None,
         steady: &[],
     },
+    // GG does not know the Kana v2: rivalcfg only.
+    save: ONLY_RIVALCFG,
     ..RIVAL95
 };
 const KINZU2: MouseSpec = MouseSpec {
@@ -729,17 +742,35 @@ const APEX9: KeyboardSpec = KeyboardSpec {
     ..APEX
 };
 
+/// 2022-generation per-key boards (direct id `40`).
+const APEX_GEN2: KeyboardSpec = KeyboardSpec {
+    proto: KbProto::PerKey {
+        len: APEX_LEN,
+        gen: Gen::Two,
+        fw_gen3: false,
+    },
+    ..APEX
+};
+
 models! {
     // Headsets: PIDs of one model differ by firmware (0-4 vs percent battery).
-    Headset "Arctis Nova 7" [0x2202, 0x22a1] H(NOVA7);
-    Headset "Arctis Nova 7 Gen 2" [0x227e] H(HeadsetSpec { save: Save::NovaGen2, ..NOVA7 });
-    Headset "Arctis Nova 7X" [0x2206, 0x22a4, 0x22a5] H(NOVA7);
-    Headset "Arctis Nova 7X White" [0x2258, 0x22ad] H(NOVA7);
-    Headset "Arctis Nova 7X Gen 2" [0x229e] H(NOVA7);
-    Headset "Arctis Nova 7P" [0x220a, 0x22a7] H(NOVA7P);
-    Headset "Arctis Nova 7P Gen 2" [0x2298] H(NOVA7P);
-    Headset "Arctis Nova 7 Diablo IV" [0x223a, 0x22a9] H(NOVA7);
-    Headset "Arctis Nova 7 WoW Edition" [0x227a, 0x22ab] H(NOVA7);
+    Headset "Arctis Nova 7" [0x2202] H(NOVA7);
+    Headset "Arctis Nova 7 Upgrade" [0x22a1] H(NOVA7_GEN2);
+    Headset "Arctis Nova 7 Gen 2" [0x227e] H(NOVA7_GEN2);
+    Headset "Arctis Nova 7X" [0x2206, 0x22a4] H(NOVA7);
+    Headset "Arctis Nova 7X Upgrade" [0x22a5] H(NOVA7_GEN2);
+    Headset "Arctis Nova 7X White" [0x2258] H(NOVA7);
+    Headset "Arctis Nova 7X White Upgrade" [0x22ad] H(NOVA7_GEN2);
+    Headset "Arctis Nova 7X Gen 2" [0x229e] H(NOVA7_GEN2);
+    Headset "Arctis Nova 7P" [0x220a] H(NOVA7P);
+    Headset "Arctis Nova 7P Upgrade" [0x22a7] H(NOVA7P_GEN2);
+    Headset "Arctis Nova 7P Gen 2" [0x2298] H(NOVA7P_GEN2);
+    Headset "Arctis Nova 7 Diablo IV" [0x223a] H(NOVA7);
+    Headset "Arctis Nova 7 Diablo IV Upgrade" [0x22a9] H(NOVA7_GEN2);
+    Headset "Arctis Nova 7 WoW Edition" [0x227a] H(NOVA7);
+    Headset "Arctis Nova 7 WoW Edition Upgrade" [0x22ab] H(NOVA7_GEN2);
+    Headset "Arctis Nova 4" [0x12f2] H(NOVA4);
+    Headset "Arctis Nova 4X" [0x12f6] H(NOVA4);
     Headset "Arctis Nova 5" [0x2232] H(NOVA5);
     Headset "Arctis Nova 5X" [0x2253] H(NOVA5);
     Headset "Arctis Nova 5X White" [0x2264] H(NOVA5);
@@ -758,13 +789,15 @@ models! {
     Headset "Arctis 7 (2019)" [0x12ad] H(ARCTIS7);
     Headset "Arctis Pro" [0x1252] H(ARCTIS_PRO);
     Headset "Arctis Pro + GameDAC" [0x1280] H(HeadsetSpec {
-        save: Save::Blocked("only HeadsetControl sends 06 09 to the GameDAC"),
+        save: Save::Blocked(
+            "SteelSeries GG sends 00 ac then 00 09 to the GameDAC, HeadsetControl 06 09",
+        ),
         ..ARCTIS_PRO
     });
     Headset "Arctis 1 Wireless" [0x12b3] H(ARCTIS1);
     Headset "Arctis 1 Wireless for Xbox" [0x12b6] H(ARCTIS1);
-    Headset "Arctis 1 Wireless Cyberpunk 2077" [0x12d0] H(ARCTIS1_CYBERPUNK);
-    Headset "Arctis 1 Wireless for Xbox Cyberpunk 2077" [0x12d2] H(ARCTIS1_CYBERPUNK);
+    Headset "Arctis 1 Wireless Cyberpunk 2077" [0x12d0] H(ARCTIS1);
+    Headset "Arctis 1 Wireless for Xbox Cyberpunk 2077" [0x12d2] H(ARCTIS1);
     Headset "Arctis 7X" [0x12d7] H(ARCTIS1);
     Headset "Arctis 7P" [0x12d5] H(ARCTIS1);
     Headset "Arctis 9" [0x12c2, 0x12c4] H(ARCTIS9);
@@ -773,8 +806,9 @@ models! {
     Mouse "Rival 3" [0x1824, 0x184c] M(RIVAL3);
     Mouse "Rival 3 Wireless" [0x1830] M(RIVAL3_WIRELESS);
     Mouse "Rival 3 Gen 2" [0x1870] M(RIVAL3_GEN2);
+    // `09` (rivalcfg, SteelSeries GG; no OpenRGB remark for this model).
     Mouse "Rival 3 Wireless Gen 2" [0x1872]
-        M(MouseSpec { save: ONLY_RIVALCFG, ..RIVAL3_WIRELESS_GEN2 });
+        M(MouseSpec { save: MouseSave::Command(&[0x09]), ..RIVAL3_WIRELESS_GEN2 });
     Mouse "Rival 5" [0x183c, 0x183e] M(RIVAL5);
     Mouse "Rival 310" [0x1720, 0x171e, 0x1736] M(RIVAL310);
     Mouse "Sensei 310" [0x1722] M(RIVAL310);
@@ -782,7 +816,7 @@ models! {
     Mouse "Rival 650 Wireless" [0x172b, 0x1726] M(RIVAL650);
     Mouse "Rival 700" [0x1700] M(MouseSpec { save: ONLY_RIVALCFG_OPENRGB_X, ..RIVAL700 });
     Mouse "Rival 710" [0x1730] M(MouseSpec { save: ONLY_RIVALCFG_OPENRGB_X, ..RIVAL700 });
-    Mouse "Rival 500" [0x170e] M(MouseSpec { save: ONLY_RIVALCFG, ..RIVAL700 });
+    Mouse "Rival 500" [0x170e] M(RIVAL700);
     Mouse "Rival 110" [0x1729] M(RIVAL110);
     Mouse "Rival 106" [0x1816] M(RIVAL110);
     Mouse "Rival 300S" [0x1810] M(RIVAL110);
@@ -824,27 +858,44 @@ models! {
     Keyboard "Apex 3" [0x161a] K(KeyboardSpec { interface: 3, proto: KbProto::TenZone, ..APEX });
     Keyboard "Apex 3 TKL" [0x1622] K(KeyboardSpec { proto: KbProto::EightZone, ..APEX });
     Keyboard "Apex 5" [0x161c] K(APEX);
+    Keyboard "Apex 5 (2024)" [0x1650] K(APEX);
     Keyboard "Apex 7" [0x1612] K(APEX);
+    Keyboard "Apex 7 (2024)" [0x1652] K(APEX);
     Keyboard "Apex 7 TKL" [0x1618] K(APEX);
     Keyboard "Apex Pro" [0x1610] K(APEX);
     Keyboard "Apex Pro 3" [0x1640] K(KeyboardSpec { actuation: true, ..APEX });
     Keyboard "Apex Pro TKL" [0x1614] K(APEX_FW);
     Keyboard "Apex Pro TKL (2023)" [0x1628, 0x1630, 0x1632] K(KeyboardSpec {
         wireless: &[0x1630, 0x1632],
-        proto: KbProto::PerKey { len: APEX_LEN, gen: Gen::Two, fw_gen3: false },
-        ..APEX
+        ..APEX_GEN2
     });
     Keyboard "Apex Pro TKL Gen 3" [0x1642, 0x1644, 0x1646] K(KeyboardSpec {
         wireless: &[0x1644, 0x1646],
         proto: KbProto::PerKey { len: APEX_LEN, gen: Gen::Three, fw_gen3: false },
         ..APEX
     });
+    // GG: the Cyber / Steel editions include the 2022 TKL definition.
+    Keyboard "Apex Pro TKL (2024) Cyber" [0x1660] K(APEX_GEN2);
+    Keyboard "Apex Pro TKL (2024) Steel" [0x1662] K(APEX_GEN2);
     Keyboard "Apex 9 TKL" [0x1634] K(APEX9);
     Keyboard "Apex 9 Mini" [0x1620] K(APEX9);
+    // Wired board, then the 2.4 GHz dongle and the keyboard on its cable
+    // (GG: `base_apex_2022_mini_layout_lighting` + the 2022 wired / wireless bases).
+    Keyboard "Apex Pro Mini" [0x161e, 0x1624, 0x1626] K(KeyboardSpec {
+        wireless: &[0x1624, 0x1626],
+        proto: KbProto::PerKey { len: APEX9_LEN, gen: Gen::Two, fw_gen3: false },
+        ..APEX
+    });
+    Keyboard "Apex Pro Mini (2024)" [0x1648] K(KeyboardSpec {
+        proto: KbProto::PerKey { len: APEX9_LEN, gen: Gen::Two, fw_gen3: false },
+        ..APEX
+    });
     Keyboard "Apex M750" [0x0616] K(KeyboardSpec { interface: 2, proto: KbProto::ApexM, ..APEX });
+    Keyboard "Apex M750 TKL" [0x0617, 0x0619]
+        K(KeyboardSpec { interface: 2, proto: KbProto::ApexM, ..APEX });
     Keyboard "Apex (OG) / Apex Fnatic" [0x1202]
         K(KeyboardSpec { interface: 0, proto: KbProto::OldApex, ..APEX });
-    Keyboard "Apex 350" [0x1206] K(KeyboardSpec { interface: 0, proto: KbProto::OldApex, ..APEX });
+    Keyboard "Apex 350" [0x1206, 0x120a] K(KeyboardSpec { interface: 0, proto: KbProto::OldApex, ..APEX });
 }
 
 fn open(pid: u16, ctx: &DriverCtx) -> Opened {
@@ -942,7 +993,7 @@ mod tests {
 
     /// Save-to-device is offered exactly where the dossier
     /// (`docs/onboard-writes/steelseries.md`) rates it HIGH; elsewhere it is
-    /// listed blocked or absent.
+    /// listed blocked or absent. The Nova 4 / 4X (GG only) stay blocked.
     #[test]
     fn save_to_device_only_where_researched() {
         use hako_core::catalog::SettingKey;
@@ -963,7 +1014,29 @@ mod tests {
         assert_eq!(
             offered,
             [
+                "Arctis Nova 7",
+                "Arctis Nova 7 Upgrade",
                 "Arctis Nova 7 Gen 2",
+                "Arctis Nova 7X",
+                "Arctis Nova 7X Upgrade",
+                "Arctis Nova 7X White",
+                "Arctis Nova 7X White Upgrade",
+                "Arctis Nova 7X Gen 2",
+                "Arctis Nova 7P",
+                "Arctis Nova 7P Upgrade",
+                "Arctis Nova 7P Gen 2",
+                "Arctis Nova 7 Diablo IV",
+                "Arctis Nova 7 Diablo IV Upgrade",
+                "Arctis Nova 7 WoW Edition",
+                "Arctis Nova 7 WoW Edition Upgrade",
+                "Arctis Nova 5",
+                "Arctis Nova 5X",
+                "Arctis Nova 5X White",
+                "Arctis Nova 3P Wireless",
+                "Arctis Nova 3X Wireless",
+                "Arctis Nova 3",
+                "Arctis Nova Pro",
+                "Arctis Nova Pro for Xbox",
                 "Arctis 7+",
                 "Arctis 7+ Destiny 2",
                 "Arctis 7P+",
@@ -972,19 +1045,45 @@ mod tests {
                 "Arctis 7 (2019)",
                 "Arctis 1 Wireless",
                 "Arctis 1 Wireless for Xbox",
+                "Arctis 1 Wireless Cyberpunk 2077",
+                "Arctis 1 Wireless for Xbox Cyberpunk 2077",
                 "Arctis 7X",
                 "Arctis 7P",
+                "Arctis 9",
                 "Rival 3",
+                "Rival 3 Gen 2",
+                "Rival 3 Wireless Gen 2",
                 "Rival 310",
                 "Sensei 310",
                 "Rival 600",
                 "Rival 650 Wireless",
+                "Rival 500",
+                "Rival 110",
+                "Rival 106",
+                "Rival 300S",
                 "Rival 100",
                 "Rival 105",
+                "Rival 95",
+                "Rival 100 PC Bang",
                 "Rival 300",
                 "Rival",
                 "Sensei [RAW]",
                 "Kinzu v2",
+                "Sensei TEN",
+                "Prime",
+                "Prime+",
+                "Prime Mini",
+                "Prime Wireless",
+                "Prime Mini Wireless",
+                "Aerox 3",
+                "Aerox 3 Wireless",
+                "Aerox 3 Wireless CS2 Dragon Lore",
+                "Aerox 5",
+                "Aerox 5 Wireless",
+                "Aerox 5 Wireless Destiny 2",
+                "Aerox 5 Wireless Diablo IV",
+                "Aerox 9 Wireless",
+                "Aerox 9 Wireless WoW Edition",
             ]
         );
         // The Nova Pro Wireless entries are untouched.

@@ -487,6 +487,7 @@ fn retry_load(paths: &ConfigPaths, d: &mut DevState) -> bool {
 }
 
 /// Write `bindings` plus the rejected ones they don't replace.
+#[cfg(test)]
 fn persist(paths: &ConfigPaths, d: &DevState, bindings: &HashMap<u16, RemapBinding>) -> Result<()> {
     save_remap_bindings(
         paths,
@@ -496,7 +497,8 @@ fn persist(paths: &ConfigPaths, d: &DevState, bindings: &HashMap<u16, RemapBindi
     )
 }
 
-/// What [`persist`] writes; an error while the file could not be read.
+/// What a remap file is written with: `bindings` plus the rejected ones
+/// they don't replace; an error while the file could not be read.
 fn saved_list(d: &DevState, bindings: &HashMap<u16, RemapBinding>) -> Result<Vec<RemapBinding>> {
     if let Some(e) = &d.load_error {
         anyhow::bail!("{e}");
@@ -569,7 +571,11 @@ impl Session {
                 if !own && !keyboard {
                     return None;
                 }
-                let _ = dev.set_nonblocking(true);
+                // Reads assume a node that never blocks the remap thread.
+                if let Err(e) = dev.set_nonblocking(true) {
+                    warn!("listen on {}: {e}", path.display());
+                    return None;
+                }
                 Some((path, dev, own))
             })
             .collect();
@@ -821,8 +827,16 @@ impl Worker {
         let mut err = None;
         for (path, mut dev) in nodes {
             let at = SystemTime::now();
+            // Reads assume a node that never blocks the remap thread.
             match dev.grab() {
-                Ok(()) => grabbed.push((path, dev, at)),
+                Ok(()) => match dev.set_nonblocking(true) {
+                    Ok(()) => grabbed.push((path, dev, at)),
+                    Err(e) => {
+                        let _ = dev.ungrab();
+                        warn!("non-blocking {} ({}): {e}", slot.id.key(), path.display());
+                        err = Some(format!("grab {}: {e}", path.display()));
+                    }
+                },
                 Err(e) => {
                     warn!("grab {} ({}): {e}", slot.id.key(), path.display());
                     err = Some(format!("grab {}: {e}", path.display()));
@@ -846,7 +860,6 @@ impl Worker {
             return;
         }
         for (path, mut dev, at) in grabbed {
-            let _ = dev.set_nonblocking(true);
             // Queued since the node was opened: what came before the grab
             // reached the compositor, the rest is ours.
             let mut fresh = Vec::new();
@@ -1111,6 +1124,7 @@ impl Worker {
         let before = d.last_error.clone();
         let mut sent = Vec::new();
         let mut new_bindings = None;
+        let mut save = None;
         let more = if down && code == KEY_ESC {
             if role == CaptureRole::Record {
                 d.recorded = finish_recording(std::mem::take(&mut d.recorded), false);
@@ -1155,12 +1169,9 @@ impl Worker {
                         match binding
                             .validate()
                             .map_err(anyhow::Error::msg)
-                            .and_then(|()| persist(&g.paths, d, &next))
+                            .and_then(|()| saved_list(d, &next))
                         {
-                            Ok(()) => {
-                                d.bindings = next;
-                                new_bindings = Some(d.bindings.clone());
-                            }
+                            Ok(list) => save = Some((list, next)),
                             Err(e) => d.last_error = Some(e.to_string()),
                         }
                     }
@@ -1175,6 +1186,22 @@ impl Worker {
                 }
             }
         };
+        if let Some((list, next)) = save {
+            // Written outside `inner`, like `edit_bindings`; `edits` is held.
+            let (vid, pid, paths) = (d.id.vendor_id, d.pids.pids[0], g.paths.clone());
+            drop(guard);
+            let saved = save_remap_bindings(&paths, vid, pid, &list);
+            guard = lock(&inner);
+            let d = &mut guard.devices[idx];
+            match saved {
+                Ok(()) => {
+                    d.bindings = next;
+                    new_bindings = Some(d.bindings.clone());
+                }
+                Err(e) => d.last_error = Some(e.to_string()),
+            }
+        }
+        let d = &guard.devices[idx];
         sent.push(AdapterEvent::RemapsUpdated(d.snapshot()));
         sent.extend(d.error_event(before.as_deref()));
         drop(guard);
@@ -2153,6 +2180,78 @@ mod tests {
             invalid: Vec::new(),
             load_error: None,
         }
+    }
+
+    /// A captured target is saved, then applied; a failed write keeps the
+    /// bindings and says why.
+    #[test]
+    fn a_captured_target_is_saved_and_applied() {
+        let root = std::env::temp_dir().join(format!("hako-remap-capture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        paths.ensure().unwrap();
+        let d = dev_state();
+        let slot = Slot {
+            id: d.id.clone(),
+            kind: DeviceKind::Mouse,
+            pids: d.pids.pids.clone(),
+            bindings: HashMap::new(),
+            nodes: Vec::new(),
+            paths: Vec::new(),
+            retry: Instant::now(),
+            held_retries: 0,
+            left_shared: false,
+        };
+        let mut worker = Worker {
+            inner: Arc::new(Mutex::new(EngineInner {
+                paths: paths.clone(),
+                devices: vec![d],
+                session: 1,
+            })),
+            edits: Arc::default(),
+            events: broadcast::channel(16).0,
+            slots: vec![slot],
+            virt: None,
+            axes: Axes::default(),
+            mapper: Mapper::default(),
+            session: None,
+        };
+        let capture = |worker: &mut Worker| {
+            worker.session = Some(Session {
+                idx: 0,
+                nodes: Vec::new(),
+                rec: Recorder::default(),
+                started: Instant::now(),
+                checked: Instant::now(),
+            });
+            let mut g = lock(&worker.inner);
+            g.devices[0].capturing = Some(CaptureRole::Target);
+            g.devices[0].capture_source = Some(EvdevKey::BTN_SIDE);
+        };
+
+        capture(&mut worker);
+        assert!(!worker.session_edge(SystemTime::now(), A.0, true, true));
+        let (saved, _) = load_bindings(&paths, 0x046d, &[0x40a8]).unwrap();
+        assert_eq!(saved[&EvdevKey::BTN_SIDE.0].target, A);
+        assert_eq!(worker.slots[0].bindings[&EvdevKey::BTN_SIDE.0].target, A);
+
+        // The remaps dir turns into a file: the write fails.
+        std::fs::remove_dir_all(&paths.remaps_dir).unwrap();
+        std::fs::write(&paths.remaps_dir, "x").unwrap();
+        capture(&mut worker);
+        assert!(!worker.session_edge(SystemTime::now(), B.0, true, true));
+        let g = lock(&worker.inner);
+        assert_eq!(g.devices[0].bindings[&EvdevKey::BTN_SIDE.0].target, A);
+        assert!(g.devices[0].last_error.is_some());
+        drop(g);
+        assert_eq!(worker.slots[0].bindings[&EvdevKey::BTN_SIDE.0].target, A);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

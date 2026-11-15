@@ -32,6 +32,9 @@
 //!   with its wireless PID), Linux `drivers/hid/hid-logitech-hidpp.c` device
 //!   table, OpenRGB `Controllers/LogitechController` (detectors and the
 //!   `LogitechHIDPP20` keyboard tables), HeadsetControl `lib/devices/logitech*`.
+//! - Newer wired PIDs and the c54f receiver: Logitech G HUB 2026.8 device
+//!   database (`docs/vendor-re/logitech.md` section 3); their `DOCUMENTED`
+//!   features are inferred from its capability flags.
 //! - Per-model feature sets (the `DOCUMENTED` table): Solaar `docs/devices/*`
 //!   (`solaar show` dumps) or the source named next to each entry.
 //! - Receiver children: Linux `drivers/hid/hid-logitech-dj.c` (each paired
@@ -115,6 +118,7 @@ pub const MODELS: &[Model] = &[
     receiver!(0xc545, "Logitech LIGHTSPEED Receiver"),
     receiver!(0xc547, "Logitech LIGHTSPEED Receiver"),
     receiver!(0xc54d, "Logitech LIGHTSPEED Receiver"),
+    receiver!(0xc54f, "Logitech LIGHTSPEED Receiver"),
     receiver!(0xc52f, "Logitech Nano Receiver"),
     receiver!(0xc518, "Logitech Nano Receiver"),
     receiver!(0xc51a, "Logitech Nano Receiver"),
@@ -154,6 +158,18 @@ pub const MODELS: &[Model] = &[
     direct!(Mouse, "Logitech G403 Prodigy", 0xc083),
     direct!(Mouse, "Logitech G303 Daedalus Apex", 0xc080),
     direct!(Mouse, "Logitech MX518", 0xc08e),
+    direct!(Mouse, "Logitech G302", 0xc07f),
+    direct!(Mouse, "Logitech G402", 0xc07e),
+    direct!(Mouse, "Logitech G303 Shroud Edition (wired)", 0xc097),
+    direct!(Mouse, "Logitech G304 X LIGHTSPEED", 0xc0a7),
+    direct!(Mouse, "Logitech G305 X SUPERLIGHT", 0xc0a4),
+    direct!(Mouse, "Logitech G705", 0xc096),
+    direct!(Mouse, "Logitech G502 X PLUS Millennium Falcon", 0xc09e),
+    direct!(Mouse, "Logitech PRO X SUPERLIGHT 2c", 0xc09f),
+    direct!(Mouse, "Logitech PRO X SUPERLIGHT 2 DEX", 0xc0a0),
+    direct!(Mouse, "Logitech PRO X2 SUPERSTRIKE", 0xc0a8),
+    direct!(Mouse, "Logitech PRO X3 SUPERSTRIKE", 0xc0a9),
+    direct!(Mouse, "Logitech PRO X1 SUPERSTRIKE", 0xc0b7),
     // Keyboards.
     direct!(Keyboard, "Logitech G915 X", 0xc359),
     direct!(Keyboard, "Logitech G915 X LIGHTSPEED", 0xc356),
@@ -173,6 +189,23 @@ pub const MODELS: &[Model] = &[
     direct!(Keyboard, "Logitech G610", 0xc333),
     direct!(Keyboard, "Logitech G910", 0xc335),
     direct!(Keyboard, "Logitech G910 Orion Spark", 0xc32b),
+    direct!(Keyboard, "Logitech G310", 0xc32d),
+    direct!(Keyboard, "Logitech G410", 0xc330),
+    direct!(Keyboard, "Logitech G715", 0xc347),
+    direct!(Keyboard, "Logitech G713", 0xc348),
+    direct!(Keyboard, "Logitech PRO X 60", 0xc351),
+    direct!(Keyboard, "Logitech PRO X TKL", 0xc352),
+    direct!(Keyboard, "Logitech G915 X LIGHTSPEED TKL", 0xc357),
+    direct!(Keyboard, "Logitech G515 TKL", 0xc358),
+    direct!(Keyboard, "Logitech G517 LIGHTSPEED TKL", 0xc35a),
+    direct!(Keyboard, "Logitech G512 X 75", 0xc35f),
+    direct!(Keyboard, "Logitech G512 X 98", 0xc360),
+    direct!(Keyboard, "Logitech G316 X", 0xc361),
+    direct!(Keyboard, "Logitech G515 RAPID TKL", 0xc363),
+    direct!(Keyboard, "Logitech PRO X2 RAPID", 0xc364),
+    direct!(Keyboard, "Logitech G316", 0xc366),
+    direct!(Keyboard, "Logitech G316 X 75", 0xc36a),
+    direct!(Keyboard, "Logitech G316 X 98", 0xc36b),
     // Headsets (USB dongle; the HID++ device is the headset itself).
     own!(centurion, "Logitech PRO X 2 LIGHTSPEED", 0x0af7),
     own!(centurion, "Logitech PRO X 3 LIGHTSPEED", 0x0b45),
@@ -470,6 +503,151 @@ const DOCUMENTED: &[(u16, &[u16], &str)] = &[
     ),
     (0x0a9b, &[0x8300], "HeadsetControl logitech_g432.hpp"),
     (0x0a6d, &[0x8300], "HeadsetControl logitech_g432.hpp"),
+    (
+        0xc07f,
+        &[0x2201, 0x8070],
+        "G HUB 2026.8 device DB (G302): mouse capabilities onboardProfiles/lighting lightingSupport MOUSE_MONO_ZONAL; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc07e,
+        &[0x2201, 0x8070],
+        "G HUB 2026.8 device DB (G402): mouse capabilities onboardProfiles/lighting lightingSupport MOUSE_MONO_ZONAL; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc097,
+        &[0x2202, 0x8100],
+        "G HUB 2026.8 device DB (G303 Shroud Edition (wired)): mouse capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc0a7,
+        &[0x2202, 0x8100],
+        "G HUB 2026.8 device DB (G304 X LIGHTSPEED): mouse capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc0a4,
+        &[0x2202, 0x8061, 0x8071, 0x8100],
+        "G HUB 2026.8 device DB (G305 X SUPERLIGHT): mouse capabilities onboardProfiles/lighting lightingSupport MOUSE_RGB_ZONAL, 2 kHz; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc096,
+        &[0x2202, 0x8071, 0x8100],
+        "G HUB 2026.8 device DB (G705): mouse capabilities onboardProfiles/lighting lightingSupport MOUSE_RGB_PER_KEY; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc09e,
+        &[0x2202, 0x8071, 0x8100],
+        "G HUB 2026.8 device DB (G502 X PLUS Millennium Falcon): mouse capabilities onboardProfiles/lighting lightingSupport MOUSE_RGB_PER_KEY; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc09f,
+        &[0x2202, 0x8061, 0x8100],
+        "G HUB 2026.8 device DB (PRO X SUPERLIGHT 2c): mouse capabilities onboardProfiles/lighting lightingSupport 2 kHz; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc0a0,
+        &[0x2202, 0x8061, 0x8100],
+        "G HUB 2026.8 device DB (PRO X SUPERLIGHT 2 DEX): mouse capabilities onboardProfiles/lighting lightingSupport 2 kHz; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc0a8,
+        &[0x2202, 0x8061, 0x8100],
+        "G HUB 2026.8 device DB (PRO X2 SUPERSTRIKE): mouse capabilities onboardProfiles/lighting lightingSupport 2 kHz; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc0a9,
+        &[0x2202, 0x8061, 0x8100],
+        "G HUB 2026.8 device DB (PRO X3 SUPERSTRIKE): mouse capabilities onboardProfiles/lighting lightingSupport 2 kHz; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc0b7,
+        &[0x2202, 0x8100],
+        "G HUB 2026.8 device DB (PRO X1 SUPERSTRIKE): mouse capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc32d,
+        &[0x8070],
+        "G HUB 2026.8 device DB (G310): keyboard capabilities onboardProfiles/lighting lightingSupport KEYBOARD_MONO_ZONAL; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc330,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G410): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc347,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G715): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc348,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G713): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc351,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (PRO X 60): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc352,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (PRO X TKL): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc357,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G915 X LIGHTSPEED TKL): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc358,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G515 TKL): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc35a,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G517 LIGHTSPEED TKL): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc35f,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G512 X 75): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc360,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G512 X 98): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc361,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G316 X): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc363,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G515 RAPID TKL): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc364,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (PRO X2 RAPID): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc366,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G316): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc36a,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G316 X 75): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
+    (
+        0xc36b,
+        &[0x8081, 0x8100],
+        "G HUB 2026.8 device DB (G316 X 98): keyboard capabilities onboardProfiles/lighting; feature ids inferred from the capability flags, not from a dump",
+    ),
 ];
 
 /// Receivers whose paired devices this driver opens through the receiver
@@ -808,8 +986,8 @@ mod tests {
             receivers,
             [
                 0xc548, 0xc52b, 0xc532, 0xc539, 0xc53a, 0xc53d, 0xc53f, 0xc541, 0xc545, 0xc547,
-                0xc54d, 0xc52f, 0xc518, 0xc51a, 0xc51b, 0xc521, 0xc525, 0xc526, 0xc52e, 0xc531,
-                0xc534, 0xc535, 0xc537, 0xc517
+                0xc54d, 0xc54f, 0xc52f, 0xc518, 0xc51a, 0xc51b, 0xc521, 0xc525, 0xc526, 0xc52e,
+                0xc531, 0xc534, 0xc535, 0xc537, 0xc517
             ]
         );
         assert!(serves_slots(0xc52b) && serves_slots(0xc543));

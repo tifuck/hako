@@ -25,6 +25,14 @@
 //!   <charging>` (up to three tries, once a minute). Bluetooth (`822b`) is
 //!   left to the generic driver, as the Model I 2's is.
 //!
+//! - Glorious CORE 2.1.3 (vendor, `docs/vendor-re/glorious.md`): the same
+//!   `0x83` battery query and `04 06 <0|1>` link events for the newer
+//!   SinoWealth PIDs (Model O / D PRO, Series One PRO, O 2 / D 2 PRO and their
+//!   4k/8k editions, Series 2 PRO), and the PixArt push frames / cable query
+//!   for the Model D 2 and O 2 Mini. CORE polls every 15 s and never polls
+//!   PixArt mice on their dongle; it has no off detection for those, so the
+//!   stale-frame rule below is hako's own.
+//!
 //! DPI, report rate and lighting of the wireless mice are blocked
 //! placeholders: every documented path writes onboard profile storage
 //! (OpenRGB marks the GMOW modes `MODE_FLAG_AUTOMATIC_SAVE`; glorious-i2
@@ -60,7 +68,7 @@ macro_rules! sino {
             name: $name,
             usbfs: false,
             multi: false,
-            open: |pid, _| SinoMouse::open($name, pid, pid == $cable),
+            open: |pid, _| SinoMouse::open($name, pid),
         }
     };
 }
@@ -88,6 +96,16 @@ pub const MODELS: &[Model] = &[
     pixart!(O2),
     sino!("Glorious Model O- Wireless", 0x2013, 0x2024),
     sino!("Glorious Model D- Wireless", 0x2014, 0x2025),
+    sino!("Glorious Model O PRO Wireless", 0x2015, 0x2027),
+    sino!("Glorious Model D PRO Wireless", 0x2017, 0x2029),
+    sino!("Glorious Series One PRO Wireless", 0x2018, 0x2031),
+    sino!("Glorious Model O 2 PRO Wireless", 0x2019, 0x2033),
+    sino!("Glorious Model D 2 PRO Wireless", 0x201a, 0x2034),
+    sino!("Glorious Model O 2 PRO 4k/8k Wireless", 0x201b, 0x2035),
+    sino!("Glorious Model D 2 PRO 4k/8k Wireless", 0x201c, 0x2036),
+    sino!("Glorious Series 2 PRO Wireless", 0x201d, 0x2039),
+    pixart!(D2),
+    pixart!(O2_MINI),
     Model {
         vendor_id: SINOWEALTH,
         product_ids: &[wired::MODEL_O],
@@ -108,8 +126,8 @@ pub const MODELS: &[Model] = &[
     },
 ];
 
-const GMOW_BLOCKED: &str = "one source (mxw), whose author bricked mice writing it; \
-nothing can be read back";
+const GMOW_BLOCKED: &str = "nothing can be read back to verify a write, and mxw's author \
+bricked mice writing it";
 
 /// Blocked placeholders for the onboard settings of a wireless mouse.
 /// `max_dpi`: Model O/D Wireless sensor 19000, Model I 2 26000 (glorious-i2).
@@ -198,7 +216,11 @@ fn snapshot(
 
 // ── SinoWealth Model O / D Wireless ────────────────────────────────────────
 
-const POLL: Duration = Duration::from_secs(30);
+/// CORE asks every 15 s (`Device.ts` battery timer, Glorious CORE 2.1.3).
+const POLL: Duration = Duration::from_secs(15);
+/// CORE re-checks a busy (`a0`) answer after 40 ms, three rounds at most.
+const BUSY_RETRY: Duration = Duration::from_millis(40);
+const BUSY_TRIES: usize = 3;
 
 fn battery_request() -> [u8; 65] {
     let mut b = [0u8; 65];
@@ -210,18 +232,41 @@ fn battery_request() -> [u8; 65] {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Reading {
-    Level(u8),
+    Level {
+        percent: u8,
+        charging: bool,
+    },
+    /// `a4`: the receiver does not find the mouse.
     Asleep,
+    /// `a0`: the firmware is busy; ask again shortly.
+    Busy,
 }
 
-/// mxw reads a 0 % level as 1 %; unknown status bytes are ignored.
+/// Reply `[1]` status (`a1` ok, `a4` mouse not found, `a0` busy), `[6]`
+/// echoes `83`, `[7]` is the charging flag and `[8]` the percent (mxw for the
+/// frame, Glorious CORE `ModelOSeries.ts` for status and charging flag). A 0 %
+/// level is shown as 1 %; other status bytes (`a2` failed, `a3` unsupported)
+/// are ignored.
 fn parse_battery(r: &[u8]) -> Option<Reading> {
     if r.get(6) != Some(&0x83) {
         return None;
     }
     match r.get(1)? {
-        0xa1 => Some(Reading::Level((*r.get(8)?).clamp(1, 100))),
-        0xa4 | 0xa0 => Some(Reading::Asleep),
+        0xa1 => Some(Reading::Level {
+            percent: (*r.get(8)?).clamp(1, 100),
+            charging: *r.get(7)? != 0,
+        }),
+        0xa4 => Some(Reading::Asleep),
+        0xa0 => Some(Reading::Busy),
+        _ => None,
+    }
+}
+
+/// Input report the receiver pushes when the mouse links (`04 06 01`) or
+/// drops off (`04 06 00`) (Glorious CORE `ModelOSeries.ts` `HIDEP2Data`).
+fn parse_link(r: &[u8]) -> Option<bool> {
+    match r {
+        [0x04, 0x06, v, ..] if *v <= 1 => Some(*v == 1),
         _ => None,
     }
 }
@@ -230,15 +275,16 @@ struct SinoMouse {
     name: &'static str,
     id: DeviceId,
     dev: Option<HidrawDevice>,
-    wired: bool,
     battery: BatteryState,
+    /// Last pushed link state; `None` until one arrives.
+    linked: Option<bool>,
     last_poll: Option<Instant>,
     failures: u8,
     last_error: Option<String>,
 }
 
 impl SinoMouse {
-    fn open(name: &'static str, pid: u16, wired: bool) -> Opened {
+    fn open(name: &'static str, pid: u16) -> Opened {
         let (dev, instance) = open_node(SINOWEALTH, pid, 2)?;
         info!("{name} open via {}", dev.path.display());
         Ok(vec![Box::new(Self {
@@ -249,28 +295,53 @@ impl SinoMouse {
                 instance,
             },
             dev: Some(dev),
-            wired,
             battery: mouse_battery(),
+            linked: None,
             last_poll: None,
             failures: 0,
             last_error: None,
         })])
     }
 
+    /// Takes the pushed link events; a link-up asks for the battery at once.
+    fn read_events(&mut self) {
+        let Some(dev) = self.dev.as_mut() else {
+            return;
+        };
+        let mut buf = [0u8; 64];
+        while let Ok(n) = dev.read_timeout(&mut buf, Duration::ZERO) {
+            if let Some(up) = parse_link(&buf[..n]) {
+                self.linked = Some(up);
+                if up {
+                    self.last_poll = None;
+                } else {
+                    self.battery.present = false;
+                }
+            }
+        }
+    }
+
     fn poll(&mut self) -> Result<()> {
         let dev = self.dev.as_ref().context("not connected")?;
-        dev.set_feature(&mut battery_request())?;
-        std::thread::sleep(Duration::from_millis(50));
-        let mut reply = [0u8; 65];
-        dev.get_feature(&mut reply)?;
-        match parse_battery(&reply) {
-            Some(Reading::Level(pct)) => {
-                self.battery.present = true;
-                self.battery.percent = Some(pct);
-                self.battery.charging = self.wired && pct < 100;
+        for _ in 0..BUSY_TRIES {
+            dev.set_feature(&mut battery_request())?;
+            std::thread::sleep(Duration::from_millis(50));
+            let mut reply = [0u8; 65];
+            dev.get_feature(&mut reply)?;
+            match parse_battery(&reply) {
+                Some(Reading::Level { percent, charging }) => {
+                    self.battery.present = true;
+                    self.battery.percent = Some(percent);
+                    self.battery.charging = charging;
+                }
+                Some(Reading::Asleep) => self.battery.present = false,
+                Some(Reading::Busy) => {
+                    std::thread::sleep(BUSY_RETRY);
+                    continue;
+                }
+                None => {}
             }
-            Some(Reading::Asleep) => self.battery.present = false,
-            None => {}
+            break;
         }
         Ok(())
     }
@@ -297,7 +368,11 @@ impl DeviceAdapter for SinoMouse {
     }
 
     fn tick(&mut self) -> Result<()> {
-        if self.dev.is_none() || self.last_poll.is_some_and(|t| t.elapsed() < POLL) {
+        self.read_events();
+        if self.dev.is_none()
+            || self.linked == Some(false)
+            || self.last_poll.is_some_and(|t| t.elapsed() < POLL)
+        {
             return Ok(());
         }
         self.last_poll = Some(Instant::now());
@@ -336,11 +411,13 @@ struct PixArt {
     cable_query: bool,
 }
 
+const WRITE_ONLY: &str = "write-only protocol: nothing can be read back to verify a write";
+
 const I2: PixArt = PixArt {
     name: "Glorious Model I 2 Wireless",
     receiver: 0x821d,
     cable: 0x821a,
-    blocked: "write-only protocol (nothing can be read back), one source (glorious-i2)",
+    blocked: WRITE_ONLY,
     charge_flag: false,
     cable_query: false,
 };
@@ -349,7 +426,27 @@ const O2: PixArt = PixArt {
     name: "Glorious Model O 2 Wireless",
     receiver: 0x822d,
     cable: 0x822a,
-    blocked: "write-only protocol (nothing can be read back), one source (o2ctl)",
+    blocked: WRITE_ONLY,
+    charge_flag: true,
+    cable_query: true,
+};
+
+/// Same `ModelOV2Series` code path in Glorious CORE as the O 2: pushed
+/// `06 fb` frames, cable query `03 08 fa 14`.
+const D2: PixArt = PixArt {
+    name: "Glorious Model D 2 Wireless",
+    receiver: 0x824d,
+    cable: 0x824a,
+    blocked: WRITE_ONLY,
+    charge_flag: true,
+    cable_query: true,
+};
+
+const O2_MINI: PixArt = PixArt {
+    name: "Glorious Model O 2 Mini Wireless",
+    receiver: 0x826d,
+    cable: 0x826a,
+    blocked: WRITE_ONLY,
     charge_flag: true,
     cable_query: true,
 };
@@ -359,8 +456,11 @@ const O2: PixArt = PixArt {
 const I2_TICK: Duration = Duration::from_millis(200);
 const I2_READ: Duration = Duration::from_millis(180);
 const CABLE_CHECK: Duration = Duration::from_secs(2);
-/// o2ctl asks the cable once a minute.
-const CABLE_POLL: Duration = Duration::from_secs(60);
+/// Glorious CORE asks the cable every 15 s.
+const CABLE_POLL: Duration = Duration::from_secs(15);
+/// Frames come every 20-40 s while the mouse is used; after this long
+/// without one it is taken to be off.
+const FRAME_STALE: Duration = Duration::from_secs(300);
 
 /// `06 fb <percent> <flag>`; the all-zero frame that follows and the `f9`
 /// (button) / `f6` (profile) frames are not levels.
@@ -422,6 +522,8 @@ struct PixArtMouse {
     battery: BatteryState,
     /// The last frame's charge flag (`spec.charge_flag` only).
     flag_charging: bool,
+    /// When the last battery frame arrived.
+    last_frame: Option<Instant>,
     /// Last cable presence check, or last query when `wired`.
     cable_checked: Option<Instant>,
     last_error: Option<String>,
@@ -453,6 +555,7 @@ impl PixArtMouse {
             connected: true,
             battery,
             flag_charging: false,
+            last_frame: None,
             cable_checked: None,
             last_error: None,
         })])
@@ -518,9 +621,13 @@ impl DeviceAdapter for PixArtMouse {
             };
             if let Some((pct, flag)) = parse_frame(&buf[..n]) {
                 self.battery.percent = Some(pct);
-                self.battery.present = true;
+                self.last_frame = Some(Instant::now());
                 self.flag_charging = self.spec.charge_flag && flag;
             }
+        }
+        let fresh = self.last_frame.is_some_and(|t| t.elapsed() < FRAME_STALE);
+        if !fresh {
+            self.flag_charging = false;
         }
         if self
             .cable_checked
@@ -528,8 +635,8 @@ impl DeviceAdapter for PixArtMouse {
         {
             self.cable_checked = Some(Instant::now());
             self.battery.charging = cable_present(self.spec.cable) || self.flag_charging;
-            self.battery.present |= self.battery.charging;
         }
+        self.battery.present = fresh || self.battery.charging;
         Ok(())
     }
 
@@ -568,24 +675,29 @@ mod tests {
             r[8] = pct;
             r
         };
-        assert_eq!(
-            parse_battery(&reply(0xa1, 0x83, 57)),
-            Some(Reading::Level(57))
-        );
-        assert_eq!(
-            parse_battery(&reply(0xa1, 0x83, 0)),
-            Some(Reading::Level(1))
-        );
-        assert_eq!(
-            parse_battery(&reply(0xa1, 0x83, 100)),
-            Some(Reading::Level(100))
-        );
+        let level = |percent, charging| Some(Reading::Level { percent, charging });
+        assert_eq!(parse_battery(&reply(0xa1, 0x83, 57)), level(57, false));
+        assert_eq!(parse_battery(&reply(0xa1, 0x83, 0)), level(1, false));
+        assert_eq!(parse_battery(&reply(0xa1, 0x83, 100)), level(100, false));
+        // CORE reads the charging flag at [7], not from the level.
+        let mut charging = reply(0xa1, 0x83, 100);
+        charging[7] = 1;
+        assert_eq!(parse_battery(&charging), level(100, true));
         assert_eq!(parse_battery(&reply(0xa4, 0x83, 0)), Some(Reading::Asleep));
-        assert_eq!(parse_battery(&reply(0xa0, 0x83, 0)), Some(Reading::Asleep));
+        assert_eq!(parse_battery(&reply(0xa0, 0x83, 0)), Some(Reading::Busy));
         // Unknown status (a2/a3) or a reply to another command.
         assert_eq!(parse_battery(&reply(0xa2, 0x83, 50)), None);
         assert_eq!(parse_battery(&reply(0xa1, 0x81, 50)), None);
         assert_eq!(parse_battery(&[0xa1]), None);
+    }
+
+    #[test]
+    fn link_events() {
+        assert_eq!(parse_link(&[0x04, 0x06, 0x01]), Some(true));
+        assert_eq!(parse_link(&[0x04, 0x06, 0x00, 0, 0]), Some(false));
+        assert_eq!(parse_link(&[0x04, 0x02, 0x01]), None);
+        assert_eq!(parse_link(&[0x04, 0x06, 0x05]), None);
+        assert_eq!(parse_link(&[0x04, 0x06]), None);
     }
 
     #[test]
@@ -656,6 +768,16 @@ mod tests {
                 (PIXART, &[0x822d, 0x822a][..]),
                 (SINOWEALTH, &[0x2013, 0x2024][..]),
                 (SINOWEALTH, &[0x2014, 0x2025][..]),
+                (SINOWEALTH, &[0x2015, 0x2027][..]),
+                (SINOWEALTH, &[0x2017, 0x2029][..]),
+                (SINOWEALTH, &[0x2018, 0x2031][..]),
+                (SINOWEALTH, &[0x2019, 0x2033][..]),
+                (SINOWEALTH, &[0x201a, 0x2034][..]),
+                (SINOWEALTH, &[0x201b, 0x2035][..]),
+                (SINOWEALTH, &[0x201c, 0x2036][..]),
+                (SINOWEALTH, &[0x201d, 0x2039][..]),
+                (PIXART, &[0x824d, 0x824a][..]),
+                (PIXART, &[0x826d, 0x826a][..]),
                 (SINOWEALTH, &[0x0036][..]),
                 (SINOWEALTH, &[0x0033][..]),
             ]
@@ -701,7 +823,7 @@ mod tests {
     fn hw_sinowealth_battery() {
         for m in MODELS.iter().filter(|m| m.vendor_id == SINOWEALTH) {
             for &pid in m.product_ids {
-                let Ok(mut a) = SinoMouse::open(m.name, pid, pid == m.product_ids[0]) else {
+                let Ok(mut a) = SinoMouse::open(m.name, pid) else {
                     continue;
                 };
                 a[0].tick().unwrap();

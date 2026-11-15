@@ -33,6 +33,7 @@ pub const FEAT_DEVICE_NAME: u16 = 0x0005;
 pub const FEAT_BATTERY_STATUS: u16 = 0x1000;
 pub const FEAT_BATTERY_VOLTAGE: u16 = 0x1001;
 pub const FEAT_UNIFIED_BATTERY: u16 = 0x1004;
+pub const FEAT_WIRELESS_STATUS: u16 = 0x1d4b;
 pub const FEAT_ADC: u16 = 0x1f20;
 pub const FEAT_ADJ_DPI: u16 = 0x2201;
 pub const FEAT_EXT_DPI: u16 = 0x2202;
@@ -98,6 +99,58 @@ pub fn match_reply(buf: &[u8], dev_idx: u8, feat: u8, fn_swid: u8) -> Reply {
     Reply::Other
 }
 
+/// A link event seen on the receiver / device node.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LinkEvent {
+    /// HID++ 1.0 notification 0x41 (device connection) or 0x40 (device
+    /// disconnection) for the slot. The flag layout differs between
+    /// receiver families, so it only says "the link changed": ping to see.
+    Link { disconnect: bool },
+    /// Feature 0x1D4B: `reconnect` = the device just re-established the
+    /// link, `config_needed` = it lost its settings and wants them sent
+    /// again, `power_switch` = its power switch moved.
+    Wireless {
+        reconnect: bool,
+        config_needed: bool,
+        power_switch: bool,
+    },
+}
+
+/// Classify a report read from the node as a link event for `dev_idx`.
+/// `wireless_idx` is the device's 0x1D4B feature index when it has one.
+/// Sub-ids 0x40 / 0x41 are the HID++ 1.0 notifications G HUB's reader
+/// recognises for this (its mask also covers 0x49 and 0x4B, which carry no
+/// link information used here); a HID++ 2.0 event is function 0, swid 0.
+pub fn parse_event(buf: &[u8], dev_idx: u8, wireless_idx: Option<u8>) -> Option<LinkEvent> {
+    if buf.len() < 7 || !matches!(buf[0], 0x10 | 0x11) || buf[1] != dev_idx {
+        return None;
+    }
+    match buf[2] {
+        0x40 => Some(LinkEvent::Link { disconnect: true }),
+        0x41 => Some(LinkEvent::Link { disconnect: false }),
+        f if Some(f) == wireless_idx && buf[3] == 0x00 => Some(LinkEvent::Wireless {
+            reconnect: buf[4] == 1,
+            config_needed: buf[5] == 1,
+            power_switch: buf[6] == 1,
+        }),
+        _ => None,
+    }
+}
+
+/// What a batch of events asks of the adapter: (ping now, send the
+/// settings again once it answers).
+pub fn wake_plan(events: &[LinkEvent]) -> (bool, bool) {
+    let mut resend = false;
+    for e in events {
+        resend |= match *e {
+            LinkEvent::Link { disconnect } => !disconnect,
+            // G HUB acts on config_needed only (reconnect alone changes nothing).
+            LinkEvent::Wireless { config_needed, .. } => config_needed,
+        };
+    }
+    (!events.is_empty(), resend)
+}
+
 /// Software id for the next [`request`], 2..=15 in turn, so a reply that
 /// arrives after its request timed out is not taken for the next request to
 /// the same feature and function. 0 marks notifications and 1 is the kernel
@@ -121,6 +174,8 @@ pub struct Refused {
     pub feat: u8,
     pub fnid: u8,
     pub code: u8,
+    /// A HID++ 1.0 error frame (0x8F), not a HID++ 2.0 one (0xFF).
+    pub hidpp10: bool,
     pub raw: String,
 }
 
@@ -142,11 +197,29 @@ pub fn refused(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Refused>().is_some()
 }
 
-/// Note a probe read that got no answer (timeout, I/O error), so the probe
-/// counts as incomplete and is retried. A refusal (error frame) is an
+/// No answer from the device: a timeout, an I/O error, or the HID++ 1.0
+/// error its receiver sends while the device is off or out of reach
+/// (0x04 connect failed, 0x09 resource error). G HUB retries exactly these
+/// (plus busy) and then treats the device as silent; 0x08 unknown device is a
+/// hard error there, not a sign that the device is offline.
+pub fn unanswered(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Refused>()
+        .is_none_or(|r| r.hidpp10 && matches!(r.code, 0x04 | 0x09))
+}
+
+impl Refused {
+    /// The device or its receiver is busy: G HUB waits and sends the
+    /// request again (HID++ 1.0 0x07, HID++ 2.0 0x08).
+    pub fn busy(&self) -> bool {
+        self.code == if self.hidpp10 { 0x07 } else { 0x08 }
+    }
+}
+
+/// Note a probe read that got no answer ([`unanswered`]), so the probe
+/// counts as incomplete and is retried. Any other error frame is an
 /// answer: the device does not support that read.
 pub fn note_miss(e: anyhow::Error, what: &str, missed: &mut Vec<String>) {
-    if !refused(&e) {
+    if unanswered(&e) {
         missed.push(format!("{what}: {e}"));
     }
 }
@@ -198,6 +271,7 @@ pub fn transact(
                     feat,
                     fnid,
                     code,
+                    hidpp10: buf[2] == 0x8f,
                     raw: hex(&buf[..n.min(12)]),
                 }
                 .into())
@@ -218,9 +292,25 @@ pub fn request(
     fnid: u8,
     params: &[u8],
 ) -> Result<[u8; 20]> {
-    let pkt = with_swid(long_request(dev_idx, feat, fnid, params), next_swid());
-    transact(dev, &pkt, dev_idx, feat, pkt[3])
+    let mut tries = 0;
+    loop {
+        let pkt = with_swid(long_request(dev_idx, feat, fnid, params), next_swid());
+        match transact(dev, &pkt, dev_idx, feat, pkt[3]) {
+            Err(e)
+                if tries < BUSY_RETRIES
+                    && e.downcast_ref::<Refused>().is_some_and(Refused::busy) =>
+            {
+                tries += 1;
+                std::thread::sleep(BUSY_WAIT);
+            }
+            r => return r,
+        }
+    }
 }
+
+/// Resends of a request answered "busy", and the wait before each.
+const BUSY_RETRIES: u32 = 3;
+const BUSY_WAIT: Duration = Duration::from_millis(40);
 
 /// `pkt` (a [`long_request`]) with software id `swid`.
 fn with_swid(mut pkt: [u8; 20], swid: u8) -> [u8; 20] {
@@ -355,7 +445,8 @@ pub fn percent_from_mv(mv: u16) -> Option<u8> {
         (3600, 6),
         (3500, 0),
     ];
-    if mv == 0 {
+    // Below any Li-ion cell's cut-off (0 included): not a reading.
+    if mv < 3000 {
         return None;
     }
     if mv >= CURVE[0].0 {
@@ -678,6 +769,8 @@ mod tests {
         assert_eq!(percent_from_mv(3850), Some(53));
         assert_eq!(percent_from_mv(3400), Some(0));
         assert_eq!(percent_from_mv(0), None);
+        assert_eq!(percent_from_mv(0x00ff), None);
+        assert_eq!(parse_battery_voltage(&[0x00, 0x10, 0x00]), (None, false));
     }
 
     #[test]
@@ -792,6 +885,75 @@ mod tests {
     }
 
     #[test]
+    fn link_events_are_recognised() {
+        // Receiver notifications for slot 2 (0x41 connect, 0x40 disconnect).
+        let up = [0x10, 2, 0x41, 0x04, 0x00, 0x54, 0x40];
+        let down = [0x10, 2, 0x40, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(
+            parse_event(&up, 2, None),
+            Some(LinkEvent::Link { disconnect: false })
+        );
+        assert_eq!(
+            parse_event(&down, 2, None),
+            Some(LinkEvent::Link { disconnect: true })
+        );
+        // Another slot's notification is not ours.
+        assert_eq!(parse_event(&up, 3, None), None);
+        // 0x1D4B at feature index 9: function 0, swid 0.
+        let ws = [0x11, 2, 9, 0x00, 1, 1, 0];
+        assert_eq!(
+            parse_event(&ws, 2, Some(9)),
+            Some(LinkEvent::Wireless {
+                reconnect: true,
+                config_needed: true,
+                power_switch: false
+            })
+        );
+        // Without the feature index, or with a swid (a reply), it is nothing.
+        assert_eq!(parse_event(&ws, 2, None), None);
+        assert_eq!(parse_event(&[0x11, 2, 9, 0x23, 1, 1, 0], 2, Some(9)), None);
+        // A request's reply on another feature is not an event.
+        assert_eq!(parse_event(&[0x11, 2, 5, 0x00, 1, 1, 0], 2, Some(9)), None);
+    }
+
+    #[test]
+    fn wake_plan_resends_only_when_settings_may_be_lost() {
+        let gone = LinkEvent::Link { disconnect: true };
+        let back = LinkEvent::Link { disconnect: false };
+        let no_cfg = LinkEvent::Wireless {
+            reconnect: true,
+            config_needed: false,
+            power_switch: false,
+        };
+        let cfg = LinkEvent::Wireless {
+            reconnect: false,
+            config_needed: true,
+            power_switch: false,
+        };
+        assert_eq!(wake_plan(&[]), (false, false));
+        assert_eq!(wake_plan(&[gone]), (true, false));
+        assert_eq!(wake_plan(&[no_cfg]), (true, false));
+        assert_eq!(wake_plan(&[back]), (true, true));
+        assert_eq!(wake_plan(&[gone, cfg]), (true, true));
+    }
+
+    #[test]
+    fn hidpp10_busy_and_unknown_device() {
+        let r = |code, hidpp10| Refused {
+            feat: 0,
+            fnid: 0,
+            code,
+            hidpp10,
+            raw: String::new(),
+        };
+        assert!(r(0x07, true).busy() && r(0x08, false).busy());
+        assert!(!r(0x08, true).busy() && !r(0x07, false).busy());
+        // 0x08 UnknownDevice is a hard error (G HUB), not "offline".
+        assert!(!unanswered(&r(0x08, true).into()));
+        assert!(unanswered(&r(0x04, true).into()) && unanswered(&r(0x09, true).into()));
+    }
+
+    #[test]
     fn requests_rotate_their_software_id() {
         let ids: Vec<u8> = (0..40).map(|_| next_swid()).collect();
         // Never 0 (notifications) or 1 (the kernel driver), never twice in a row.
@@ -817,6 +979,7 @@ mod tests {
             feat: 3,
             fnid: 1,
             code: 7,
+            hidpp10: false,
             raw: String::new(),
         };
         // Refused = not supported: an answer, nothing to retry.
@@ -831,6 +994,32 @@ mod tests {
         assert_eq!(missed.len(), 1);
         assert_eq!(answered(Ok(5), "rates", &mut missed), Some(5));
         assert_eq!(missed.len(), 1);
+        // The receiver's HID++ 1.0 "device not reachable" errors (mouse off)
+        // are no answer either; other 1.0 errors are refusals.
+        for (code, miss) in [(0x04, true), (0x09, true), (0x08, false), (0x03, false)] {
+            let offline = Refused {
+                feat: 0,
+                fnid: 0,
+                code,
+                hidpp10: true,
+                raw: String::new(),
+            };
+            let before = missed.len();
+            assert_eq!(
+                answered::<()>(Err(offline.into()), "dpi", &mut missed),
+                None
+            );
+            assert_eq!(missed.len() > before, miss, "code {code:#x}");
+        }
+        // The same codes in a HID++ 2.0 error frame are the device's refusal.
+        let v2 = Refused {
+            feat: 3,
+            fnid: 1,
+            code: 0x09,
+            hidpp10: false,
+            raw: String::new(),
+        };
+        assert!(!unanswered(&v2.into()));
     }
 
     #[test]

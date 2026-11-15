@@ -10,3 +10,6 @@ libs/ui/tests/snapshots/
 
 # Public mirror checkout (scripts/publish.sh)
 /.publish/
+
+# Vendor Windows software + RE workspace (never committed: third-party binaries)
+/vendor-re/

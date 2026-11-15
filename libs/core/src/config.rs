@@ -192,10 +192,9 @@ impl ConfigPaths {
 
 /// Defaults when the file does not exist yet (nothing is written).
 pub fn load_app_config(paths: &ConfigPaths) -> Result<AppConfig> {
-    if !paths.config_toml.exists() {
+    let Some(text) = read_optional(&paths.config_toml)? else {
         return Ok(AppConfig::default());
-    }
-    let text = fs::read_to_string(&paths.config_toml)?;
+    };
     toml::from_str(&text).with_context(|| format!("parse {}", paths.config_toml.display()))
 }
 
@@ -259,10 +258,9 @@ pub fn device_config_path(paths: &ConfigPaths, vid: u16, pid: u16) -> PathBuf {
 
 pub fn load_device_settings(paths: &ConfigPaths, vid: u16, pid: u16) -> Result<SettingsMap> {
     let p = device_config_path(paths, vid, pid);
-    if !p.exists() {
+    let Some(text) = read_optional(&p)? else {
         return Ok(SettingsMap::new());
-    }
-    let text = fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+    };
     let file: DeviceConfigFile =
         toml::from_str(&text).with_context(|| format!("parse {}", p.display()))?;
     Ok(normalize_settings(
@@ -376,12 +374,22 @@ pub fn remap_config_path(paths: &ConfigPaths, vid: u16, pid: u16) -> PathBuf {
 
 pub fn load_remap_bindings(paths: &ConfigPaths, vid: u16, pid: u16) -> Result<Vec<RemapBinding>> {
     let p = remap_config_path(paths, vid, pid);
-    if !p.exists() {
+    let Some(text) = read_optional(&p)? else {
         return Ok(Vec::new());
-    }
-    let text = fs::read_to_string(p)?;
-    let file: RemapFile = toml::from_str(&text)?;
+    };
+    let file: RemapFile =
+        toml::from_str(&text).with_context(|| format!("parse {}", p.display()))?;
     Ok(file.bindings)
+}
+
+/// `path`'s text, or `None` when there is no such file. Any other read error
+/// (permissions, I/O) is an error, never mistaken for a missing file.
+fn read_optional(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 pub fn save_remap_bindings(
@@ -526,6 +534,45 @@ mod tests {
         let text = fs::read_to_string(dots.join("config.toml")).unwrap();
         assert!(text.contains("last_profile = \"a\""), "{text}");
         assert_eq!(fs::read_dir(&dots).unwrap().count(), 1, "temp file left");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_a_missing_file_reads_as_defaults() {
+        let root = std::env::temp_dir().join(format!("hako-cfg-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        paths.ensure().unwrap();
+        assert!(load_app_config(&paths).is_ok());
+        assert!(load_device_settings(&paths, 1, 2).unwrap().is_empty());
+        assert!(load_remap_bindings(&paths, 1, 2).unwrap().is_empty());
+        // A file that exists but cannot be read (here a symlink loop) is an
+        // error naming it, not an empty file.
+        let unreadable = [
+            paths.config_toml.clone(),
+            device_config_path(&paths, 1, 2),
+            remap_config_path(&paths, 1, 2),
+        ];
+        for p in &unreadable {
+            std::os::unix::fs::symlink(p, p).unwrap();
+        }
+        for err in [
+            load_app_config(&paths).map(|_| ()).unwrap_err(),
+            load_device_settings(&paths, 1, 2).map(|_| ()).unwrap_err(),
+            load_remap_bindings(&paths, 1, 2).map(|_| ()).unwrap_err(),
+        ] {
+            assert!(format!("{err:#}").starts_with("read "), "{err:#}");
+        }
+        fs::remove_file(remap_config_path(&paths, 1, 2)).unwrap();
+        fs::write(remap_config_path(&paths, 1, 2), "bindings = [").unwrap();
+        let err = load_remap_bindings(&paths, 1, 2).unwrap_err();
+        assert!(format!("{err:#}").contains("0001_0002.toml"), "{err:#}");
         let _ = fs::remove_dir_all(root);
     }
 

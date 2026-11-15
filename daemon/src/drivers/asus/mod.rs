@@ -25,9 +25,20 @@
 //!   mouse debounce `51 31 <stages+1>` (field also in libratbag) and active
 //!   stage `51 31 09`.
 //!
-//! No save command is ever sent: every write is volatile and stored settings
-//! are re-applied on (re)connect. Profiles and onboard button maps are untouched.
+//! - ASUS Gear Link (gearlink.asus.com web app and its Windows companion
+//!   services, studied statically; protocol facts only): mouse PID and
+//!   capability tables (DPI ceilings, `dpiLevelBase`), `12 00` stage byte
+//!   (1-based), `12 08` events, headset `51 10` lighting switch, headset
+//!   `Device/<pid>.ini` PIDs and the `22 xx` earbuds status reads. See
+//!   docs/vendor-re/asus.md.
+//!
+//! Every `51 xx` write is volatile and stored settings are re-applied on
+//! (re)connect. The only save commands, `50 03` (mice) and `50 55`
+//! (keyboards), store the active onboard profile, and only while the owner's
+//! save-to-device mode is on (for a user change, or once when the mode is
+//! turned on); never on (re)connect. Onboard button maps are untouched.
 
+mod earbuds;
 mod headset;
 mod keyboards;
 mod mice;
@@ -45,7 +56,8 @@ use tracing::debug;
 const N_MICE: usize = mouse_models::MICE.len();
 const N_KB: usize = keyboards::KEYBOARDS.len();
 const N_HS: usize = headset::HEADSETS.len();
-const N: usize = N_MICE + N_KB + N_HS + 1;
+const N_EB: usize = earbuds::EARBUDS.len();
+const N: usize = N_MICE + N_KB + N_HS + N_EB + 1;
 
 /// libratbag `asus-rog-omni-receiver.device`, G-Helper `OMNI_PID`.
 const OMNI_PIDS: &[u16] = &[0x1ace];
@@ -89,6 +101,12 @@ const ALL: [Model; N] = {
         out[N_MICE + N_KB + h] = model(s.name, s.pids, DeviceKind::Headset, open_headset);
         h += 1;
     }
+    let mut e = 0;
+    while e < N_EB {
+        let s = &earbuds::EARBUDS[e];
+        out[N_MICE + N_KB + N_HS + e] = model(s.name, s.pids, DeviceKind::Headset, open_earbuds);
+        e += 1;
+    }
     out[N - 1] = Model {
         multi: true,
         ..model(
@@ -118,6 +136,12 @@ fn open_keyboard(pid: u16, ctx: &DriverCtx) -> Opened {
 fn open_headset(pid: u16, ctx: &DriverCtx) -> Opened {
     let spec = headset::find(pid).context("unknown ASUS headset PID")?;
     let a = headset::HeadsetAdapter::open(spec, pid, ctx.paths.clone())?;
+    Ok(vec![Box::new(a) as Box<dyn DeviceAdapter>])
+}
+
+fn open_earbuds(pid: u16, _ctx: &DriverCtx) -> Opened {
+    let spec = earbuds::find(pid).context("unknown ASUS earbuds PID")?;
+    let a = earbuds::EarbudsAdapter::open(spec, pid)?;
     Ok(vec![Box::new(a) as Box<dyn DeviceAdapter>])
 }
 
@@ -246,7 +270,9 @@ mod tests {
                     _ if m.multi => OMNI_PIDS.contains(&pid).then_some(m.name),
                     DeviceKind::Mouse => mice::find(pid).map(|s| s.name),
                     DeviceKind::Keyboard => keyboards::find(pid).map(|s| s.name),
-                    _ => headset::find(pid).map(|s| s.name),
+                    _ => headset::find(pid)
+                        .map(|s| s.name)
+                        .or_else(|| earbuds::find(pid).map(|s| s.name)),
                 };
                 assert_eq!(family, Some(m.name), "{pid:04x}");
             }

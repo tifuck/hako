@@ -47,6 +47,20 @@ const fn dpi(min: u16, max: u16, step: u16) -> Option<Dpi> {
     })
 }
 
+/// 65000-DPI generation: per-axis DPI in 1-dpi units, with stage colours.
+/// Gear Link's `dpiLevelBase` is 1 for p724 / p725 / p726 / p728 / p729 / p730.
+const fn dpi_xy_unit(max: u16) -> Option<Dpi> {
+    Some(Dpi {
+        min: 100,
+        max,
+        step: 1,
+        xy: true,
+        colors: true,
+        zero_based: false,
+        active: true,
+    })
+}
+
 /// Newer AimPoint-generation mice: per-axis DPI with stage colours.
 const fn dpi_xy(max: u16) -> Option<Dpi> {
     Some(Dpi {
@@ -377,13 +391,14 @@ pub const MICE: &[MouseSpec] = &[
         zones: THREE,
         ..BASE
     },
-    // [L asus-rog-harpe-wireless (1a92), G HarpeAceAimLabEdition (1a92 cable, 1a94 dongle)]
+    // [L asus-rog-harpe-wireless (1a92), G HarpeAceAimLabEdition (1a92 cable, 1a94 dongle);
+    // GL p713: DPI up to 42000]
     MouseSpec {
         name: "ASUS ROG Harpe Ace Aim Lab Edition",
         pids: &[0x1a92, 0x1a94],
         omni: &[0x1a94],
         debounce: true,
-        dpi: dpi_xy(36_000),
+        dpi: dpi_xy(42_000),
         lod: Lod::Calibrated,
         battery: Battery::Percent,
         auto_off: true,
@@ -437,6 +452,7 @@ pub const MICE: &[MouseSpec] = &[
     MouseSpec {
         name: "ASUS ROG Harpe II Ace",
         pids: &[0x1c69, 0x1ad0],
+        omni: &[0x1c6b],
         rx: &[0x1ad0],
         variants: &[("EXTREME", &HARPE_II_EXTREME)],
         dpi: dpi_xy(42_000),
@@ -665,7 +681,99 @@ pub const MICE: &[MouseSpec] = &[
         battery: Battery::QuartersAt6,
         ..BASE
     },
+    // The rows below come from ASUS Gear Link (web app capability groups and
+    // PID tables, see docs/vendor-re/asus.md); each lists the cable PID, then
+    // the PID the mouse reports through the Omni receiver. Lighting zones and
+    // the battery / auto-off bytes follow the nearest sibling; LED zones are
+    // left out where Gear Link does not name them.
+    // [GL p523 Gladius III Core: 12000 DPI, colours, 125-1000 Hz, USB only]
+    MouseSpec {
+        name: "ASUS ROG Gladius III Core",
+        pids: &[0x1c8d],
+        dpi: Some(Dpi {
+            min: 100,
+            max: 12_000,
+            step: 50,
+            xy: false,
+            colors: true,
+            zero_based: false,
+            active: true,
+        }),
+        lod: Lod::Calibrated,
+        ..BASE
+    },
+    // [GL p725: Harpe II Extreme Edition 2.0 on its own PIDs, DPI in 1-dpi units]
+    MouseSpec {
+        name: "ASUS ROG Harpe II Extreme Edition 2.0",
+        pids: &[0x1d7a],
+        omni: &[0x1d7c],
+        rx: &[],
+        variants: &[],
+        ..HARPE_II_EXTREME
+    },
+    // [GL p729]
+    MouseSpec {
+        name: "ASUS ROG Gladius IV Ace",
+        pids: &[0x1db0],
+        omni: &[0x1dbf],
+        ..XY_65K
+    },
+    // [GL p730]
+    MouseSpec {
+        name: "ASUS ROG Gladius IV Ace Max",
+        pids: &[0x1e4e],
+        omni: &[0x1e4f],
+        ..XY_65K
+    },
+    // [GL p724]
+    MouseSpec {
+        name: "ASUS ROG Harpe II Ace Mini",
+        pids: &[0x1e2f],
+        omni: &[0x1e32],
+        ..XY_65K
+    },
+    // [GL p726]
+    MouseSpec {
+        name: "ASUS ROG Harpe II Ace Mini Demon1 Edition",
+        pids: &[0x1e51],
+        omni: &[0x1e52],
+        ..XY_65K
+    },
+    // [GL p731: 42000 DPI like the Harpe II Ace, no button-response control]
+    MouseSpec {
+        name: "ASUS ROG Harpe II Ace PBZ",
+        pids: &[0x1e4a],
+        omni: &[0x1e4b],
+        dpi: dpi_xy(42_000),
+        rates: R8000,
+        lod: Lod::Calibrated,
+        battery: Battery::Percent,
+        auto_off: true,
+        ..BASE
+    },
+    // [GL p728: 65000 DPI, static 125-1000 Hz list]
+    MouseSpec {
+        name: "ASUS ROG Spatha X 65K",
+        pids: &[0x1dde],
+        omni: &[0x1de0],
+        rates: R1000,
+        ..XY_65K
+    },
 ];
+
+/// Gear Link's 65000-DPI group (p724 / p726 / p728 / p729 / p730): split
+/// DPI in 1-dpi units, button response, 125-8000 Hz.
+const XY_65K: MouseSpec = MouseSpec {
+    name: "",
+    pids: &[],
+    debounce: true,
+    dpi: dpi_xy_unit(65_000),
+    rates: R8000,
+    lod: Lod::Calibrated,
+    battery: Battery::Percent,
+    auto_off: true,
+    ..BASE
+};
 
 /// Models without a PID of their own: reached through a receiver's pairing
 /// list or a product name (see `omni` and `variants`).

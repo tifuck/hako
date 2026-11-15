@@ -9,10 +9,14 @@
 //! - OpenInzone `docs/PROTOCOL.md` (GPL, layouts only; INZONE Buds event ids, battery
 //!   order, sidetone/volume/balance ranges): <https://github.com/penguinwokrs/openinzone>
 //!
+//! - INZONE Hub 1.0.20.0 (static analysis, `docs/vendor-re/sony.md`): auto-off last-setting
+//!   byte, INZONE Mouse-A layouts (`mouse.rs`).
+//!
 //! `inzone.rs` speaks the INZONE dongles' HCI-over-HID protocol, `pulse.rs` reads the
 //! PULSE 3D's status reports. Nothing here writes firmware or stored profiles.
 
 mod inzone;
+mod mouse;
 mod pulse;
 
 use crate::drivers::Model;
@@ -41,15 +45,32 @@ pub const MODELS: &[Model] = &[
     model!(inzone::H5),
     model!(inzone::BUDS),
     model!(pulse::PULSE_3D),
+    Model {
+        vendor_id: SONY,
+        product_ids: mouse::MOUSE_A.pids,
+        kind: DeviceKind::Mouse,
+        name: mouse::MOUSE_A.name,
+        usbfs: false,
+        multi: false,
+        open: |pid, ctx| mouse::open(&mouse::MOUSE_A, pid, ctx),
+    },
 ];
 
 /// Open the hidraw node of `vid:pid` whose report descriptor (read from sysfs)
 /// satisfies `wanted`; returns the device and a stable instance key.
 fn open_node(pid: u16, wanted: impl Fn(&[u8]) -> bool) -> Result<(HidrawDevice, String)> {
+    open_node_where(pid, |_, d| wanted(d))
+}
+
+/// Like [`open_node`], also given the node's USB interface number.
+fn open_node_where(
+    pid: u16,
+    wanted: impl Fn(Option<u32>, &[u8]) -> bool,
+) -> Result<(HidrawDevice, String)> {
     let info = enumerate_hidraw()?
         .into_iter()
         .filter(|d| d.vendor_id == SONY && d.product_id == pid)
-        .find(|d| wanted(&d.report_descriptor()))
+        .find(|d| wanted(d.interface, &d.report_descriptor()))
         .with_context(|| format!("no control node for {SONY:04x}:{pid:04x}"))?;
     let dev = HidrawDevice::open(&info.path)?;
     let instance = if info.uniq.is_empty() {
@@ -66,7 +87,7 @@ mod tests {
 
     #[test]
     fn every_spec_is_registered_once() {
-        assert_eq!(MODELS.len(), inzone::ALL.len() + 1);
+        assert_eq!(MODELS.len(), inzone::ALL.len() + 2);
         for spec in inzone::ALL {
             assert!(MODELS.iter().any(|m| m.name == spec.name));
         }

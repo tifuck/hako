@@ -69,6 +69,12 @@ const UPDATE_COMPLETE: u32 = 0x01;
 /// ponytail: open reads every lamp (two reports each) while discovery waits;
 /// raise if a real device has more lamps.
 const MAX_LAMPS: u32 = 1024;
+/// Fields one report may declare: a LampId and the four channels per lamp,
+/// plus LampCount and LampUpdateFlags. A descriptor declaring more is refused.
+const MAX_FIELDS: usize = MAX_LAMPS as usize * (1 + CHANNELS.len()) + 2;
+/// ponytail: bounds the lamp reads on the discovery thread (one feature
+/// request each can block for seconds); raise if a real device is slower.
+const OPEN_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_INTERVAL: Duration = Duration::from_secs(1);
 const BATTERY_POLL: Duration = Duration::from_secs(30);
 const COLOR_KEYS: [SettingKey; 3] = [SettingKey::ColorR, SettingKey::ColorG, SettingKey::ColorB];
@@ -256,10 +262,11 @@ fn layout(desc: &[u8]) -> Option<Layout> {
             }
             // Input / Output / Feature.
             0x80 | 0x90 | 0xb0 => {
+                let width = size.checked_mul(count)?;
                 let start = match bits.iter_mut().find(|(k, _)| *k == (id, tag)) {
-                    Some((_, b)) => std::mem::replace(b, *b + size * count),
+                    Some((_, b)) => std::mem::replace(b, b.checked_add(width)?),
                     None => {
-                        bits.push(((id, tag), size * count));
+                        bits.push(((id, tag), width));
                         0
                     }
                 };
@@ -274,6 +281,9 @@ fn layout(desc: &[u8]) -> Option<Layout> {
                         ..Report::default()
                     });
                     if r.id == id && r.output == (tag == 0x90) {
+                        if count as usize > MAX_FIELDS - r.fields.len() {
+                            return None;
+                        }
                         for i in 0..count {
                             // Usages pair with fields in order; the last repeats.
                             let Some(&u) = usages.get(i as usize).or(usages.last()) else {
@@ -507,8 +517,14 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
     let need = proto
         .response
         .bytes_for(&[&[LAMP_ID, IS_PROGRAMMABLE][..], &LEVELS[..]].concat());
+    let deadline = Instant::now() + OPEN_DEADLINE;
     let lamps = (0..count)
         .map(|id| {
+            ensure!(
+                Instant::now() < deadline,
+                "reading {count} lamps took over {}s (stopped at lamp {id})",
+                OPEN_DEADLINE.as_secs()
+            );
             let mut req = proto.request.buf();
             proto.request.put(&mut req, LAMP_ID, 0, id);
             dev.set_feature(&mut req)?;
@@ -678,10 +694,21 @@ impl DeviceAdapter for LampArrayAdapter {
     }
 
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+        let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value);
-        let result = self.apply();
-        self.last_error = result.as_ref().err().map(|e| e.to_string());
-        result?;
+        if let Err(e) = self.apply() {
+            self.settings = before;
+            // Some of the reports may have gone out: send the old look again.
+            let e = match self.dev.is_some().then(|| self.apply()) {
+                Some(Err(r)) => {
+                    anyhow::anyhow!("{e:#}; restoring the previous look failed too: {r:#}")
+                }
+                _ => e,
+            };
+            self.last_error = Some(e.to_string());
+            return Err(e);
+        }
+        self.last_error = None;
         hako_core::config::save_device_settings(
             &self.paths,
             self.id.vendor_id,
@@ -1054,6 +1081,41 @@ mod tests {
         assert!(protocol(&desc).is_none());
     }
 
+    /// Field sizes and counts come from the device: an overflowing bit
+    /// offset or a report with more fields than any LampArray needs is
+    /// refused instead of panicking or looping for ever.
+    #[test]
+    fn hostile_descriptors_are_refused() {
+        let report = |items: &[u8]| {
+            [
+                &[
+                    0x05, 0x59, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x02, 0xa1, 0x02,
+                ][..],
+                items,
+                &[0xc0, 0xc0],
+            ]
+            .concat()
+        };
+        // Report Size 32 x Report Count 0xffffffff.
+        let wide = report(&[
+            0x09, 0x03, 0x75, 0x20, 0x97, 0xff, 0xff, 0xff, 0xff, 0xb1, 0x02,
+        ]);
+        assert!(layout(&wide).is_none());
+        // Two input fields of 2^31 bits each: the offset of the end overflows.
+        let half = [
+            0x09, 0x03, 0x77, 0x00, 0x00, 0x01, 0x00, 0x96, 0x00, 0x80, 0x81, 0x02,
+        ];
+        assert!(layout(&report(&[half, half].concat())).is_none());
+        // One field too many.
+        let [lo, hi] = u16::try_from(MAX_FIELDS + 1).unwrap().to_le_bytes();
+        let many = report(&[0x09, 0x03, 0x75, 0x08, 0x96, lo, hi, 0xb1, 0x02]);
+        assert!(layout(&many).is_none());
+        let [lo, hi] = u16::try_from(MAX_FIELDS).unwrap().to_le_bytes();
+        let most = report(&[0x09, 0x03, 0x75, 0x08, 0x96, lo, hi, 0xb1, 0x02]);
+        let attributes = layout(&most).unwrap().attributes.unwrap();
+        assert_eq!(attributes.fields.len(), MAX_FIELDS);
+    }
+
     fn temp_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("hako-lamparray-{name}-{}", std::process::id()))
     }
@@ -1092,6 +1154,22 @@ mod tests {
         let err = a.set(SettingKey::Effect, SettingValue::Text("static".into()));
         assert_eq!(err.unwrap_err().to_string(), "not connected");
         assert_eq!(a.last_error.as_deref(), Some("not connected"));
+        assert!(a.settings.is_empty(), "rolled back");
+        assert_eq!(std::fs::read_dir(&paths.devices_dir).unwrap().count(), 0);
+        // A node that refuses every feature report: the old look (onboard)
+        // is sent again, and that failing is reported too.
+        let node = root.join("hidraw");
+        std::fs::write(&node, []).unwrap();
+        a.dev = Some(HidrawDevice::open(&node).unwrap());
+        let err = a
+            .set(SettingKey::Effect, SettingValue::Text("static".into()))
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("restoring the previous look failed too"),
+            "{err}"
+        );
+        assert!(a.settings.is_empty(), "rolled back");
         assert_eq!(std::fs::read_dir(&paths.devices_dir).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(root);
     }

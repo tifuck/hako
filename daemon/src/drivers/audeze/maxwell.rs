@@ -21,8 +21,17 @@
 //! The headset keeps its settings itself, as with its own buttons and app, so
 //! they are written only when the user changes one, never when the headset
 //! comes online. Then the sidetone is read back (level key, enabled parameter,
-//! the reads HeadsetControl uses); voice prompts, noise filter, volume limiter
-//! and auto-off have no documented read and show the last value set here.
+//! the reads HeadsetControl uses), and the voice prompt level and volume
+//! limiter, which Audeze HQ 126 also reads (keys 0x20 and 0x28); noise filter
+//! (no read known; key 0x24 is not in HQ 126) and auto-off (the read's reply
+//! layout is not known) show the last value set here.
+//!
+//! Audeze HQ 126 (static analysis, `docs/vendor-re/audeze.md`) confirms this
+//! framing. Its dongle PIDs 4b18/4b19 use route 0x80 and a 50 ms read gap;
+//! the headset's own USB PIDs 4b1a/4b1e use route 0x00 and a 10 ms gap. HQ
+//! drains stale input once at open; hako drains before each request, which
+//! is the safer superset, and (unlike HQ) never closes the device on one
+//! failed read.
 //!
 //! The original Maxwell's custom EQ (`audeze_maxwell.hpp`: stored items
 //! `EF00 + slot` / `E42C + slot` via `0D 0A`, after `03 0A`) rewrites the
@@ -45,7 +54,11 @@ use tracing::{debug, info, warn};
 const SIZE: usize = 62;
 const REPORT_OUT: u8 = 0x06;
 const REPORT_IN: u8 = 0x07;
+/// Route byte through the dongle; a headset on its own USB cable uses 0.
 const ROUTE_HEADSET: u8 = 0x80;
+const ROUTE_DIRECT: u8 = 0x00;
+/// The Maxwell's own USB PIDs (HQ calls them "headset", the others "dongle").
+const DIRECT_PIDS: [u16; 2] = [0x4b1a, 0x4b1e];
 /// Fragment bytes per report (after id, length and route).
 const FRAGMENT_MAX: usize = SIZE - 3;
 
@@ -94,8 +107,9 @@ const EQ_BANDS: [(K, &str); 10] = [
     (K::EqBand10, "16 kHz"),
 ];
 const EQ_GAIN_MAX: f64 = 12.0;
-const EQ_BLOCKED: &str = "Writes the headset's stored custom EQ slot; only one source \
-(HeadsetControl, Oct 2026) documents the layout";
+const EQ_BLOCKED: &str =
+    "Writes the headset's stored custom EQ slot. The store flow is confirmed by \
+Audeze HQ and HeadsetControl, but the coefficient encoding is not implemented in hako yet";
 /// Headset preset numbers 1-10 (HeadsetControl's 0-9 plus one).
 const EQ_PRESETS: [&str; 10] = [
     "Audeze",
@@ -122,8 +136,8 @@ pub(super) struct Spec {
 
 pub(super) const MAXWELL: Spec = Spec {
     name: "Audeze Maxwell",
-    // PlayStation/PC, Xbox dongle.
-    pids: &[0x4b19, 0x4b18],
+    // PlayStation/PC and Xbox dongles, then the headset on a USB cable.
+    pids: &[0x4b19, 0x4b18, 0x4b1a, 0x4b1e],
     iface: 0,
     volume_limiter: true,
     custom_eq: true,
@@ -140,12 +154,12 @@ pub(super) const MAXWELL_2: Spec = Spec {
 
 /// One output report carrying a request. Every body sent here is a few bytes,
 /// well under one report's fragment.
-fn request_report(body: &[u8]) -> [u8; SIZE] {
+fn request_report(body: &[u8], route: u8) -> [u8; SIZE] {
     let mut msg = vec![MARKER, REQUEST];
     msg.extend((body.len() as u16).to_le_bytes());
     msg.extend_from_slice(body);
     let mut r = [0u8; SIZE];
-    r[..3].copy_from_slice(&[REPORT_OUT, msg.len() as u8, ROUTE_HEADSET]);
+    r[..3].copy_from_slice(&[REPORT_OUT, msg.len() as u8, route]);
     r[3..3 + msg.len()].copy_from_slice(&msg);
     r
 }
@@ -343,11 +357,15 @@ fn controls(spec: &Spec, sidetone_max: u8) -> Vec<SettingMeta> {
 // ── Adapter ─────────────────────────────────────────────────────────────────
 
 const POLL: Duration = Duration::from_secs(10);
-/// Audeze's app waits 50 ms before each input report read, 25 reads at most.
+/// Audeze HQ waits 50 ms (dongle) or 10 ms (headset on USB) before each input
+/// report read and gives up after about 2 s (dongle) of silence.
 const READ_GAP: Duration = Duration::from_millis(50);
-const REPLY_WAIT: Duration = Duration::from_millis(1250);
+const READ_GAP_DIRECT: Duration = Duration::from_millis(10);
+const REPLY_WAIT: Duration = Duration::from_millis(2000);
+const REPLY_WAIT_DIRECT: Duration = Duration::from_millis(1250);
 /// Reads are repeated on a timeout; writes never are.
 const READ_ATTEMPTS: u32 = 2;
+const DRAIN_MAX: usize = 16;
 
 /// The 0xFF13 collection's node, on the documented interface if several have one.
 fn find_node(spec: &Spec, pid: u16) -> Result<HidDeviceInfo> {
@@ -369,6 +387,7 @@ pub(super) fn open(spec: &'static Spec, pid: u16, ctx: &DriverCtx) -> Opened {
     info!("{} open via {}", spec.name, info.path.display());
     let mut a = MaxwellAdapter {
         spec,
+        direct: DIRECT_PIDS.contains(&pid),
         id: DeviceId {
             vendor_id: super::AUDEZE,
             product_id: pid,
@@ -409,6 +428,20 @@ fn get_input_report(file: &File, buf: &mut [u8]) -> Result<usize> {
     Ok((ret as usize).min(buf.len()))
 }
 
+/// Pop queued input reports (a late reply to an earlier request) until the
+/// chip reports nothing left.
+fn drain(link: &mut dyn Link) -> Result<()> {
+    for _ in 0..DRAIN_MAX {
+        let mut buf = [0u8; SIZE];
+        buf[0] = REPORT_IN;
+        let n = link.input(&mut buf)?;
+        if fragment(&buf[..n]).is_empty() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Report transport, so the protocol logic can be tested without hardware.
 trait Link: Send {
     fn send(&mut self, report: &[u8]) -> Result<()>;
@@ -447,6 +480,8 @@ impl Link for Dongle {
 
 struct MaxwellAdapter {
     spec: &'static Spec,
+    /// Headset on its own USB cable (no dongle): route 0, shorter read gap.
+    direct: bool,
     id: DeviceId,
     link: Option<Box<dyn Link>>,
     settings: SettingsMap,
@@ -466,11 +501,22 @@ impl MaxwellAdapter {
         attempts: u32,
         accept: impl Fn(&[u8]) -> bool,
     ) -> Result<Option<Vec<u8>>> {
-        let report = request_report(body);
+        let route = if self.direct {
+            ROUTE_DIRECT
+        } else {
+            ROUTE_HEADSET
+        };
+        let (gap, wait) = if self.direct {
+            (READ_GAP_DIRECT, REPLY_WAIT_DIRECT)
+        } else {
+            (READ_GAP, REPLY_WAIT)
+        };
+        let report = request_report(body, route);
         let link = self.link.as_deref_mut().context("not connected")?;
+        drain(link)?;
         for _ in 0..attempts {
             link.send(&report)?;
-            let deadline = Instant::now() + REPLY_WAIT;
+            let deadline = Instant::now() + wait;
             let mut stream = Vec::new();
             loop {
                 while let Some(m) = take_message(&mut stream) {
@@ -481,7 +527,7 @@ impl MaxwellAdapter {
                 if Instant::now() >= deadline {
                     break;
                 }
-                std::thread::sleep(READ_GAP);
+                std::thread::sleep(gap);
                 let mut buf = [0u8; SIZE];
                 buf[0] = REPORT_IN;
                 let n = link.input(&mut buf)?;
@@ -574,6 +620,33 @@ impl MaxwellAdapter {
         if let Some(m) = self.read_key(KEY_MIC_MUTE)? {
             // 00 while muted, FF otherwise.
             merge_setting(&mut self.settings, K::MicMute, SettingValue::Bool(m == 0));
+        }
+        if let Some(v) = self
+            .read_key(KEY_VOICE_PROMPTS)?
+            .filter(|&v| v <= VOICE_PROMPTS_MAX)
+        {
+            merge_setting(
+                &mut self.settings,
+                K::VoicePrompts,
+                SettingValue::Int(i64::from(v)),
+            );
+        }
+        if self.spec.volume_limiter {
+            // Audeze HQ reads key 0x28; the reply is taken to use the same two
+            // values as the write, anything else is left alone.
+            match self.read_key(KEY_VOLUME_LIMITER)? {
+                Some(LIMITER_ON) => merge_setting(
+                    &mut self.settings,
+                    K::VolumeLimiter,
+                    SettingValue::Bool(true),
+                ),
+                Some(LIMITER_OFF) => merge_setting(
+                    &mut self.settings,
+                    K::VolumeLimiter,
+                    SettingValue::Bool(false),
+                ),
+                _ => {}
+            }
         }
         if let Some(raw) = self.read_param(PARAM_CHATMIX)? {
             let (game, chat) = chatmix(raw);
@@ -693,7 +766,7 @@ mod tests {
 
     #[test]
     fn requests_match_headsetcontrol_framing() {
-        let r = request_report(&read_key_body(KEY_MIC_MUTE));
+        let r = request_report(&read_key_body(KEY_MIC_MUTE), ROUTE_HEADSET);
         assert_eq!(r.len(), 62);
         assert_eq!(
             r[..11],
@@ -701,8 +774,16 @@ mod tests {
         );
         assert!(r[11..].iter().all(|&b| b == 0));
         assert_eq!(
-            request_report(&write_key_body(KEY_VOLUME_LIMITER, LIMITER_ON))[..12],
+            request_report(
+                &write_key_body(KEY_VOLUME_LIMITER, LIMITER_ON),
+                ROUTE_HEADSET
+            )[..12],
             [0x06, 9, 0x80, 0x05, 0x5a, 5, 0, 0x00, 0x09, 0x28, 0x00, 0x88]
+        );
+        // A headset on USB uses route 0.
+        assert_eq!(
+            request_report(&read_key_body(KEY_MIC_MUTE), ROUTE_DIRECT)[..3],
+            [0x06, 8, 0x00]
         );
         assert_eq!(read_param_body(PARAM_CHATMIX), [0x83, 0x2c, 0x0b, 0x00]);
         // 30 min = 1800 s = 0x0708, enable flag and seconds twice.
@@ -904,6 +985,8 @@ mod tests {
                 (KEY_SIDETONE, 9),
                 (KEY_SIDETONE_MAX, 31),
                 (KEY_EQ_PRESET, 2),
+                (KEY_VOICE_PROMPTS, 5),
+                (KEY_VOLUME_LIMITER, LIMITER_OFF),
             ]
             .into(),
             params: [(PARAM_SIDETONE_ON, sidetone_on), (PARAM_CHATMIX, 10)].into(),
@@ -913,6 +996,7 @@ mod tests {
         };
         let a = MaxwellAdapter {
             spec,
+            direct: false,
             id: DeviceId {
                 vendor_id: super::super::AUDEZE,
                 product_id: spec.pids[0],
@@ -971,8 +1055,11 @@ mod tests {
             let got = |k| get_setting(&a.settings, k).cloned();
             // Sidetone read back from the headset...
             assert_eq!(got(K::MicSideTone), Some(SettingValue::Int(9)));
+            // ...so are voice prompts and the limiter (HQ reads both keys)...
+            assert_eq!(got(K::VoicePrompts), Some(SettingValue::Int(5)));
+            let limiter = !spec.volume_limiter;
+            assert_eq!(got(K::VolumeLimiter), Some(SettingValue::Bool(limiter)));
             // ...the rest have no read: the user's last value, not re-sent.
-            assert_eq!(got(K::VoicePrompts), Some(SettingValue::Int(3)));
             assert_eq!(got(K::MicNoiseFilter), Some(SettingValue::Int(2)));
             assert_eq!(got(K::PmShutdown), Some(SettingValue::Int(30)));
             assert_eq!(got(K::EqPreset), Some(SettingValue::Int(2)));
@@ -1012,6 +1099,24 @@ mod tests {
     }
 
     #[test]
+    fn a_late_reply_never_answers_the_next_request() {
+        let (mut a, sent) = headset(&MAXWELL, SettingsMap::new(), 1);
+        let mut fake = FakeHeadset {
+            keys: [(KEY_SIDETONE, 4)].into(),
+            params: Default::default(),
+            sent,
+            replies: Default::default(),
+            fail_key: None,
+        };
+        // The reply to an earlier read that timed out is still queued.
+        fake.send(&request_report(&read_key_body(KEY_SIDETONE), ROUTE_HEADSET))
+            .unwrap();
+        fake.keys.insert(KEY_SIDETONE, 9);
+        a.link = Some(Box::new(fake));
+        assert_eq!(a.read_key(KEY_SIDETONE).unwrap(), Some(9));
+    }
+
+    #[test]
     fn user_changes_are_still_written() {
         let (mut a, sent) = headset(&MAXWELL, SettingsMap::new(), 0);
         a.poll().unwrap();
@@ -1041,6 +1146,7 @@ mod tests {
                 };
                 let mut a = MaxwellAdapter {
                     spec,
+                    direct: false,
                     id: DeviceId {
                         vendor_id: super::super::AUDEZE,
                         product_id: pid,

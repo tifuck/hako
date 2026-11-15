@@ -25,8 +25,8 @@
 //! `lib/devices/corsair_void_rich.hpp`, `corsair_device.hpp`.
 
 use super::bragi::{
-    self, Link, MINUTE_MS, PROP_ANC, PROP_SIDETONE_LEVEL, PROP_SIDETONE_OFF, PROP_SLEEP_ENABLED,
-    PROP_SLEEP_TIMEOUT,
+    self, Link, MINUTE_MS, PROP_ANC, PROP_SIDETONE_LEVEL, PROP_SIDETONE_MUTED, PROP_SLEEP_ENABLED,
+    PROP_SLEEP_POWERSAVE, PROP_SLEEP_TIMEOUT,
 };
 use super::Backend;
 use crate::hid::HidrawDevice;
@@ -66,13 +66,13 @@ pub fn parse_void_status(r: &[u8]) -> Option<BatteryState> {
 /// V2 sidetone writes for `pct` (0 = off); `anc` when the headset has ANC.
 pub fn v2_sidetone(pct: u8, anc: bool) -> Vec<(u8, u32)> {
     if pct == 0 {
-        return vec![(PROP_SIDETONE_OFF, 1)];
+        return vec![(PROP_SIDETONE_MUTED, 1)];
     }
     let mut w = Vec::with_capacity(3);
     if anc {
         w.push((PROP_ANC, 0));
     }
-    w.push((PROP_SIDETONE_OFF, 0));
+    w.push((PROP_SIDETONE_MUTED, 0));
     w.push((PROP_SIDETONE_LEVEL, u32::from(pct.min(100)) * 10));
     w
 }
@@ -86,15 +86,20 @@ pub fn v2_sidetone_pct(off: u32, level: u32) -> Option<u8> {
     }
 }
 
-/// Sleep timer writes for `minutes` (0 = off).
-pub fn sleep(minutes: u32) -> Vec<(u8, u32)> {
+/// Sleep timer writes for `minutes` (0 = off). iCUE writes 0x0D, then the
+/// power-save timeout 0x37 where the device has a separate one
+/// (`powersave`: mice only), then 0x0E.
+pub fn sleep(minutes: u32, powersave: bool) -> Vec<(u8, u32)> {
     if minutes == 0 {
         return vec![(PROP_SLEEP_ENABLED, 0)];
     }
-    vec![
-        (PROP_SLEEP_ENABLED, 1),
-        (PROP_SLEEP_TIMEOUT, minutes.saturating_mul(MINUTE_MS)),
-    ]
+    let ms = minutes.saturating_mul(MINUTE_MS);
+    let mut w = vec![(PROP_SLEEP_ENABLED, 1)];
+    if powersave {
+        w.push((PROP_SLEEP_POWERSAVE, ms));
+    }
+    w.push((PROP_SLEEP_TIMEOUT, ms));
+    w
 }
 
 /// Sleep minutes (0 = off) from the stored 0x0D / 0x0E values.
@@ -183,7 +188,12 @@ impl Backend for Void {
         let deadline = Instant::now() + Duration::from_millis(500);
         let mut buf = [0u8; 64];
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            let n = self.dev.read_timeout(&mut buf, left)?;
+            let n = match self.dev.read_timeout(&mut buf, left) {
+                Ok(n) => n,
+                // A timeout is a plain message, a device error an io::Error.
+                Err(e) if e.downcast_ref::<std::io::Error>().is_some() => return Err(e),
+                Err(_) => break,
+            };
             if buf[0] == STATUS_REPORT {
                 self.mic_up = void_mic_up(&buf[..n]);
                 return Ok(Some(parse_void_status(&buf[..n]).unwrap_or_else(absent)));
@@ -242,10 +252,15 @@ impl Backend for BragiHeadset {
             None => vec![bragi::SELF | 1, bragi::SELF],
         };
         for t in order {
-            if let Ok(level) = self.level(t) {
-                self.target = Some(t);
-                let status = self.link.get(t, bragi::PROP_BATTERY_STATUS).ok();
-                return Ok(Some(bragi::battery(level, status, "Headset")));
+            match self.level(t) {
+                Ok(level) => {
+                    self.target = Some(t);
+                    let status = self.link.get(t, bragi::PROP_BATTERY_STATUS).ok();
+                    return Ok(Some(bragi::battery(level, status, "Headset")));
+                }
+                // The node itself failed (unplugged), not the headset.
+                Err(e) if e.downcast_ref::<std::io::Error>().is_some() => return Err(e),
+                Err(_) => {}
             }
         }
         // Receiver present, headset off or out of range.
@@ -317,8 +332,13 @@ mod tests {
         );
         assert_eq!(w.len(), 65);
         // setInactiveTime / setSleepTimer: 0x0d then 0x0e in ms LE32.
-        assert_eq!(sleep(15), [(0x0d, 1), (0x0e, 900_000)]);
-        assert_eq!(sleep(0), [(0x0d, 0)]);
+        assert_eq!(sleep(15, false), [(0x0d, 1), (0x0e, 900_000)]);
+        assert_eq!(sleep(0, true), [(0x0d, 0)]);
+        // iCUE FUN_1800e9840: 0x0d, then 0x37 (separate power-save mice), then 0x0e.
+        assert_eq!(
+            sleep(15, true),
+            [(0x0d, 1), (0x37, 900_000), (0x0e, 900_000)]
+        );
         let w = bragi::wire(&bragi::set(0x09, 0x0e, 90 * 60_000), true, true, 64);
         assert_eq!(
             w[..10],

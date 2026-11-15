@@ -73,6 +73,15 @@ pub(super) const FPS_PRO: Spec<Stream> = spec(
     Layout::FpsPro,
     IFACE_1,
 );
+/// HP-era PIDs from NGENUITY's `HyperXDeviceUtils` (`MS_PULSEFIRE_FPS_PRO_HP`,
+/// `MS_PULSEFIRE_RAID_HP`: interface 1, same as the Kingston ones).
+pub(super) const FPS_PRO_HP: Spec<Stream> = spec(
+    "HyperX Pulsefire FPS Pro",
+    HP,
+    &[0x0e8f],
+    Layout::FpsPro,
+    IFACE_1,
+);
 pub(super) const CORE: Spec<Stream> = spec(
     "HyperX Pulsefire Core",
     KINGSTON,
@@ -91,6 +100,13 @@ pub(super) const RAID: Spec<Stream> = spec(
     "HyperX Pulsefire Raid",
     KINGSTON,
     &[0x16e4],
+    Layout::Raid,
+    IFACE_1,
+);
+pub(super) const RAID_HP: Spec<Stream> = spec(
+    "HyperX Pulsefire Raid",
+    HP,
+    &[0x0290],
     Layout::Raid,
     IFACE_1,
 );
@@ -113,7 +129,16 @@ pub(super) const HASTE_HP: Spec<Stream> = spec(
 
 #[cfg(test)]
 pub(super) const ALL: &[&Spec<Stream>] = &[
-    &SURGE, &SURGE_HP, &FPS_PRO, &CORE, &CORE_HP, &RAID, &HASTE, &HASTE_HP,
+    &SURGE,
+    &SURGE_HP,
+    &FPS_PRO,
+    &FPS_PRO_HP,
+    &CORE,
+    &CORE_HP,
+    &RAID,
+    &RAID_HP,
+    &HASTE,
+    &HASTE_HP,
 ];
 
 pub(super) fn open(spec: &'static Spec<Stream>, pid: u16, ctx: &DriverCtx) -> Opened {

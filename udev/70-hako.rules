@@ -558,6 +558,96 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0032", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0032", TAG+="uaccess"
 
+# Razer Cobra (PID 00a2)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00a2", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00a2", TAG+="uaccess"
+
+# Razer Jugan
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0063", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0063", TAG+="uaccess"
+
+# Razer Abyssus Lite
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0074", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0074", TAG+="uaccess"
+
+# Razer Naga Classic Edition
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0093", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0093", TAG+="uaccess"
+
+# Razer Krakoff
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00dd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00dd", TAG+="uaccess"
+
+# Razer Orochi V2 (PID 00e0)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e0", TAG+="uaccess"
+
+# Razer Viper V4 Pro
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e5", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e5", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e6", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e6", TAG+="uaccess"
+
+# Razer Naga V3 Pro
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e7", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00e8", TAG+="uaccess"
+
+# Razer Basilisk V4 HyperSpeed
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00eb", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00eb", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00ea", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00ea", TAG+="uaccess"
+
+# Razer DeathAdder V4 Pro Carbon Fiber Edition
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00ef", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00ef", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00f0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="00f0", TAG+="uaccess"
+
+# Razer Huntsman Essential
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0250", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0250", TAG+="uaccess"
+
+# Razer Huntsman V3 X Tenkeyless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02b1", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02b1", TAG+="uaccess"
+
+# Razer Reclusa X Mini 65%
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02e3", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02e3", TAG+="uaccess"
+
+# Razer BlackWidow V4 Low-profile HyperSpeed
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02cc", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02cc", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02c9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02c9", TAG+="uaccess"
+
+# Razer BlackWidow V4 75% (Xbox Anniversary Edition)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02f0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02f0", TAG+="uaccess"
+
+# Razer Huntsman V3 Pro Tenkeyless 8KHz
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02d0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02d0", TAG+="uaccess"
+
+# Razer Huntsman V3 Pro Mini 8KHz
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02d1", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02d1", TAG+="uaccess"
+
+# Razer Huntsman V3 Tenkeyless 8KHz
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02e5", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02e5", TAG+="uaccess"
+
+# Razer Huntsman V3 HE Magnetic Tenkeyless 8KHz
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02ea", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02ea", TAG+="uaccess"
+
+# Razer Huntsman Signature Edition
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02d8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02d8", TAG+="uaccess"
+
 # Razer Kraken 7.1
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0501", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0506", MODE="0660", TAG+="uaccess"
@@ -582,6 +672,14 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct
 
 # Razer BlackShark V2 Pro (2023)
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0555", MODE="0660", TAG+="uaccess"
+
+# Razer Barracuda Pro
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0539", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0583", MODE="0660", TAG+="uaccess"
+
+# Razer Barracuda 2.4
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="053b", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0584", MODE="0660", TAG+="uaccess"
 
 # Logitech PRO 2 LIGHTSPEED
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="40a8", MODE="0660", TAG+="uaccess"
@@ -632,6 +730,10 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=
 # Logitech LIGHTSPEED Receiver
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c54d", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c54d", TAG+="uaccess"
+
+# Logitech LIGHTSPEED Receiver
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c54f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c54f", TAG+="uaccess"
 
 # Logitech Nano Receiver
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c52f", MODE="0660", TAG+="uaccess"
@@ -787,6 +889,54 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c08e", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c08e", TAG+="uaccess"
 
+# Logitech G302
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c07f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c07f", TAG+="uaccess"
+
+# Logitech G402
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c07e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c07e", TAG+="uaccess"
+
+# Logitech G303 Shroud Edition (wired)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c097", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c097", TAG+="uaccess"
+
+# Logitech G304 X LIGHTSPEED
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a7", TAG+="uaccess"
+
+# Logitech G305 X SUPERLIGHT
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a4", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a4", TAG+="uaccess"
+
+# Logitech G705
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c096", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c096", TAG+="uaccess"
+
+# Logitech G502 X PLUS Millennium Falcon
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c09e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c09e", TAG+="uaccess"
+
+# Logitech PRO X SUPERLIGHT 2c
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c09f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c09f", TAG+="uaccess"
+
+# Logitech PRO X SUPERLIGHT 2 DEX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a0", TAG+="uaccess"
+
+# Logitech PRO X2 SUPERSTRIKE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a8", TAG+="uaccess"
+
+# Logitech PRO X3 SUPERSTRIKE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0a9", TAG+="uaccess"
+
+# Logitech PRO X1 SUPERSTRIKE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0b7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c0b7", TAG+="uaccess"
+
 # Logitech G915 X
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c359", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c359", TAG+="uaccess"
@@ -858,6 +1008,74 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=
 # Logitech G910 Orion Spark
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c32b", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c32b", TAG+="uaccess"
+
+# Logitech G310
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c32d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c32d", TAG+="uaccess"
+
+# Logitech G410
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c330", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c330", TAG+="uaccess"
+
+# Logitech G715
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c347", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c347", TAG+="uaccess"
+
+# Logitech G713
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c348", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c348", TAG+="uaccess"
+
+# Logitech PRO X 60
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c351", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c351", TAG+="uaccess"
+
+# Logitech PRO X TKL
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c352", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c352", TAG+="uaccess"
+
+# Logitech G915 X LIGHTSPEED TKL
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c357", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c357", TAG+="uaccess"
+
+# Logitech G515 TKL
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c358", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c358", TAG+="uaccess"
+
+# Logitech G517 LIGHTSPEED TKL
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c35a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c35a", TAG+="uaccess"
+
+# Logitech G512 X 75
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c35f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c35f", TAG+="uaccess"
+
+# Logitech G512 X 98
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c360", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c360", TAG+="uaccess"
+
+# Logitech G316 X
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c361", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c361", TAG+="uaccess"
+
+# Logitech G515 RAPID TKL
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c363", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c363", TAG+="uaccess"
+
+# Logitech PRO X2 RAPID
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c364", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c364", TAG+="uaccess"
+
+# Logitech G316
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c366", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c366", TAG+="uaccess"
+
+# Logitech G316 X 75
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c36a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c36a", TAG+="uaccess"
+
+# Logitech G316 X 98
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c36b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c36b", TAG+="uaccess"
 
 # Logitech PRO X 2 LIGHTSPEED
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0af7", MODE="0660", TAG+="uaccess"
@@ -946,6 +1164,8 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct
 
 # Arctis Nova 7
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="2202", MODE="0660", TAG+="uaccess"
+
+# Arctis Nova 7 Upgrade
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="22a1", MODE="0660", TAG+="uaccess"
 
 # Arctis Nova 7 Gen 2
@@ -954,10 +1174,14 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct
 # Arctis Nova 7X
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="2206", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="22a4", MODE="0660", TAG+="uaccess"
+
+# Arctis Nova 7X Upgrade
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="22a5", MODE="0660", TAG+="uaccess"
 
 # Arctis Nova 7X White
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="2258", MODE="0660", TAG+="uaccess"
+
+# Arctis Nova 7X White Upgrade
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="22ad", MODE="0660", TAG+="uaccess"
 
 # Arctis Nova 7X Gen 2
@@ -965,6 +1189,8 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct
 
 # Arctis Nova 7P
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="220a", MODE="0660", TAG+="uaccess"
+
+# Arctis Nova 7P Upgrade
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="22a7", MODE="0660", TAG+="uaccess"
 
 # Arctis Nova 7P Gen 2
@@ -972,11 +1198,21 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct
 
 # Arctis Nova 7 Diablo IV
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="223a", MODE="0660", TAG+="uaccess"
+
+# Arctis Nova 7 Diablo IV Upgrade
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="22a9", MODE="0660", TAG+="uaccess"
 
 # Arctis Nova 7 WoW Edition
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="227a", MODE="0660", TAG+="uaccess"
+
+# Arctis Nova 7 WoW Edition Upgrade
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="22ab", MODE="0660", TAG+="uaccess"
+
+# Arctis Nova 4
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12f2", MODE="0660", TAG+="uaccess"
+
+# Arctis Nova 4X
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12f6", MODE="0660", TAG+="uaccess"
 
 # Arctis Nova 5
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="2232", MODE="0660", TAG+="uaccess"
@@ -1300,9 +1536,17 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="161c", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="161c", TAG+="uaccess"
 
+# Apex 5 (2024)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1650", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1650", TAG+="uaccess"
+
 # Apex 7
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1612", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1612", TAG+="uaccess"
+
+# Apex 7 (2024)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1652", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1652", TAG+="uaccess"
 
 # Apex 7 TKL
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1618", MODE="0660", TAG+="uaccess"
@@ -1336,6 +1580,14 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1646", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1646", TAG+="uaccess"
 
+# Apex Pro TKL (2024) Cyber
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1660", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1660", TAG+="uaccess"
+
+# Apex Pro TKL (2024) Steel
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1662", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1662", TAG+="uaccess"
+
 # Apex 9 TKL
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1634", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1634", TAG+="uaccess"
@@ -1344,9 +1596,27 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1620", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1620", TAG+="uaccess"
 
+# Apex Pro Mini
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="161e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="161e", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1624", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1624", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1626", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1626", TAG+="uaccess"
+
+# Apex Pro Mini (2024)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1648", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1648", TAG+="uaccess"
+
 # Apex M750
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="0616", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="0616", TAG+="uaccess"
+
+# Apex M750 TKL
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="0617", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="0617", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="0619", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="0619", TAG+="uaccess"
 
 # Apex (OG) / Apex Fnatic
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1202", MODE="0660", TAG+="uaccess"
@@ -1355,6 +1625,8 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=
 # Apex 350
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1206", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1206", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="120a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="120a", TAG+="uaccess"
 
 # Corsair K70 RGB MK.2
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b49", MODE="0660", TAG+="uaccess"
@@ -1408,9 +1680,49 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b3d", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b3d", TAG+="uaccess"
 
+# Corsair K70 RGB RAPIDFIRE SE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b59", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b59", TAG+="uaccess"
+
+# Corsair K70 RGB MK.2 IG
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b87", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b87", TAG+="uaccess"
+
+# Corsair K70 LUX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b36", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b36", TAG+="uaccess"
+
+# Corsair K70 RAPIDFIRE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b3a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b3a", TAG+="uaccess"
+
+# Corsair K68
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b3f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b3f", TAG+="uaccess"
+
+# Corsair K68 SE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1ba5", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1ba5", TAG+="uaccess"
+
+# Corsair K63
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b40", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b40", TAG+="uaccess"
+
+# Corsair K66
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b41", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b41", TAG+="uaccess"
+
+# Corsair STRAFE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b44", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b44", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b15", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b15", TAG+="uaccess"
+
 # Corsair M65 RGB ELITE
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b5a", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b5a", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b88", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b88", TAG+="uaccess"
 
 # Corsair M65 PRO RGB
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b2e", MODE="0660", TAG+="uaccess"
@@ -1503,6 +1815,8 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bff", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b0a", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b0a", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b09", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b09", TAG+="uaccess"
 
 # Corsair K70 CORE TKL
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b01", MODE="0660", TAG+="uaccess"
@@ -1519,6 +1833,8 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=
 # Corsair K70 PRO MINI WIRELESS
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bb6", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bb6", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bd3", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bd3", TAG+="uaccess"
 
 # Corsair K70 MAX
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bc0", MODE="0660", TAG+="uaccess"
@@ -1531,6 +1847,8 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bc3", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bcf", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bcf", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bbd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bbd", TAG+="uaccess"
 
 # Corsair K65 PRO MINI
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bd7", MODE="0660", TAG+="uaccess"
@@ -1541,8 +1859,14 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b10", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b11", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b11", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b12", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b12", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b23", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b23", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b36", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b36", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b37", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b37", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b07", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b07", TAG+="uaccess"
 
@@ -1600,6 +1924,46 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b20", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b20", TAG+="uaccess"
 
+# Corsair K60 PRO
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b83", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b83", TAG+="uaccess"
+
+# Corsair SKIFF 100
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b3d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b3d", TAG+="uaccess"
+
+# Corsair SKIFF 100 PLUS
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b3e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b3e", TAG+="uaccess"
+
+# Corsair VANGUARD 96
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b0d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b0d", TAG+="uaccess"
+
+# Corsair VANGUARD PRO 96
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b0e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b0e", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b54", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b54", TAG+="uaccess"
+
+# Corsair VANGUARD 96 WIRELESS
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b0f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b0f", TAG+="uaccess"
+
+# Corsair VANGUARD AIR 99
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b21", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b21", TAG+="uaccess"
+
+# Corsair MAKR 75
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b04", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b04", TAG+="uaccess"
+
+# Corsair MAKR PRO 75
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b1a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b1a", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b5b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b5b", TAG+="uaccess"
+
 # Corsair K57 RGB WIRELESS
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b6e", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b6e", TAG+="uaccess"
@@ -1648,13 +2012,15 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bac", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bac", TAG+="uaccess"
 
-# Corsair KATAR PRO V2
+# Corsair KATAR ELITE WIRELESS
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bba", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bba", TAG+="uaccess"
 
 # Corsair KATAR PRO WIRELESS
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b94", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b94", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bae", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bae", TAG+="uaccess"
 
 # Corsair M55 RGB PRO
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b70", MODE="0660", TAG+="uaccess"
@@ -1667,10 +2033,14 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=
 # Corsair M55 WIRELESS
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bfb", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bfb", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b1e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b1e", TAG+="uaccess"
 
 # Corsair M65 RGB ULTRA
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b9e", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b9e", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bef", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bef", TAG+="uaccess"
 
 # Corsair M65 RGB ULTRA WIRELESS
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bb5", MODE="0660", TAG+="uaccess"
@@ -1732,6 +2102,12 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bdc", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1bdc", TAG+="uaccess"
 
+# Corsair SLIPSTREAM Wireless Receiver V3
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b1b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b1b", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b3c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2b3c", TAG+="uaccess"
+
 # Corsair VOID Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b27", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="1b23", MODE="0660", TAG+="uaccess"
@@ -1764,6 +2140,19 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct
 # Corsair VOID PRO USB
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a17", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a1d", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a1f", MODE="0660", TAG+="uaccess"
+
+# Corsair VOID SURROUND
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a30", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a31", MODE="0660", TAG+="uaccess"
+
+# Corsair VOID PRO SURROUND
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a18", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a1e", MODE="0660", TAG+="uaccess"
+
+# Corsair VOID ELITE SURROUND
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a53", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a57", MODE="0660", TAG+="uaccess"
 
 # Corsair VOID ELITE USB
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a52", MODE="0660", TAG+="uaccess"
@@ -1772,39 +2161,75 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct
 # Corsair VIRTUOSO RGB Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a42", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a44", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a4a", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a4c", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a41", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a43", MODE="0660", TAG+="uaccess"
+
+# Corsair VIRTUOSO Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a67", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a5c", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a5a", MODE="0660", TAG+="uaccess"
 
 # Corsair VIRTUOSO RGB Wireless SE
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a3e", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a40", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a46", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a48", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a3d", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a3f", MODE="0660", TAG+="uaccess"
 
 # Corsair VIRTUOSO RGB Wireless XT
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a64", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a62", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a78", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a76", MODE="0660", TAG+="uaccess"
 
 # Corsair HS80 RGB Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a6b", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a69", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a73", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a71", MODE="0660", TAG+="uaccess"
+
+# Corsair HS55 Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a8f", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a8e", MODE="0660", TAG+="uaccess"
+
+# Corsair HS65 Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a92", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a91", MODE="0660", TAG+="uaccess"
+
+# Corsair HS55 CORE Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a95", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a94", MODE="0660", TAG+="uaccess"
 
 # Corsair HS80 MAX Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a97", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a0f", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a0c", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a96", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a0e", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a0b", MODE="0660", TAG+="uaccess"
+
+# Corsair HS80 V2 MAX Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a1a", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a1b", MODE="0660", TAG+="uaccess"
 
 # Corsair VOID Wireless V2
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a08", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a09", MODE="0660", TAG+="uaccess"
 
 # Corsair VOID MAX Wireless V2
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a12", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a05", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a10", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a07", MODE="0660", TAG+="uaccess"
 
 # Corsair VIRTUOSO MAX Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a02", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a03", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a00", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="2a01", MODE="0660", TAG+="uaccess"
 
 # HyperX Cloud II Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="1718", MODE="0660", TAG+="uaccess"
@@ -1820,6 +2245,8 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct
 # HyperX Cloud III Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="05b7", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0c9d", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="06b7", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0e9d", MODE="0660", TAG+="uaccess"
 
 # HyperX Cloud III S Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="06be", MODE="0660", TAG+="uaccess"
@@ -1855,15 +2282,75 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct
 # HyperX Cloud Alpha S
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16ed", MODE="0660", TAG+="uaccess"
 
+# HyperX Cloud Alpha S
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0c91", MODE="0660", TAG+="uaccess"
+
+# HyperX Cloud II Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0c8a", MODE="0660", TAG+="uaccess"
+
 # HyperX Pulsefire Haste 2 Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0f98", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0f98", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0d97", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0d97", TAG+="uaccess"
 
 # HyperX Pulsefire Saga Pro
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="06bf", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="06bf", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="04bf", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="04bf", TAG+="uaccess"
+
+# HyperX Pulsefire Haste 2
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0b97", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0b97", TAG+="uaccess"
+
+# HyperX Pulsefire Haste 2 Mini Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0da0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0da0", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0ba0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0ba0", TAG+="uaccess"
+
+# HyperX Pulsefire Haste 2 S Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0bb8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0bb8", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0ab8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0ab8", TAG+="uaccess"
+
+# HyperX Pulsefire Haste 2 Core
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="04b5", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="04b5", TAG+="uaccess"
+
+# HyperX Pulsefire Haste 2 Core Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0ab5", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0ab5", TAG+="uaccess"
+
+# HyperX Pulsefire Haste 2 Pro
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0cbd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0cbd", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0abd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0abd", TAG+="uaccess"
+
+# HyperX Pulsefire Fuse Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0fbd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0fbd", TAG+="uaccess"
+
+# HyperX Pulsefire Saga
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0ebe", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0ebe", TAG+="uaccess"
+
+# HyperX Alloy Rise
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0fa0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0fa0", TAG+="uaccess"
+
+# HyperX Alloy Rise 75
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="02a1", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="02a1", TAG+="uaccess"
+
+# HyperX Alloy Rise 75 Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="01b9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="01b9", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0eb8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0eb8", TAG+="uaccess"
 
 # HyperX Pulsefire Dart
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16e1", MODE="0660", TAG+="uaccess"
@@ -1876,6 +2363,12 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="068e", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="088e", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="088e", TAG+="uaccess"
+
+# HyperX Pulsefire Haste Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="028e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="028e", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="048e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="048e", TAG+="uaccess"
 
 # HyperX Pulsefire Haste
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="1727", MODE="0660", TAG+="uaccess"
@@ -1905,9 +2398,17 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16d7", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16d7", TAG+="uaccess"
 
+# HyperX Pulsefire FPS Pro
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0e8f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0e8f", TAG+="uaccess"
+
 # HyperX Pulsefire Raid
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16e4", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16e4", TAG+="uaccess"
+
+# HyperX Pulsefire Raid
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0290", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0290", TAG+="uaccess"
 
 # HyperX Alloy Origins
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16e5", MODE="0660", TAG+="uaccess"
@@ -2161,6 +2662,38 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18b4", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18b4", TAG+="uaccess"
 
+# ASUS ROG Gladius III Core
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1c8d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1c8d", TAG+="uaccess"
+
+# ASUS ROG Harpe II Extreme Edition 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d7a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d7a", TAG+="uaccess"
+
+# ASUS ROG Gladius IV Ace
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1db0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1db0", TAG+="uaccess"
+
+# ASUS ROG Gladius IV Ace Max
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e4e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e4e", TAG+="uaccess"
+
+# ASUS ROG Harpe II Ace Mini
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e2f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e2f", TAG+="uaccess"
+
+# ASUS ROG Harpe II Ace Mini Demon1 Edition
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e51", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e51", TAG+="uaccess"
+
+# ASUS ROG Harpe II Ace PBZ
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e4a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e4a", TAG+="uaccess"
+
+# ASUS ROG Spatha X 65K
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1dde", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1dde", TAG+="uaccess"
+
 # ASUS ROG Strix Scope
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18f8", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18f8", TAG+="uaccess"
@@ -2307,6 +2840,62 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1b3a", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1b3a", TAG+="uaccess"
 
+# ASUS ROG Azoth 96 HE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1c10", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1c10", TAG+="uaccess"
+
+# ASUS ROG Falcata
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1c2f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1c2f", TAG+="uaccess"
+
+# ASUS ROG Azoth Extreme Edition 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1da2", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1da2", TAG+="uaccess"
+
+# ASUS ROG Strix Morph 96 Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1ce8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1ce8", TAG+="uaccess"
+
+# ASUS ROG Strix Morph 96 X Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e0a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e0a", TAG+="uaccess"
+
+# ASUS ROG Strix Morph 96 Wireless PBZ
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e5b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e5b", TAG+="uaccess"
+
+# ASUS ProArt KD300
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d45", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d45", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d47", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d47", TAG+="uaccess"
+
+# ASUS TX75 Analog
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d68", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d68", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d6a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d6a", TAG+="uaccess"
+
+# ASUS ROG Falchion Ace 75 HE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1c7d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1c7d", TAG+="uaccess"
+
+# ASUS ROG Falchion Ace HFX Zywoo Edition
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d1d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d1d", TAG+="uaccess"
+
+# ASUS TX75 Core
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1df3", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1df3", TAG+="uaccess"
+
+# ASUS TUF Gaming K4 Magnetic
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1df5", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1df5", TAG+="uaccess"
+
+# ASUS TUF Gaming K4 Mechanical
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1df7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1df7", TAG+="uaccess"
+
 # ASUS ROG Pelta
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1b84", MODE="0660", TAG+="uaccess"
 
@@ -2315,6 +2904,27 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct
 
 # ASUS ROG Delta II KJP
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d41", MODE="0660", TAG+="uaccess"
+
+# ASUS ROG Pelta (cable)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1b82", MODE="0660", TAG+="uaccess"
+
+# ASUS ROG Pelta (rev. 2)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e1b", MODE="0660", TAG+="uaccess"
+
+# ASUS ROG Pelta (rev. 2, cable)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e1d", MODE="0660", TAG+="uaccess"
+
+# ASUS ROG Delta II PBZ
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1e6b", MODE="0660", TAG+="uaccess"
+
+# ASUS ROG Cetra Open Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1cac", MODE="0660", TAG+="uaccess"
+
+# ASUS ROG Cetra True Wireless II OLED
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1d18", MODE="0660", TAG+="uaccess"
+
+# ASUS ROG Delta II X
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1de5", MODE="0660", TAG+="uaccess"
 
 # ASUS ROG Omni Receiver
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1ace", MODE="0660", TAG+="uaccess"
@@ -2444,6 +3054,12 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct
 # Sony PULSE 3D
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0d5e", MODE="0660", TAG+="uaccess"
 
+# Sony INZONE Mouse-A
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0fae", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0fae", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0faf", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0faf", TAG+="uaccess"
+
 # Audeze Maxwell 2
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3329", ATTRS{idProduct}=="4b29", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3329", ATTRS{idProduct}=="4b28", MODE="0660", TAG+="uaccess"
@@ -2451,6 +3067,8 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3329", ATTRS{idProduct
 # Audeze Maxwell
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3329", ATTRS{idProduct}=="4b19", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3329", ATTRS{idProduct}=="4b18", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3329", ATTRS{idProduct}=="4b1a", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3329", ATTRS{idProduct}=="4b1e", MODE="0660", TAG+="uaccess"
 
 # Glorious Model O Wireless
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2011", MODE="0660", TAG+="uaccess"
@@ -2488,6 +3106,66 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2025", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2025", TAG+="uaccess"
 
+# Glorious Model O PRO Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2015", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2015", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2027", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2027", TAG+="uaccess"
+
+# Glorious Model D PRO Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2017", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2017", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2029", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2029", TAG+="uaccess"
+
+# Glorious Series One PRO Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2018", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2018", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2031", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2031", TAG+="uaccess"
+
+# Glorious Model O 2 PRO Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2019", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2019", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2033", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2033", TAG+="uaccess"
+
+# Glorious Model D 2 PRO Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="201a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="201a", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2034", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2034", TAG+="uaccess"
+
+# Glorious Model O 2 PRO 4k/8k Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="201b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="201b", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2035", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2035", TAG+="uaccess"
+
+# Glorious Model D 2 PRO 4k/8k Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="201c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="201c", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2036", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2036", TAG+="uaccess"
+
+# Glorious Series 2 PRO Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="201d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="201d", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2039", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="2039", TAG+="uaccess"
+
+# Glorious Model D 2 Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="093a", ATTRS{idProduct}=="824d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="093a", ATTRS{idProduct}=="824d", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="093a", ATTRS{idProduct}=="824a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="093a", ATTRS{idProduct}=="824a", TAG+="uaccess"
+
+# Glorious Model O 2 Mini Wireless
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="093a", ATTRS{idProduct}=="826d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="093a", ATTRS{idProduct}=="826d", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="093a", ATTRS{idProduct}=="826a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="093a", ATTRS{idProduct}=="826a", TAG+="uaccess"
+
 # Glorious Model O / O-
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="0036", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="0036", TAG+="uaccess"
@@ -2515,6 +3193,34 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=
 # Cooler Master MM530
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0065", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0065", TAG+="uaccess"
+
+# Cooler Master MM310
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="015f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="015f", TAG+="uaccess"
+
+# Cooler Master MM310 SF6 Chun-Li
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01ec", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01ec", TAG+="uaccess"
+
+# Cooler Master MM712 wired
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01df", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01df", TAG+="uaccess"
+
+# Cooler Master MM731
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0167", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0167", TAG+="uaccess"
+
+# Cooler Master MM712 LINE FRIENDS
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01f0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01f0", TAG+="uaccess"
+
+# Cooler Master MM710
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="012f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="012f", TAG+="uaccess"
+
+# Cooler Master MM311
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0161", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0161", TAG+="uaccess"
 
 # Cooler Master CK550 V2
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0145", MODE="0660", TAG+="uaccess"
@@ -2551,6 +3257,40 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=
 # Cooler Master SK653
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01ab", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01ab", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="015b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="015b", TAG+="uaccess"
+
+# Cooler Master SK620 Space Grey
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0157", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0157", TAG+="uaccess"
+
+# Cooler Master SK620 Silver
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0159", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0159", TAG+="uaccess"
+
+# Cooler Master SK631 Black
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="008b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="008b", TAG+="uaccess"
+
+# Cooler Master SK631 White
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0125", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0125", TAG+="uaccess"
+
+# Cooler Master SK651 Black
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0091", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0091", TAG+="uaccess"
+
+# Cooler Master SK651 White
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0127", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="0127", TAG+="uaccess"
+
+# Cooler Master CK570 SF6 Chun-Li
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01e8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="01e8", TAG+="uaccess"
+
+# Cooler Master CK720
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="016b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="016b", TAG+="uaccess"
 
 # Cooler Master MasterKeys Pro L
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2516", ATTRS{idProduct}=="003b", MODE="0660", TAG+="uaccess"
@@ -2572,7 +3312,11 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0db0", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0db0", ATTRS{idProduct}=="0d11", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="0db0", ATTRS{idProduct}=="0d11", TAG+="uaccess"
 
-# Redragon M711 Cobra
+# MSI Clutch GM11 (04d9)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="8022", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="8022", TAG+="uaccess"
+
+# Redragon M711 Cobra / M711-FPS
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc30", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc30", TAG+="uaccess"
 
@@ -2592,11 +3336,11 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc38", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc38", TAG+="uaccess"
 
-# Redragon M808 Storm
+# Redragon M808 Storm / M998-RGB
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc5f", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc5f", TAG+="uaccess"
 
-# Redragon M801 Sniper
+# Redragon M801 Sniper / M912-RGB
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc58", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc58", TAG+="uaccess"
 
@@ -2608,11 +3352,11 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc69", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc69", TAG+="uaccess"
 
-# Redragon M921 Azzinoth
+# Redragon M901 Perdition / M921 Azzinoth
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc40", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc40", TAG+="uaccess"
 
-# Redragon M711-FPS-1 Cobra FPS
+# Redragon M711 Cobra FPS (2710-G)
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc62", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc62", TAG+="uaccess"
 
@@ -2642,7 +3386,7 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc2f", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc2f", TAG+="uaccess"
 
-# Redragon M909 Emperor / M802 Titanoboa 2
+# Redragon M802 Titanoboa 2
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc42", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc42", TAG+="uaccess"
 
@@ -2657,6 +3401,74 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=
 # Redragon M910 Ranger
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc49", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc49", TAG+="uaccess"
+
+# Redragon M909-RGB Emperor
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc4c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc4c", TAG+="uaccess"
+
+# Redragon M907-RGB Inspirit 2
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc3c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc3c", TAG+="uaccess"
+
+# Redragon M701 Lavawolf
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc3e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc3e", TAG+="uaccess"
+
+# Redragon M902-RGB Samsara 2
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc3f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc3f", TAG+="uaccess"
+
+# Redragon M801 Mammoth
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc56", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc56", TAG+="uaccess"
+
+# Redragon M720-RGB Vampire
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc5d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc5d", TAG+="uaccess"
+
+# Redragon mouse 2732 (fc3b)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc3b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc3b", TAG+="uaccess"
+
+# Redragon mouse 2866 (fc60)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc60", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc60", TAG+="uaccess"
+
+# Redragon mouse 2890 (fc65)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc65", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc65", TAG+="uaccess"
+
+# Redragon mouse 2825-A (fc66)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc66", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc66", TAG+="uaccess"
+
+# Redragon mouse 2903 (fc6b)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc6b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc6b", TAG+="uaccess"
+
+# Redragon mouse 2913-A (fc6d)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc6d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc6d", TAG+="uaccess"
+
+# Redragon mouse 2928 (fc6e)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc6e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc6e", TAG+="uaccess"
+
+# Redragon mouse 2713 (fc6f)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc6f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc6f", TAG+="uaccess"
+
+# Redragon mouse 2931-A (fc70)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc70", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc70", TAG+="uaccess"
+
+# Redragon G881-B / 2935 (fc71)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc71", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc71", TAG+="uaccess"
+
+# Redragon mouse 2915 (fc75)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc75", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="fc75", TAG+="uaccess"
 
 # Wooting 60HE
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1300", MODE="0660", TAG+="uaccess"
@@ -2697,6 +3509,14 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="31e3", ATTRS{idProduct
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1401", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1402", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1402", TAG+="uaccess"
+
+# Wooting 80HE+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1410", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1410", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1411", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1411", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1412", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1412", TAG+="uaccess"
 
 # Wooting Two HE
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="31e3", ATTRS{idProduct}=="1220", MODE="0660", TAG+="uaccess"
@@ -2756,10 +3576,98 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="03eb", ATTRS{idProduct}=
 
 # Turtle Beach Stealth 700X Gen 3
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2251", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2250", MODE="0660", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2253", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth 700X Gen 3 (blue)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2267", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2266", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2269", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth 700 Gen 3 (PC)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2262", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2264", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth 700 Gen 3 (PlayStation)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2256", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="226b", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2258", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="226d", MODE="0660", TAG+="uaccess"
 
 # Turtle Beach Stealth 600 Gen 3 (PC)
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="224c", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="225a", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="224e", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="225c", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth 600 Gen 3 (PlayStation)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2238", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2242", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="223a", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2244", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth 600 Gen 3 (Xbox)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2233", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2232", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="223d", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="223c", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2235", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="223f", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2278", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth 500 (PC)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2271", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2273", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth 500 (PlayStation)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="222e", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2230", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2282", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth 500 (Xbox)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="222a", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2229", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="222c", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="227e", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth 500 (Switch 2)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22a4", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22a6", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22a8", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22a5", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22a7", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22a9", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Atlas Air (PC)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="225e", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2260", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth Pro II (PC)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2288", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2287", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22a1", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2289", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth Pro II (Xbox)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2285", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2284", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2283", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="229f", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="229d", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="229c", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="229b", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22a0", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22b1", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22b0", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22af", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2286", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="229e", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="22b2", MODE="0660", TAG+="uaccess"
+
+# Turtle Beach Stealth Pro
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2196", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2197", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="2216", MODE="0660", TAG+="uaccess"
 
 # Lamzu Atlantis / Maya
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f50f", MODE="0660", TAG+="uaccess"
@@ -2768,6 +3676,8 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f510", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f50d", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f50d", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f517", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f517", TAG+="uaccess"
 
 # VXE mouse (VXE 1K receiver)
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58a", MODE="0660", TAG+="uaccess"
@@ -2786,6 +3696,1258 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1264", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11dc", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11dc", TAG+="uaccess"
+
+# ATK Dragonfly F1 PRO
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f502", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f502", TAG+="uaccess"
+
+# Mouse 1K Dongle [f503]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f503", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f503", TAG+="uaccess"
+
+# ATK Dragonfly F1 PRO MAX / ATK Dragonfly F1 MOBA / ATK D
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f506", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f506", TAG+="uaccess"
+
+# ATK Dragonfly F1S / ATK Dragonfly Dragonfly F1S
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f50a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f50a", TAG+="uaccess"
+
+# Mouse 1K Dongle [f50b]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f50b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f50b", TAG+="uaccess"
+
+# VXE R1 PRO / VXE R1 PRO MAX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58c", TAG+="uaccess"
+
+# Mouse 4K Dongle [f58d]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58d", TAG+="uaccess"
+
+# Mouse 1K Dongle [f58e]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58e", TAG+="uaccess"
+
+# VXE R1 / VXE R1SE / VXE R1SE+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58f", TAG+="uaccess"
+
+# VXE Mouse 1K Dongle [fb12]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb12", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb12", TAG+="uaccess"
+
+# ATK F1 PRO
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1014", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1014", TAG+="uaccess"
+
+# ATK F1 PRO MAX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1015", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1015", TAG+="uaccess"
+
+# ATK X1 PRO
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1016", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1016", TAG+="uaccess"
+
+# ATK X1 PRO MAX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1017", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1017", TAG+="uaccess"
+
+# ATK Z1 PRO
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1018", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1018", TAG+="uaccess"
+
+# ATK Z1 PRO MAX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1019", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1019", TAG+="uaccess"
+
+# ATK Mouse 1K Dongle [101a]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="101a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="101a", TAG+="uaccess"
+
+# ATK Mouse 8K Dongle [101b]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="101b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="101b", TAG+="uaccess"
+
+# ATK F1 Ultimate
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="102e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="102e", TAG+="uaccess"
+
+# ATK X1 Ultra
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="102f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="102f", TAG+="uaccess"
+
+# ATK FIERCE X
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1030", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1030", TAG+="uaccess"
+
+# ATK 8K Dongle Light Version [1031]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1031", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1031", TAG+="uaccess"
+
+# ATK F1 Ultra
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="103c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="103c", TAG+="uaccess"
+
+# ATK X1 Ultimate
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="103d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="103d", TAG+="uaccess"
+
+# MAD R MAJOR
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="103e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="103e", TAG+="uaccess"
+
+# MAD R
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="103f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="103f", TAG+="uaccess"
+
+# ATK F1 EXTREME
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1045", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1045", TAG+="uaccess"
+
+# ATK Z1 Ultra
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="104a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="104a", TAG+="uaccess"
+
+# MAD R +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="104b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="104b", TAG+="uaccess"
+
+# MAD R MAJOR+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="104c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="104c", TAG+="uaccess"
+
+# MAD 1K Dongle [104d]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="104d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="104d", TAG+="uaccess"
+
+# ATK F1 LEVIATAN
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="105b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="105b", TAG+="uaccess"
+
+# VXE R1 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1065", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1065", TAG+="uaccess"
+
+# VXE R1 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1066", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1066", TAG+="uaccess"
+
+# R1 NK [1067]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1067", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1067", TAG+="uaccess"
+
+# R1 NK [1068]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1068", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1068", TAG+="uaccess"
+
+# R1 NK [1069]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1069", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1069", TAG+="uaccess"
+
+# R1 NK [106a]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="106a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="106a", TAG+="uaccess"
+
+# VXE R1S+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1084", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1084", TAG+="uaccess"
+
+# Wireless mouse 1k dongle [1085]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1085", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1085", TAG+="uaccess"
+
+# ATK U2 MINI
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1086", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1086", TAG+="uaccess"
+
+# ATK U2 Ultimate
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1087", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1087", TAG+="uaccess"
+
+# ATK U2 Ultra
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10ac", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10ac", TAG+="uaccess"
+
+# VXE R1 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10c7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10c7", TAG+="uaccess"
+
+# VXE R1 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10c8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10c8", TAG+="uaccess"
+
+# NK Mouse Dongle [10c9]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10c9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10c9", TAG+="uaccess"
+
+# R1 NK [10ca]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10ca", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10ca", TAG+="uaccess"
+
+# R1 NK [10cb]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10cb", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10cb", TAG+="uaccess"
+
+# R1 NK [10cc]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10cc", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10cc", TAG+="uaccess"
+
+# VXE V3 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10e7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10e7", TAG+="uaccess"
+
+# VXE V3 PRO NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10e8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10e8", TAG+="uaccess"
+
+# ATK X1 EXTREME
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10e9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10e9", TAG+="uaccess"
+
+# ATK Y9 PRO MAX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10fd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="10fd", TAG+="uaccess"
+
+# ATK X1 S NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1106", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1106", TAG+="uaccess"
+
+# ATK X1 SE NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1107", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1107", TAG+="uaccess"
+
+# ATK U2 Plus NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="110d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="110d", TAG+="uaccess"
+
+# ATK U2 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="110e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="110e", TAG+="uaccess"
+
+# ATK A9 Plus NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1115", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1115", TAG+="uaccess"
+
+# ATK A9 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1116", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1116", TAG+="uaccess"
+
+# ATK A9 Pro Max
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1117", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1117", TAG+="uaccess"
+
+# ATK A9 Ultra
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1119", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1119", TAG+="uaccess"
+
+# Wireless mouse -8K NANO dongle [111a]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="111a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="111a", TAG+="uaccess"
+
+# Wireless mouse -8K NANO dongle [111b]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="111b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="111b", TAG+="uaccess"
+
+# ATK A9 SE NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1135", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1135", TAG+="uaccess"
+
+# ATK X1 Lite
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="113e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="113e", TAG+="uaccess"
+
+# ATK X1E
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="113f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="113f", TAG+="uaccess"
+
+# ATK U2 SE NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1149", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1149", TAG+="uaccess"
+
+# DRAGONFLY F1 V2 Plus NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="114a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="114a", TAG+="uaccess"
+
+# DRAGONFLY F1 V2 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="114b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="114b", TAG+="uaccess"
+
+# DRAGONFLY F1 V2 SE NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="114c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="114c", TAG+="uaccess"
+
+# ATK ZERO
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1154", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1154", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-L1 [1155]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1155", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1155", TAG+="uaccess"
+
+# ATK A9
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1157", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1157", TAG+="uaccess"
+
+# ATK U2 Pro Max
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1158", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1158", TAG+="uaccess"
+
+# ATK 8K Dongle Light Version [1159]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1159", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1159", TAG+="uaccess"
+
+# ATK Y9 Plus NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="115b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="115b", TAG+="uaccess"
+
+# ATK Y9 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="115c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="115c", TAG+="uaccess"
+
+# ATK Y9 SE NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="115d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="115d", TAG+="uaccess"
+
+# Wireless mouse 8k dongle [115e]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="115e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="115e", TAG+="uaccess"
+
+# ATK A9 X
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11a0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11a0", TAG+="uaccess"
+
+# ATK Duckbill Ultra
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11a6", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11a6", TAG+="uaccess"
+
+# ATK Mouse 8K Dongle [11a7]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11a7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11a7", TAG+="uaccess"
+
+# Wireless mouse 4k dongle [11a9]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11a9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11a9", TAG+="uaccess"
+
+# ATK U2
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11aa", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11aa", TAG+="uaccess"
+
+# DRAGONFLY F1 V2 PRO MAX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11ab", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11ab", TAG+="uaccess"
+
+# Flow 7 [11b3]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11b3", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11b3", TAG+="uaccess"
+
+# ATK A9 Ultimate
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11b6", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11b6", TAG+="uaccess"
+
+# Wireless mouse -8K TypeC dongle [11c8]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11c8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11c8", TAG+="uaccess"
+
+# ATK ZERO EX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11cc", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11cc", TAG+="uaccess"
+
+# Wireless mouse -8K TypeC dongle [11cd]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11cd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11cd", TAG+="uaccess"
+
+# Wireless mouse-8K NANO dongle [11ce]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11ce", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11ce", TAG+="uaccess"
+
+# ATK Y9 Ultimate
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11cf", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11cf", TAG+="uaccess"
+
+# VXE R1 UlTRA
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11d2", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11d2", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-H [11d8]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11d8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11d8", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-L [11d9]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11d9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11d9", TAG+="uaccess"
+
+# ATK A9 Pro Max 2.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11db", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11db", TAG+="uaccess"
+
+# ATK A9 Ultra Max 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11dd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11dd", TAG+="uaccess"
+
+# ATK F1 EXTREME 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11e3", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11e3", TAG+="uaccess"
+
+# ATK F1 Ultimate 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11e4", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11e4", TAG+="uaccess"
+
+# ATK X1 EXTREME 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11e5", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11e5", TAG+="uaccess"
+
+# ATK X1 Ultimate 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11e7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11e7", TAG+="uaccess"
+
+# ATK X1 Ultra Max 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11ec", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11ec", TAG+="uaccess"
+
+# ATK F1 Ultra Max 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11ed", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11ed", TAG+="uaccess"
+
+# ATK F1 LEVIATAN 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f0", TAG+="uaccess"
+
+# ATK A9 Ultra Max 2.0 Tri-Mode
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f2", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f2", TAG+="uaccess"
+
+# ATK A9 NB ULTRA
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f3", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f3", TAG+="uaccess"
+
+# Wireless mouse -8K TOWER dongle [11f4]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f4", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f4", TAG+="uaccess"
+
+# ATK U2 Ultimate 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f5", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f5", TAG+="uaccess"
+
+# ATK U2 Mini 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f6", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f6", TAG+="uaccess"
+
+# ATK U2 Ultra Max 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f7", TAG+="uaccess"
+
+# VXE R1 Ultra
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11f9", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-L [11fd]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11fd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11fd", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-L [11fe]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11fe", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="11fe", TAG+="uaccess"
+
+# ATK Z1 Ultimate 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1201", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1201", TAG+="uaccess"
+
+# ATK A9 Air
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="120a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="120a", TAG+="uaccess"
+
+# ATK X1 EXTREME GT
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="120b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="120b", TAG+="uaccess"
+
+# ATK Ghost EXTREME
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="120d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="120d", TAG+="uaccess"
+
+# ATK Ghost Ultimate
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="120e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="120e", TAG+="uaccess"
+
+# ATK A9 Ultimate 3.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1211", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1211", TAG+="uaccess"
+
+# VXE V3 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1213", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1213", TAG+="uaccess"
+
+# VXE V3 PRO NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1214", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1214", TAG+="uaccess"
+
+# VXE V3 Plus
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1215", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1215", TAG+="uaccess"
+
+# NK mouse NANO dongle [1216]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1216", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1216", TAG+="uaccess"
+
+# VXE R1 S NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="121f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="121f", TAG+="uaccess"
+
+# ATK A9 SE NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1222", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1222", TAG+="uaccess"
+
+# ATK A9 2.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1223", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1223", TAG+="uaccess"
+
+# ATK A9 Plus NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1224", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1224", TAG+="uaccess"
+
+# ATK Duckbill EXTREME
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1230", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1230", TAG+="uaccess"
+
+# ATK Ghost Ultimate
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="123a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="123a", TAG+="uaccess"
+
+# ATK A9 NB
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1245", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1245", TAG+="uaccess"
+
+# Wireless mouse -1K TOWER dongle [1246]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1246", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1246", TAG+="uaccess"
+
+# VXE X3
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1248", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1248", TAG+="uaccess"
+
+# VXE X3 Pro
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1249", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1249", TAG+="uaccess"
+
+# VXE X3 Turbo
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124a", TAG+="uaccess"
+
+# VXE R1 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124c", TAG+="uaccess"
+
+# VXE R1 S NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124d", TAG+="uaccess"
+
+# ATK ZERO
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124e", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-L0 [124f]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="124f", TAG+="uaccess"
+
+# ATK A9 Mini +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1251", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1251", TAG+="uaccess"
+
+# ATK A9 Mini
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1256", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1256", TAG+="uaccess"
+
+# ATK A9 Mini
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="125a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="125a", TAG+="uaccess"
+
+# ATK A9 Plus NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1263", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1263", TAG+="uaccess"
+
+# ATK PHANTOM EXTREME
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1266", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1266", TAG+="uaccess"
+
+# ATK A9 Mini
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1268", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1268", TAG+="uaccess"
+
+# ATK A9 Mini +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1269", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1269", TAG+="uaccess"
+
+# ATK U2 Plus NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="126c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="126c", TAG+="uaccess"
+
+# ATK U2 Pro Max
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="126d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="126d", TAG+="uaccess"
+
+# ATK F1 Ultra Max 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="126e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="126e", TAG+="uaccess"
+
+# ATK A9 Ultra Max 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="126f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="126f", TAG+="uaccess"
+
+# ATK A9 Ultra Max 2.0 Tri-Mode
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1270", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1270", TAG+="uaccess"
+
+# VXE R1
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1271", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1271", TAG+="uaccess"
+
+# VXE R1 PRO
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1272", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1272", TAG+="uaccess"
+
+# VXE R1 PRO MAX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1273", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1273", TAG+="uaccess"
+
+# ATK X1 Ultra Max 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1274", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1274", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-L [1278]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1278", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1278", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-L [1279]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1279", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1279", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-L [127a]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127a", TAG+="uaccess"
+
+# VXE V3 PRO Max
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127b", TAG+="uaccess"
+
+# ATK X1 Air +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127c", TAG+="uaccess"
+
+# ATK A9 Ultimate +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127e", TAG+="uaccess"
+
+# ATK A9 Air +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="127f", TAG+="uaccess"
+
+# ATK X1 EXTREME 2.0 +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1285", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1285", TAG+="uaccess"
+
+# ATK X1 Ultimate 2.0 +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1286", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1286", TAG+="uaccess"
+
+# ATK A9 Ultimate +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1287", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1287", TAG+="uaccess"
+
+# ATK A9 Air +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1288", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1288", TAG+="uaccess"
+
+# ATK ZERO EX +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1289", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1289", TAG+="uaccess"
+
+# ATK Ghost EXTREME +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128a", TAG+="uaccess"
+
+# ATK Ghost Ultimate +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128b", TAG+="uaccess"
+
+# ATK U2 Ultimate 2.0 +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128c", TAG+="uaccess"
+
+# ATK U2 Mini 2.0 +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128d", TAG+="uaccess"
+
+# ATK A9 Mini +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128e", TAG+="uaccess"
+
+# ATK A9 Ultra Max 2.0 +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="128f", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-M1 [1290]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1290", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1290", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-M1 [1291]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1291", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1291", TAG+="uaccess"
+
+# ATK A9 Ultimate +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1292", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1292", TAG+="uaccess"
+
+# ATK A9 Air +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1293", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1293", TAG+="uaccess"
+
+# ATK PHANTOM ULTIMATE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1296", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1296", TAG+="uaccess"
+
+# ATK X1 SE Nearlink
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1299", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1299", TAG+="uaccess"
+
+# VXE R1 PRO MAX 2.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129a", TAG+="uaccess"
+
+# ATK F1 V3 EXTREME +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129b", TAG+="uaccess"
+
+# ATK F1 Ultimate 2.0 +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129c", TAG+="uaccess"
+
+# ATK F1 V3 LEVIATAN +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129d", TAG+="uaccess"
+
+# ATK ZERO +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="129e", TAG+="uaccess"
+
+# ATK X1 Air +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a2", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a2", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a3", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a3", TAG+="uaccess"
+
+# ATK F1 V3 ULTIMATE +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a7", TAG+="uaccess"
+
+# ATK F1 V3 ULTIMATE +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a8", TAG+="uaccess"
+
+# ATK F1 V3 ULTIMATE +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12a9", TAG+="uaccess"
+
+# ATK A9 NB ULTRA +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ab", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ab", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-L / ATK Y9 Ultimate + [12af]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12af", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12af", TAG+="uaccess"
+
+# ATK Z1 Ultimate 2.0 +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12b0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12b0", TAG+="uaccess"
+
+# VXE R2 SE NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12b1", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12b1", TAG+="uaccess"
+
+# ATK A9 Ultimate Silent
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12b3", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12b3", TAG+="uaccess"
+
+# ATK X1 Ultimate 2.0 Silent
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12b4", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12b4", TAG+="uaccess"
+
+# VXE R1SE+ Silent
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12bf", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12bf", TAG+="uaccess"
+
+# ATK A9 Wireless Charging
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12c6", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12c6", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-H [12cc]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12cc", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12cc", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-M1 [12cd]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12cd", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12cd", TAG+="uaccess"
+
+# ATK PHANTOM ULTIMATE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ce", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ce", TAG+="uaccess"
+
+# ATK A9 NB ULTRA
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d0", TAG+="uaccess"
+
+# Wireless mouse -8K TOWER dongle [12d1]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d1", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d1", TAG+="uaccess"
+
+# VXE V3 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d2", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d2", TAG+="uaccess"
+
+# Flow 7
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d7", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d8", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d8", TAG+="uaccess"
+
+# ATK X1 ULTIMATE 2.0+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12d9", TAG+="uaccess"
+
+# ATK Wireless Charging dongle [12da]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12da", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12da", TAG+="uaccess"
+
+# VXE R1 SE+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12dc", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12dc", TAG+="uaccess"
+
+# ATK X1 Ultra Max 2.0 + Tri-Mode
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12de", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12de", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12e1", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12e1", TAG+="uaccess"
+
+# ATK U2 Plus NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12e3", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12e3", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-M [12e9]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12e9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12e9", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-G [12ea]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ea", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ea", TAG+="uaccess"
+
+# ATK X1 Air+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ec", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ec", TAG+="uaccess"
+
+# ATK A9 Ultimate +
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12f1", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12f1", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-M1 [12f5]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12f5", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12f5", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12f7", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12f7", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12f9", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12f9", TAG+="uaccess"
+
+# ATK F1 V3 ULTIMATE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12fa", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12fa", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12fb", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12fb", TAG+="uaccess"
+
+# ATK X1 Ultra Max 2.0
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ff", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="12ff", TAG+="uaccess"
+
+# ATK A9 Plus NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1300", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1300", TAG+="uaccess"
+
+# ATK A9 Pro Max 2.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1301", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1301", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-O [1302]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1302", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1302", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-M [1303]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1303", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1303", TAG+="uaccess"
+
+# ATK F1 V3 ULTIMATE+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1304", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1304", TAG+="uaccess"
+
+# ATK A9 3.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1305", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1305", TAG+="uaccess"
+
+# VXE V3 PRO NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1306", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1306", TAG+="uaccess"
+
+# ATK F1 V3 ULTRA MAX
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1307", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1307", TAG+="uaccess"
+
+# ATK F1 V3 ULTIMATE+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1308", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1308", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="130b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="130b", TAG+="uaccess"
+
+# ATK X1 SE NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="130e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="130e", TAG+="uaccess"
+
+# ATK A9 SE 3.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="130f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="130f", TAG+="uaccess"
+
+# VXE R1 S NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1310", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1310", TAG+="uaccess"
+
+# VXE R1 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1311", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1311", TAG+="uaccess"
+
+# ATK PHANTOM ULTIMATE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1312", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1312", TAG+="uaccess"
+
+# ATK A9 Ultimate
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1314", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1314", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-M1 [1315]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1315", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1315", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1316", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1316", TAG+="uaccess"
+
+# ATK X1 S NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="131a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="131a", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1324", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1324", TAG+="uaccess"
+
+# ATK F1 V3 PIKACHU Edition
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="132a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="132a", TAG+="uaccess"
+
+# MAD R
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="132b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="132b", TAG+="uaccess"
+
+# ATK ZERO + GENGAR EDITION
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1331", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1331", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-G [1332]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1332", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1332", TAG+="uaccess"
+
+# ATK A9 Plus 3.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1337", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1337", TAG+="uaccess"
+
+# ATK A9 Pro Max 3.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1338", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1338", TAG+="uaccess"
+
+# ATK A9 Mini SPRIGATITO Edition
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133b", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133c", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133d", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-A1 [133e]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133e", TAG+="uaccess"
+
+# NK mouse NANO dongle [133f]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="133f", TAG+="uaccess"
+
+# ATK A9 MAG
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1340", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1340", TAG+="uaccess"
+
+# ATK X1 MAG
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1341", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1341", TAG+="uaccess"
+
+# ATK Wireless Charging-S dongle [1342]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1342", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1342", TAG+="uaccess"
+
+# ATK A9 Air
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1343", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1343", TAG+="uaccess"
+
+# ATK F1 V3 ULTIMATE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1344", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1344", TAG+="uaccess"
+
+# ATK F1 V3 ULTIMATE+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1345", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1345", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-M1 [1346]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1346", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1346", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-M1 [1347]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1347", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1347", TAG+="uaccess"
+
+# Wireless mouse 8k NANO dongle-M1 [1348]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1348", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1348", TAG+="uaccess"
+
+# Wireless mouse 8k dongle [134b]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134b", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134c", TAG+="uaccess"
+
+# ATK A9 SE 3.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134d", TAG+="uaccess"
+
+# ATK A9 3.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134e", TAG+="uaccess"
+
+# ATK A9 Plus 3.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="134f", TAG+="uaccess"
+
+# ATK A9 Pro Max 3.0 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1350", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1350", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1357", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1357", TAG+="uaccess"
+
+# VXE R1SE+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1358", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1358", TAG+="uaccess"
+
+# VXE R1SE+ Silent
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1359", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1359", TAG+="uaccess"
+
+# VXE R1 S NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="135b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="135b", TAG+="uaccess"
+
+# VXE R1 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="135c", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="135c", TAG+="uaccess"
+
+# VXE V3 NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="135d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="135d", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="135e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="135e", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1363", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1363", TAG+="uaccess"
+
+# VXE V3 Silent NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1366", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1366", TAG+="uaccess"
+
+# VXE V3 Pro Silent NK
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1367", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1367", TAG+="uaccess"
+
+# VXE R1 SE+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1368", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1368", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1369", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1369", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1371", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1371", TAG+="uaccess"
+
+# Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1374", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1374", TAG+="uaccess"
+
+# Wireless mouse 8k dongle-O [1375]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1375", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1375", TAG+="uaccess"
+
+# VGN F1 SE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f511", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f511", TAG+="uaccess"
+
+# VGN Y2 Ultra
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb3d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb3d", TAG+="uaccess"
+
+# VGN Y2 Ultra [fb3e]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb3e", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb3e", TAG+="uaccess"
+
+# VGN USB Receiver [fb49]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb49", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb49", TAG+="uaccess"
+
+# UFO Pro [fb4a]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb4a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb4a", TAG+="uaccess"
+
+# UFO Ultra [fb4b]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb4b", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb4b", TAG+="uaccess"
+
+# VGN F1 SE [fb50]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb50", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb50", TAG+="uaccess"
+
+# VGN F1 SE
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb51", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb51", TAG+="uaccess"
+
+# VGN Y2 Master [fb52]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb52", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb52", TAG+="uaccess"
+
+# VGN Y2 Master
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb53", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb53", TAG+="uaccess"
+
+# VGN Y2 Pro Max [fb54]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb54", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb54", TAG+="uaccess"
+
+# VGN Y2 Pro Max
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb55", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb55", TAG+="uaccess"
+
+# VGN F2 Master [fb56]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb56", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb56", TAG+="uaccess"
+
+# VGN F2 Master
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb57", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb57", TAG+="uaccess"
+
+# VGN USB Receiver [fb58]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb58", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb58", TAG+="uaccess"
+
+# Dragonfly 3 Master
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb59", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fb59", TAG+="uaccess"
+
+# Dragonfly 3 Master
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1005", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1005", TAG+="uaccess"
+
+# Dragonfly 3 MasterGT [101d]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="101d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="101d", TAG+="uaccess"
+
+# Dragonfly F2 MasterGT [102d]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="102d", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="102d", TAG+="uaccess"
+
+# Dragonfly F2 MasterGT [1032]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1032", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1032", TAG+="uaccess"
+
+# Dragonfly Y2 V2 MasterGT [1034]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1034", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1034", TAG+="uaccess"
+
+# Dragonfly F2 Turbo [1035]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1035", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1035", TAG+="uaccess"
+
+# Dragonfly F2 Turbo+ [1036]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1036", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1036", TAG+="uaccess"
+
+# Dragonfly F1 V2 SE+ [1038]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1038", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1038", TAG+="uaccess"
+
+# Dragonfly 3 MINI SE+ [1039]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1039", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1039", TAG+="uaccess"
+
+# VGN USB Receiver [1a05]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a05", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a05", TAG+="uaccess"
+
+# Dragonfly 3 MasterGT [1a1a]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a1a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a1a", TAG+="uaccess"
+
+# Dragonfly Y2 V2 MasterGT [1a2f]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a2f", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a2f", TAG+="uaccess"
+
+# Dragonfly F2 Turbo [1a30]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a30", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a30", TAG+="uaccess"
+
+# Dragonfly F2 Turbo+ [1a31]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a31", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a31", TAG+="uaccess"
+
+# Dragonfly F1 V2 SE+ [1a32]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a32", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a32", TAG+="uaccess"
+
+# Dragonfly 3 MINI SE+ [1a33]
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a33", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="391d", ATTRS{idProduct}=="1a33", TAG+="uaccess"
 
 # Pulsar Xlite Wired
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="1401", MODE="0660", TAG+="uaccess"
@@ -2844,6 +5006,140 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5504", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7507", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7507", TAG+="uaccess"
+
+# Pulsar Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3415", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3415", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3501", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3501", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3502", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3502", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3503", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3503", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3504", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3504", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3505", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3505", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3506", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3506", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3507", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3507", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3508", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3508", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3509", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3509", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3510", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3510", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3511", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3511", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3512", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3512", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3513", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3513", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3514", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3514", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3515", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3515", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3516", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3516", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3517", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3517", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3518", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3518", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3519", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3519", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3524", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3524", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3525", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3525", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3526", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3526", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3528", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3528", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3529", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3529", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3601", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3601", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3603", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3603", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3604", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3604", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3605", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3605", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3606", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3606", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3607", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3607", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3608", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3608", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3609", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3609", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3610", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3610", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3611", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3611", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3612", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3612", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3613", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3613", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3614", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3614", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3615", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3615", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3618", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3618", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3619", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="3619", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7501", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7501", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7502", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7502", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7503", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7503", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7504", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7504", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7505", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7505", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7506", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7506", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7508", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7508", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7509", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7509", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7510", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7510", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7601", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7601", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7602", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7602", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7603", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7603", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7604", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7604", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7605", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="7605", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="9502", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="9502", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="9503", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="9503", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="9601", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="9601", TAG+="uaccess"
+
+# Pulsar Wireless Mouse
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5407", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5407", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5501", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5501", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5502", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5502", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5601", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5601", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5603", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3710", ATTRS{idProduct}=="5603", TAG+="uaccess"
+
+# Pulsar Mouse (Nordic)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f40a", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f40a", TAG+="uaccess"
 
 # Pulsar Wireless (Nordic)
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f507", MODE="0660", TAG+="uaccess"

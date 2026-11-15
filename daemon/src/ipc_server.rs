@@ -34,6 +34,9 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Connections served at once; more are refused until one closes.
 /// ponytail: one cap for all of the user's clients, not per client.
 const MAX_CLIENTS: usize = 64;
+/// A request connection that sends nothing for this long is closed, so
+/// leaked ones cannot take every slot (the UI polls every 2 s).
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Bind the daemon socket, owner-only. Refuses to replace a socket another
 /// daemon still answers on; a stale file from a crashed daemon is removed.
@@ -94,6 +97,7 @@ pub async fn serve(listener: UnixListener, hub: Arc<DaemonHub>) -> Result<()> {
                 warn!("{MAX_CLIENTS} IPC clients connected; refusing more");
             }
             full = true;
+            tokio::spawn(refuse(stream));
             continue;
         };
         full = false;
@@ -107,6 +111,19 @@ pub async fn serve(listener: UnixListener, hub: Arc<DaemonHub>) -> Result<()> {
     }
 }
 
+/// Answer a connection over the limit with a `busy` error, not a bare close.
+/// Its request is read first: closed before it sends it, the client would
+/// only see a broken pipe.
+async fn refuse(mut stream: UnixStream) {
+    let id = match tokio::time::timeout(PUSH_TIMEOUT, read_json_frame(&mut stream)).await {
+        Ok(Ok(v)) => v.get("id").cloned().unwrap_or_default(),
+        _ => serde_json::Value::Null,
+    };
+    let msg = format!("hakod serves {MAX_CLIENTS} connections at once; try again later");
+    let resp = IpcResponse::err(id, "busy", msg);
+    let _ = push(write_json_frame(&mut stream, &resp), PUSH_TIMEOUT).await;
+}
+
 /// Clients can inject keystrokes (macros), so only our own user may connect.
 fn peer_allowed(cred: &std::io::Result<UCred>, uid: u32) -> bool {
     matches!(cred, Ok(c) if c.uid() == uid)
@@ -114,7 +131,7 @@ fn peer_allowed(cred: &std::io::Result<UCred>, uid: u32) -> bool {
 
 async fn handle_client(mut stream: UnixStream, hub: Arc<DaemonHub>) -> Result<()> {
     let mut captures = Vec::new();
-    let result = serve_requests(&mut stream, &hub, &mut captures).await;
+    let result = serve_requests(&mut stream, &hub, &mut captures, IDLE_TIMEOUT).await;
     // Listening must not outlive the client that asked for it (UI closed or
     // crashed mid-capture): input would stay ungrabbed and, for a recording,
     // every keyboard would keep being read.
@@ -125,14 +142,20 @@ async fn handle_client(mut stream: UnixStream, hub: Arc<DaemonHub>) -> Result<()
 }
 
 /// Request loop of one connection. `captures` tracks the device and session
-/// of the latest capture this connection started on each device.
+/// of the latest capture this connection started on each device. Ends when
+/// no request comes for `idle`.
 async fn serve_requests(
     stream: &mut UnixStream,
     hub: &DaemonHub,
     captures: &mut Vec<(DeviceId, u64)>,
+    idle: Duration,
 ) -> Result<()> {
     loop {
-        let v = match read_json_frame(stream).await {
+        let Ok(read) = tokio::time::timeout(idle, read_json_frame(stream)).await else {
+            info!("IPC client idle for {} s; closed", idle.as_secs());
+            break;
+        };
+        let v = match read {
             Ok(v) => v,
             Err(e) => {
                 // A bad frame gets an answer before the close.
@@ -480,6 +503,37 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("a connection task outlived its client");
+    }
+
+    /// An idle request connection is closed; one over the limit is told why.
+    #[tokio::test]
+    async fn idle_connections_close_and_refused_ones_get_an_answer() {
+        let hub = crate::hub::tests::hub("ipc-idle");
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let idle = Duration::from_millis(100);
+        let mut captures = Vec::new();
+        let served = serve_requests(&mut server, &hub, &mut captures, idle);
+        assert!(tokio::time::timeout(Duration::from_secs(5), served)
+            .await
+            .is_ok_and(|r| r.is_ok()));
+        drop(server);
+        let mut rest = Vec::new();
+        assert_eq!(client.read_to_end(&mut rest).await.unwrap(), 0);
+        crate::hub::tests::close(hub);
+
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let refused = tokio::spawn(refuse(server));
+        let ping = IpcRequest {
+            id: serde_json::json!(9),
+            method: Method::Ping,
+            params: serde_json::Value::Null,
+        };
+        write_json_frame(&mut client, &ping).await.unwrap();
+        let v = tokio::time::timeout(Duration::from_secs(5), read_json_frame(&mut client)).await;
+        let resp: IpcResponse = serde_json::from_value(v.unwrap().unwrap()).unwrap();
+        assert_eq!(resp.id, serde_json::json!(9));
+        assert_eq!(resp.error.unwrap().code, "busy");
+        refused.await.unwrap();
     }
 
     #[tokio::test]

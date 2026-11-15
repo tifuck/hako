@@ -19,6 +19,13 @@ ICONDIR="$HOME/.local/share/icons/hicolor/256x256/apps"
 LIBDIR="$HOME/.local/lib/hako"
 mkdir -p "$HOME/.local/bin" "$LIBDIR" "$HOME/.config/systemd/user" "$HOME/.local/share/applications" "$ICONDIR"
 
+# Before the binaries, so a failure here leaves the previous ones running.
+install -m 644 "$ROOT/packaging/systemd/hakod.service" "$HOME/.config/systemd/user/hakod.service"
+install -m 644 "$ROOT/packaging/hako.desktop" "$HOME/.local/share/applications/hako.desktop"
+install -m 644 "$ROOT/client/assets/icon.png" "$ICONDIR/hako.png"
+gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+
 # hakod's effects library (it looks in ../lib/hako) and both binaries are
 # staged next to their targets, then renamed into place, the library first:
 # running mixer strips keep the old file mapped, and no new hakod runs without
@@ -52,11 +59,6 @@ for f in "${FILES[@]}"; do
   fi
   replaced+=("$f")
 done
-install -m 644 "$ROOT/packaging/systemd/hakod.service" "$HOME/.config/systemd/user/hakod.service"
-install -m 644 "$ROOT/packaging/hako.desktop" "$HOME/.local/share/applications/hako.desktop"
-install -m 644 "$ROOT/client/assets/icon.png" "$ICONDIR/hako.png"
-gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
-update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 if [ -z "${HAKO_SKIP_UDEV:-}" ]; then
   echo "Installing udev rules (needs sudo)…"

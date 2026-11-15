@@ -139,7 +139,7 @@ impl Transport {
         let deadline = Instant::now() + REPLY_TIMEOUT;
         let mut buf = [0u8; PACKET + 1];
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            let Ok(n) = self.dev.read_timeout(&mut buf, left) else {
+            let Some(n) = read_reply(&mut self.dev, &mut buf, left)? else {
                 break;
             };
             match unframe(self.report_id, &buf[..n]) {
@@ -161,7 +161,7 @@ impl Transport {
         let deadline = Instant::now() + REPLY_TIMEOUT;
         let mut buf = [0u8; PACKET + 1];
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            let Ok(n) = self.dev.read_timeout(&mut buf, left) else {
+            let Some(n) = read_reply(&mut self.dev, &mut buf, left)? else {
                 break;
             };
             let Some(resp) = unframe(self.report_id, &buf[..n]) else {
@@ -190,7 +190,7 @@ impl Transport {
         let deadline = Instant::now() + Duration::from_millis(20);
         let mut buf = [0u8; PACKET + 1];
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            let Ok(n) = self.dev.read_timeout(&mut buf, left) else {
+            let Some(n) = read_reply(&mut self.dev, &mut buf, left)? else {
                 break;
             };
             match unframe(self.report_id, &buf[..n]).map(|resp| classify(&req, &resp)) {
@@ -207,6 +207,17 @@ impl Transport {
     }
 }
 
+/// One input report, or `None` on timeout; a real I/O error (unplugged,
+/// EIO) is returned, not taken for a missing reply.
+fn read_reply(dev: &mut HidrawDevice, buf: &mut [u8], left: Duration) -> Result<Option<usize>> {
+    match dev.read_timeout(buf, left) {
+        Ok(n) => Ok(Some(n)),
+        // `read_timeout` fails with an I/O error, or a plain one on timeout.
+        Err(e) if e.downcast_ref::<std::io::Error>().is_none() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 // ── Mice ────────────────────────────────────────────────────────────────────
 
 /// `12 00`: current profile and DPI stage.
@@ -218,6 +229,40 @@ pub const GET_PROFILE: &[u8] = &[0x12, 0x00];
 pub const MOUSE_SAVE: &[u8] = &[0x50, 0x03];
 /// `12 07`: battery, auto-off and low-battery threshold.
 pub const GET_BATTERY: &[u8] = &[0x12, 0x07];
+/// Pushed by the mouse's event collection (usage page 0xFFC1) as
+/// `12 08 <kind> 00 <data>`, with or without a leading report id.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MouseEvent {
+    /// DPI button pressed; payload is the new stage, 0-based.
+    DpiButton(u8),
+    /// A stage's DPI changed (`12 08 05`): stage 0-based, then X and Y wire values.
+    DpiChanged(u8),
+    /// The mouse woke (`true`) or went to sleep (`12 08 02`).
+    Awake(bool),
+}
+
+pub fn parse_event(raw: &[u8]) -> Option<MouseEvent> {
+    let r = match raw {
+        [0x12, ..] => raw,
+        [_, 0x12, ..] => &raw[1..],
+        _ => return None,
+    };
+    if r.len() < 5 || r[1] != 0x08 || r[3] != 0x00 {
+        return None;
+    }
+    match r[2] {
+        0x00 => Some(MouseEvent::DpiButton(r[4])),
+        0x05 => Some(MouseEvent::DpiChanged(r[4])),
+        0x02 => Some(MouseEvent::Awake(r[4] == 1)),
+        _ => None,
+    }
+}
+
+/// One pending input report, or `None` when the node has nothing queued.
+pub fn poll_report(dev: &mut HidrawDevice, buf: &mut [u8]) -> Result<Option<usize>> {
+    read_reply(dev, buf, Duration::from_millis(1))
+}
+
 /// `12 06`: lift-off distance.
 pub const GET_LOD: &[u8] = &[0x12, 0x06];
 /// `12 04 03`: DPI stage colours, 3 bytes per stage from byte 4.
@@ -234,13 +279,10 @@ pub fn get_settings(xy: bool) -> [u8; 3] {
 
 /// Active DPI stage (1-based) from `12 00`: byte 11, as libratbag
 /// `results[9]` and G-Helper `ParseDPIProfile`. TUF M3 Gen II counts from 0.
-pub fn parse_stage(resp: &Packet, stages: u8, zero_based: bool) -> u8 {
+/// `None` if the byte names no stage of this mouse.
+pub fn parse_stage(resp: &Packet, stages: u8, zero_based: bool) -> Option<u8> {
     let s = resp[11].saturating_add(u8::from(zero_based));
-    if (1..=stages).contains(&s) {
-        s
-    } else {
-        1
-    }
+    (1..=stages).contains(&s).then_some(s)
 }
 
 /// DPI of `stage` (1-based). Stages are u16 LE from byte 4 (2 bytes each, or
@@ -515,6 +557,14 @@ pub const HS_LINK: &[u8] = &[0x12, 0x00, 0x00, 0x01];
 pub const HS_CHARGING: &[u8] = &[0x12, 0x08];
 /// `12 03`: effect, brightness, R, G, B from byte 4.
 pub const HS_LIGHTING: &[u8] = &[0x12, 0x03];
+/// `51 10 00 00 <on>`: lighting switch (read back with `12 13`, byte 4 != 0 =
+/// on). ASUS's own software switches the lights off this way when the
+/// brightness is set to 0 and back on when an effect is chosen (Gear Link,
+/// Pelta page: `lightingStatus` key 0x13 read / 0x10 write).
+pub fn hs_led_switch(on: bool) -> [u8; 5] {
+    [0x51, 0x10, 0x00, 0x00, u8::from(on)]
+}
+
 /// `12 24`: sidetone on (byte 4); `12 19`: sidetone level (byte 4).
 pub const HS_SIDETONE_ON: &[u8] = &[0x12, 0x24];
 pub const HS_SIDETONE_LEVEL: &[u8] = &[0x12, 0x19];
@@ -675,10 +725,14 @@ mod tests {
 
         let mut p = [0u8; PACKET];
         p[11] = 2;
-        assert_eq!(parse_stage(&p, 4, false), 2);
-        assert_eq!(parse_stage(&p, 4, true), 3);
+        assert_eq!(parse_stage(&p, 4, false), Some(2));
+        assert_eq!(parse_stage(&p, 4, true), Some(3));
+        // Out of range: no stage, never a silent stage 1.
         p[11] = 0;
-        assert_eq!(parse_stage(&p, 4, false), 1);
+        assert_eq!(parse_stage(&p, 4, false), None);
+        p[11] = 4;
+        assert_eq!(parse_stage(&p, 4, true), None);
+        assert_eq!(parse_stage(&p, 2, false), None);
 
         let mut c = [0u8; PACKET];
         c[7..10].copy_from_slice(&[1, 2, 3]);
@@ -933,5 +987,33 @@ mod tests {
         let r = unframe(0, &[0x12, 0x01, 0, 0, 0, 77, 0, 0, 1, 0, 55]).unwrap();
         assert_eq!(kb_battery(&r, 5), (77, true));
         assert_eq!(kb_battery(&r, 10), (55, true));
+    }
+
+    #[test]
+    fn mouse_events_and_headset_switch() {
+        // Gear Link `12 08 00 00 <stage>`, 0-based; with or without a report id.
+        assert_eq!(
+            parse_event(&[0x12, 0x08, 0x00, 0x00, 0x02]),
+            Some(MouseEvent::DpiButton(2))
+        );
+        assert_eq!(
+            parse_event(&[0x05, 0x12, 0x08, 0x05, 0x00, 0x01, 0x0f, 0x00, 0x0f, 0x00]),
+            Some(MouseEvent::DpiChanged(1))
+        );
+        assert_eq!(
+            parse_event(&[0x12, 0x08, 0x02, 0x00, 0x01]),
+            Some(MouseEvent::Awake(true))
+        );
+        assert_eq!(
+            parse_event(&[0x12, 0x08, 0x02, 0x00, 0x00]),
+            Some(MouseEvent::Awake(false))
+        );
+        // Other kinds, replies and noise are ignored.
+        assert_eq!(parse_event(&[0x12, 0x08, 0x06, 0x00, 0x03]), None);
+        assert_eq!(parse_event(&[0x12, 0x00, 0x00, 0x00, 0x00]), None);
+        assert_eq!(parse_event(&[0x01, 0x02, 0x03]), None);
+        // `51 10 00 00 <on>`: ASUS switches the lights off at brightness 0.
+        assert_eq!(hs_led_switch(true), [0x51, 0x10, 0x00, 0x00, 0x01]);
+        assert_eq!(hs_led_switch(false), [0x51, 0x10, 0x00, 0x00, 0x00]);
     }
 }

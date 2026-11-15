@@ -59,6 +59,7 @@ const EID_MIC_ATTACHED: u8 = 0x8f;
 
 const VOLUME_MAX: u8 = 30;
 const SIDETONE_MAX: u8 = 10;
+const AUTO_OFF_LAST_DEFAULT: u8 = 5;
 /// Auto power off choices in minutes (HeadsetControl, OpenInzone's H9 table).
 const OFF_MINUTES: [u8; 6] = [0, 5, 15, 30, 60, 180];
 
@@ -184,6 +185,9 @@ enum Reading {
     Buds([Option<u8>; 3]),
     /// The 4-byte ambient sound block (mode, level, percent, voice focus).
     Ambient([u8; 4]),
+    /// H9 II auto-off "last setting time": the non-zero value restored when
+    /// auto-off is switched back on.
+    AutoOffLast(u8),
     Setting(K, SettingValue),
 }
 
@@ -221,6 +225,9 @@ fn decode(spec: &Spec, eid: u8, p: &[u8]) -> Vec<Reading> {
         }
         // A "removed" flag: 1 with the boom mic unplugged.
         (EID_MIC_ATTACHED, [r @ (0 | 1), ..]) => vec![flag(K::MicAttached, *r == 0)],
+        (EID_AUTO_OFF, [m, last, ..]) if OFF_MINUTES.contains(m) && OFF_MINUTES.contains(last) => {
+            vec![int(K::PmShutdown, *m), AutoOffLast(*last)]
+        }
         (EID_AUTO_OFF, [m, ..]) if OFF_MINUTES.contains(m) => vec![int(K::PmShutdown, *m)],
         (EID_GUIDANCE, [b @ (0 | 1), ..]) => vec![flag(K::VoicePrompts, *b == 1)],
         (EID_BT_STARTUP, [b @ (0 | 1), ..]) => vec![flag(K::BluetoothOnPower, *b == 1)],
@@ -258,7 +265,9 @@ fn set_payload(key: K, value: &SettingValue, ambient: Option<[u8; 4]>) -> Result
         K::NoiseCancellingButton => (EID_NC_TOGGLE, vec![n & 1, n >> 1 & 1, n >> 2 & 1]),
         K::VoicePrompts => (EID_GUIDANCE, vec![b]),
         K::BluetoothOnPower => (EID_BT_STARTUP, vec![b]),
-        // The H9 II takes the minutes twice (HeadsetControl `h9ii_format`).
+        // The H9 II takes [minutes, last setting time] (INZONE Hub); the
+        // second byte is the minutes again unless auto-off is being switched
+        // off, which `InzoneAdapter::write` handles.
         K::PmShutdown => (EID_AUTO_OFF, vec![n, n]),
         _ => bail!("unsupported setting {}", key.as_str()),
     })
@@ -387,6 +396,7 @@ pub(super) fn open(spec: &'static Spec, pid: u16, ctx: &DriverCtx) -> Opened {
             })
             .collect(),
         ambient: None,
+        auto_off_last: AUTO_OFF_LAST_DEFAULT,
         online: false,
         last_poll: None,
         failures: 0,
@@ -424,6 +434,8 @@ struct InzoneAdapter {
     settings: SettingsMap,
     batteries: Vec<BatteryState>,
     ambient: Option<[u8; 4]>,
+    /// Last non-zero auto-off minutes (the headset's "last setting time").
+    auto_off_last: u8,
     online: bool,
     last_poll: Option<Instant>,
     failures: u8,
@@ -476,6 +488,8 @@ impl InzoneAdapter {
                     }
                 }
                 Reading::Ambient(block) => self.ambient = Some(block),
+                Reading::AutoOffLast(m) if m > 0 => self.auto_off_last = m,
+                Reading::AutoOffLast(_) => {}
                 Reading::Setting(k, v) => merge_setting(&mut self.settings, k, v),
             }
         }
@@ -515,7 +529,14 @@ impl InzoneAdapter {
             self.ambient = None;
             self.request(EID_AMBIENT, GET, &[])?;
         }
-        let (eid, payload) = set_payload(key, value, self.ambient)?;
+        let (eid, mut payload) = set_payload(key, value, self.ambient)?;
+        if key == K::PmShutdown {
+            // Switching off keeps the previous non-zero time as the last setting.
+            if payload[0] > 0 {
+                self.auto_off_last = payload[0];
+            }
+            payload[1] = self.auto_off_last;
+        }
         if self.request(eid, SET, &payload)?.is_none() {
             bail!("headset did not acknowledge {}", key.as_str());
         }
@@ -782,6 +803,13 @@ mod tests {
             vec![Setting(K::NoiseCancellingButton, SettingValue::Int(6))]
         );
         assert!(decode(&H9_II, EID_AUTO_OFF, &[7]).is_empty());
+        assert_eq!(
+            decode(&H9_II, EID_AUTO_OFF, &[0, 30]),
+            vec![
+                Setting(K::PmShutdown, SettingValue::Int(0)),
+                AutoOffLast(30)
+            ]
+        );
     }
 
     #[test]
@@ -884,7 +912,7 @@ mod tests {
             (EID_MIC_ATTACHED, vec![0]),
             (EID_NC_STARTUP, vec![3]),
             (EID_GUIDANCE, vec![0]),
-            (EID_AUTO_OFF, vec![5]),
+            (EID_AUTO_OFF, vec![5, 30]),
         ]
         .into();
         let sent = Sent::default();
@@ -909,6 +937,7 @@ mod tests {
                 present: false,
             }],
             ambient: None,
+            auto_off_last: AUTO_OFF_LAST_DEFAULT,
             online: false,
             last_poll: None,
             failures: 0,
@@ -944,6 +973,18 @@ mod tests {
             sent.lock().unwrap().last(),
             Some(&(EID_GUIDANCE, SET, vec![1]))
         );
+        // Auto-off: the second byte is the last non-zero time the headset
+        // reported; switching off keeps it, switching on updates it.
+        a.set(K::PmShutdown, SettingValue::Int(0)).unwrap();
+        assert_eq!(
+            sent.lock().unwrap().last(),
+            Some(&(EID_AUTO_OFF, SET, vec![0, 30]))
+        );
+        a.set(K::PmShutdown, SettingValue::Int(15)).unwrap();
+        assert_eq!(
+            sent.lock().unwrap().last(),
+            Some(&(EID_AUTO_OFF, SET, vec![15, 15]))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -976,6 +1017,7 @@ mod tests {
                 present: true,
             }],
             ambient: None,
+            auto_off_last: AUTO_OFF_LAST_DEFAULT,
             online: true,
             last_poll: None,
             failures: 0,
@@ -1024,6 +1066,7 @@ mod tests {
                     3
                 ],
                 ambient: None,
+                auto_off_last: AUTO_OFF_LAST_DEFAULT,
                 online: true,
                 last_poll: None,
                 failures: 0,

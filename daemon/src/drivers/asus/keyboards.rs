@@ -85,6 +85,47 @@ const fn kb(name: &'static str, pids: &'static [u16], speed: [u8; 3]) -> Keyboar
     }
 }
 
+/// Gear Link is the only source for these boards' `50 55`, and it cannot be
+/// read back: CONTRIBUTING asks for a second source before it is offered.
+const GL_SAVE: Option<&str> = Some("only ASUS Gear Link saves on this board (no second source)");
+
+/// A Gear Link board with a wireless mode reached through the Omni receiver.
+macro_rules! gl_omni {
+    ($name:expr, $cable:expr, $wireless:expr) => {
+        KeyboardSpec {
+            iface: None,
+            battery: BAT,
+            save_blocked: GL_SAVE,
+            omni: &[$wireless],
+            ..kb($name, &[$cable], G255)
+        }
+    };
+}
+
+/// A Gear Link board whose wireless mode has a PID of its own (`RF_MODE`).
+macro_rules! gl_rf {
+    ($name:expr, $cable:expr, $rf:expr) => {
+        KeyboardSpec {
+            iface: None,
+            battery: BAT,
+            save_blocked: GL_SAVE,
+            no_battery: &[$cable],
+            ..kb($name, &[$cable, $rf], G255)
+        }
+    };
+}
+
+/// A wired-only Gear Link board.
+macro_rules! gl_wired {
+    ($name:expr, $cable:expr) => {
+        KeyboardSpec {
+            iface: None,
+            save_blocked: GL_SAVE,
+            ..kb($name, &[$cable], G255)
+        }
+    };
+}
+
 pub const KEYBOARDS: &[KeyboardSpec] = &[
     kb("ASUS ROG Strix Scope", &[0x18f8], S255),
     kb("ASUS ROG Strix Scope TKL", &[0x190c], S255),
@@ -200,6 +241,32 @@ pub const KEYBOARDS: &[KeyboardSpec] = &[
     kb("ASUS TUF Gaming K7", &[0x18aa], S15),
     // [G TX98 (TUF K3 Gen II class: mi_01)]
     kb("ASUS TX 98", &[0x1b3a], G12),
+    // The boards below come from ASUS Gear Link's PID table (control usage
+    // page 0xFF00, `12 01` battery, `51 2C` lighting and `50 55` save as on
+    // the Azoth line); speed bytes follow the Azoth / Falchion Ace G255 set.
+    // Each lists the cable PID, then the wireless PID: the one the Omni
+    // receiver reports, or (`RF_MODE` boards) the board's own dongle PID. Their analog-trigger extras are not driven.
+    // [GL m901 Azoth 96 HE / Lite]
+    gl_omni!("ASUS ROG Azoth 96 HE", 0x1c10, 0x1c12),
+    // [GL m703]
+    gl_omni!("ASUS ROG Falcata", 0x1c2f, 0x1c31),
+    // [GL m709]
+    gl_omni!("ASUS ROG Azoth Extreme Edition 2.0", 0x1da2, 0x1da4),
+    // [GL x903 / x904 / x906]
+    gl_omni!("ASUS ROG Strix Morph 96 Wireless", 0x1ce8, 0x1cea),
+    gl_omni!("ASUS ROG Strix Morph 96 X Wireless", 0x1e0a, 0x1e0c),
+    gl_omni!("ASUS ROG Strix Morph 96 Wireless PBZ", 0x1e5b, 0x1e5d),
+    // [GL kd300 ProArt KD300: USB / RF]
+    gl_rf!("ASUS ProArt KD300", 0x1d45, 0x1d47),
+    // [GL r701 TX75 Analog: USB / RF]
+    gl_rf!("ASUS TX75 Analog", 0x1d68, 0x1d6a),
+    // Wired only.
+    // [GL m705, m606, r702, r704, r703]
+    gl_wired!("ASUS ROG Falchion Ace 75 HE", 0x1c7d),
+    gl_wired!("ASUS ROG Falchion Ace HFX Zywoo Edition", 0x1d1d),
+    gl_wired!("ASUS TX75 Core", 0x1df3),
+    gl_wired!("ASUS TUF Gaming K4 Magnetic", 0x1df5),
+    gl_wired!("ASUS TUF Gaming K4 Mechanical", 0x1df7),
 ];
 
 pub fn find(pid: u16) -> Option<&'static KeyboardSpec> {
@@ -490,6 +557,8 @@ mod tests {
         // Strix Scope RX: OpenRGB and G-Helper both send 50 55.
         let scope = save(0x1951);
         assert!(scope.persistent && scope.blocked.is_none());
+        // Gear Link boards: one source only.
+        assert!(save(0x1c10).blocked.is_some());
         let claymore = save(0x196b);
         assert!(claymore.persistent && claymore.blocked.is_some());
         assert!(claymore.validate(&SettingValue::Bool(true)).is_err());

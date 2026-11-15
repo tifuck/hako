@@ -41,9 +41,36 @@ use crate::hid::{enumerate_hidraw, find_hidraw, HidDeviceInfo, HidrawDevice};
 use anyhow::{anyhow, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
-use hako_core::device::{DeviceId, DeviceKind, DeviceSnapshot};
-use std::time::Duration;
+use hako_core::device::{BatteryState, DeviceId, DeviceKind, DeviceSnapshot};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+/// How often a wireless keyboard's link and battery are read.
+const LINK_POLL: Duration = Duration::from_secs(3);
+const LINK_REPLY: Duration = Duration::from_millis(200);
+/// Status reads in a row without any answer before the dongle counts as not
+/// answering them.
+const LINK_MISSES: u8 = 3;
+/// Echo of a dongle answer that could not reach the keyboard.
+const DONGLE_UNREACHED: u8 = 0x40;
+
+/// `00 bc` answer: `[bc] [connected 0|1]`; `None` = another report.
+fn parse_link(r: &[u8]) -> Option<bool> {
+    (r.len() >= 2 && r[0] == 0xbc).then(|| r[1] == 1)
+}
+
+/// Dongle battery answer `[0xd2] [status]` (`0x40 | 0x92` tunnelled): bits
+/// 0-6 level 2..21 (percent = 5 * (level - 1)), bit 7 charging. `None` for
+/// another report or an unreachable keyboard (`0x40` echo).
+fn parse_battery(r: &[u8]) -> Option<(u8, bool)> {
+    if r.len() < 2 || r[0] != 0xd2 {
+        return None;
+    }
+    let level = i16::from(r[1] & 0x7f) - 1;
+    (0..=20)
+        .contains(&level)
+        .then_some(((level * 5) as u8, r[1] & 0x80 != 0))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Gen {
@@ -340,6 +367,11 @@ pub struct KeyboardAdapter {
     settings: SettingsMap,
     last_error: Option<String>,
     paths: ConfigPaths,
+    /// 2.4 GHz dongle: last `bc` link state and battery, when read.
+    linked: Option<bool>,
+    battery: BatteryState,
+    last_link_poll: Instant,
+    link_misses: u8,
 }
 
 impl KeyboardAdapter {
@@ -357,13 +389,14 @@ impl KeyboardAdapter {
             KbProto::PerKey {
                 gen, fw_gen3: true, ..
             } => {
+                let version = |r: &[u8]| parse_version(r.strip_prefix(&[0x90]).unwrap_or(r));
                 let v = request(
                     &mut dev,
                     &pad(&[0x00, 0x90], 65),
-                    |_| true,
+                    |r| version(r).is_some(),
                     Duration::from_millis(100),
                 )?
-                .and_then(|r| parse_version(r.strip_prefix(&[0x90]).unwrap_or(&r)));
+                .and_then(|r| version(&r));
                 if v >= Some((1, 19, 7)) {
                     Gen::Three
                 } else {
@@ -399,6 +432,15 @@ impl KeyboardAdapter {
             settings,
             last_error: None,
             paths,
+            linked: None,
+            battery: BatteryState {
+                label: "Keyboard".into(),
+                percent: None,
+                charging: false,
+                present: false,
+            },
+            last_link_poll: Instant::now(),
+            link_misses: 0,
         };
         // Leave onboard lighting and actuation alone until the user sets them.
         let mut restore = Vec::new();
@@ -427,6 +469,71 @@ impl KeyboardAdapter {
             a.gen
         );
         Ok(a)
+    }
+
+    /// Re-send the stored lighting after a keyboard that slept woke up: the
+    /// dongle forgets direct mode with it, and GG re-runs its init and
+    /// redeploys the config on the same `0 -> 1` link change.
+    fn relight(&mut self) {
+        if !LIGHT_DEFAULTS
+            .iter()
+            .any(|&(k, _)| get_setting(&self.settings, k).is_some())
+        {
+            return;
+        }
+        self.initialized = false;
+        let mut s = self.settings.clone();
+        light_defaults(&mut s);
+        if let Err(e) = self.apply(&s, SettingKey::Brightness) {
+            warn!("{} re-light after wake: {e}", self.name);
+            self.last_error = Some(e.to_string());
+        } else {
+            self.last_error = None;
+        }
+    }
+
+    /// Dongle link state (`00 bc`) and battery (`00 d2`). A keyboard that
+    /// went from asleep to awake gets its lighting back.
+    fn poll_link(&mut self) -> Result<()> {
+        self.last_link_poll = Instant::now();
+        let dev = self.dev.as_mut().context("no device")?;
+        let link = request(
+            dev,
+            &pad(&[0x00, 0xbc], 65),
+            |r| parse_link(r).is_some(),
+            LINK_REPLY,
+        )?
+        .and_then(|r| parse_link(&r));
+        let Some(now) = link else {
+            self.link_misses = self.link_misses.saturating_add(1);
+            return Ok(());
+        };
+        self.link_misses = 0;
+        let was = self.linked.replace(now);
+        if now {
+            let dev = self.dev.as_mut().context("no device")?;
+            let b = request(
+                dev,
+                &pad(&[0x00, 0xd2], 65),
+                |r| parse_battery(r).is_some() || r.first() == Some(&DONGLE_UNREACHED),
+                LINK_REPLY,
+            )?
+            .and_then(|r| parse_battery(&r));
+            self.battery.percent = b.map(|(p, _)| p);
+            self.battery.charging = b.is_some_and(|(_, c)| c);
+            self.battery.present = b.is_some();
+        } else {
+            self.battery = BatteryState {
+                percent: None,
+                charging: false,
+                present: false,
+                ..self.battery.clone()
+            };
+        }
+        if now && was == Some(false) {
+            self.relight();
+        }
+        Ok(())
     }
 
     /// Put `key` from `s` on the board; lighting keys resend all lighting.
@@ -500,7 +607,11 @@ impl DeviceAdapter for KeyboardAdapter {
             kind: DeviceKind::Keyboard,
             name: self.name.into(),
             connected: self.dev.is_some(),
-            batteries: vec![],
+            batteries: if self.wireless {
+                vec![self.battery.clone()]
+            } else {
+                vec![]
+            },
             settings: self.settings.clone(),
             controls: controls(self.actuation.is_some(), save_blocked(self.spec)),
             last_error: self.last_error.clone(),
@@ -543,6 +654,13 @@ impl DeviceAdapter for KeyboardAdapter {
     }
 
     fn tick(&mut self) -> Result<()> {
+        if self.wireless
+            && self.dev.is_some()
+            && self.link_misses < LINK_MISSES
+            && self.last_link_poll.elapsed() >= LINK_POLL
+        {
+            self.poll_link()?;
+        }
         Ok(())
     }
 
@@ -676,6 +794,23 @@ mod tests {
             [SettingKey::ColorR, SettingKey::ColorG, SettingKey::ColorB].map(get),
             [Some(0), Some(120), Some(7)]
         );
+    }
+
+    #[test]
+    fn dongle_link_and_battery_answers() {
+        assert_eq!(parse_link(&[0xbc, 1]), Some(true));
+        assert_eq!(parse_link(&[0xbc, 0]), Some(false));
+        assert_eq!(parse_link(&[0x92, 1]), None);
+        assert_eq!(parse_link(&[0xbc]), None);
+        // level 2..21 -> 5 * (level - 1) %, bit 7 charging.
+        assert_eq!(parse_battery(&[0xd2, 21]), Some((100, false)));
+        assert_eq!(parse_battery(&[0xd2, 0x80 | 11]), Some((50, true)));
+        assert_eq!(parse_battery(&[0xd2, 1]), Some((0, false)));
+        assert_eq!(parse_battery(&[0xd2, 0]), None);
+        assert_eq!(parse_battery(&[0xd2, 22]), None);
+        // The dongle's "keyboard unreachable" echo, and other reports.
+        assert_eq!(parse_battery(&[0x40, 21]), None);
+        assert_eq!(parse_battery(&[0xbc, 1]), None);
     }
 
     #[test]

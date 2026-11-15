@@ -12,8 +12,13 @@
 //!   `target_slots`, tested on the Haste 2 Wireless) and Saga Control
 //!   (`protocol.py` `build_dpi_packet` / `save_rgb_profile`, Saga Pro) agree on
 //!   both; both slots are read and checked first and slot 1 is read back after.
-//!   Lift-off and lighting presets are not saved: the sources disagree on the
-//!   lift-off slot and the preset save is untested (docs/onboard-writes/hyperx.md).
+//!   NGENUITY's Save also sends the lift-off sensor packet to slot 1 on the
+//!   Haste 2 Wireless (saved the same way) but only to the live slot on the
+//!   Saga Pro (not saved); lighting presets are never written by NGENUITY and
+//!   stay live (docs/onboard-writes/hyperx.md). NGENUITY waits for the `ff`
+//!   ack of every packet: the first one decides, status 1 means send again
+//!   (three times at most); a mouse's `fb 0a` / `53 01` link flag re-applies
+//!   everything after a wake.
 //!   DPI stages 1-5 and the active stage are fields of the same live table
 //!   (`[5]` enabled-stage mask, `[6]` active stage, 0-based; universal.md
 //!   §3.3); changing them only writes slot 0.
@@ -21,9 +26,10 @@
 //!   RGB RGB <brightness> <speed>`; `d0` polling rate and the `51` heartbeat
 //!   (battery) from the santeri3700 notes and PlasmaNGenuity; DPI stages
 //!   `d3 02 <stage> 02 <DPI/50 u16 LE>` and active stage `d3 00 00 01 <stage>`
-//!   from the same notes and their `ngenuity_initialization_2` capture. Volatile until a
-//!   `de ff` save, which only one line of reverse engineering documents: shown
-//!   as a blocked placeholder, never sent.
+//!   from the same notes and their `ngenuity_initialization_2` capture; the
+//!   enabled-stage mask `d3 01 00 01 <mask>` and the `ff 03` status report
+//!   (stage, charging, link, reset) from NGENUITY. Volatile until a `de ff`
+//!   save, which NGENUITY sends too (always `ff`): an owner opt-in.
 //!
 //! Surge, FPS Pro, Core, Raid and the original Haste stream their lighting:
 //! see `pulsefire.rs`.
@@ -44,25 +50,110 @@ use tracing::{info, warn};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Family {
     Universal {
-        /// Per PID: vendor interface, and whether it is the cable (always linked).
-        links: &'static [(u16, u32, bool)],
-        /// How many [`RATE_CODES`] the mouse offers over its dongle.
-        rates: usize,
-        /// The `42 02` firmware presets (only tested on the Haste 2 Wireless).
-        presets: bool,
+        links: &'static [Link],
+        caps: Caps,
     },
-    Dart,
+    /// Pulsefire Dart and its relatives (`d2` lighting, `d0` rate, `51` heartbeat).
+    Dart {
+        /// DPI stages (`d3`); the Haste Wireless takes raw register values.
+        dpi: bool,
+        /// Per-LED ids for the static, breathing and reactive modes.
+        leds: &'static [u8],
+        /// Interface of the cable PID (the dongle is interface 2).
+        cable_iface: u32,
+    },
 }
 
-/// Dongle 03f0:0f98, vendor interface 2 (usage page ff00).
+const DART_LEDS: &[u8] = &[DART_LED_SCROLL, DART_LED_LOGO];
+
+/// One PID of a universal-protocol mouse: its vendor interface, whether it is
+/// the cable (always linked) and how many [`RATE_CODES`] it offers over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Link {
+    pid: u16,
+    iface: u32,
+    cabled: bool,
+    rates: usize,
+}
+
+const fn link(pid: u16, iface: u32, cabled: bool, rates: usize) -> Link {
+    Link {
+        pid,
+        iface,
+        cabled,
+        rates,
+    }
+}
+
+/// Per-model features of a universal-protocol mouse (NGENUITY's
+/// `NGenuity2.Devices.Universals.Mouses` classes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Caps {
+    kind: DeviceKind,
+    /// DPI table, report rate (mice); keyboards only have brightness.
+    dpi: bool,
+    /// Answers `50 02` (battery).
+    battery: bool,
+    /// The `42 02` firmware presets (only tested on the Haste 2 Wireless).
+    presets: bool,
+    /// Highest DPI (lowest is 200).
+    max_dpi: u32,
+    /// Lift-off distance setting (`36 01`).
+    lift: bool,
+    /// NGENUITY's Save copies lift-off to the onboard slot (Haste 2 Wireless
+    /// only; the Saga Pro's save sends it to the live slot).
+    save_lift: bool,
+}
+
+const HASTE_2_WIRELESS_CAPS: Caps = Caps {
+    presets: true,
+    save_lift: true,
+    ..STANDARD
+};
+
+/// What most models share: 200-26000 DPI, lift-off, brightness only.
+const STANDARD: Caps = Caps {
+    kind: DeviceKind::Mouse,
+    dpi: true,
+    battery: true,
+    presets: false,
+    max_dpi: 26000,
+    lift: true,
+    save_lift: false,
+};
+
+/// NGENUITY's universal keyboards (Alloy Rise family): the same report space,
+/// with brightness (`40 01`) as the one control hako can set; their lighting
+/// is per-key frame uploads that are not documented here. Rise and Rise 75 are
+/// cable-only (no battery); the Rise 75 Wireless has a dongle and a cable PID.
+const KEYBOARD: Caps = Caps {
+    kind: DeviceKind::Keyboard,
+    dpi: false,
+    battery: false,
+    presets: false,
+    max_dpi: 0,
+    lift: false,
+    save_lift: false,
+};
+const KEYBOARD_WIRELESS: Caps = Caps {
+    battery: true,
+    ..KEYBOARD
+};
+
+/// Rates over a cable or a dongle: [`RATE_CODES`] up to 1000, 4000 or 8000 Hz.
+const R1K: usize = 4;
+const R4K: usize = 6;
+const R8K: usize = 7;
+
+/// Dongle 03f0:0f98, vendor interface 2 (usage page ff00); cable 0d97 (NGENUITY
+/// `HyperXDeviceUtils`).
 pub(super) const HASTE_2_WIRELESS: Spec<Family> = Spec {
     name: "HyperX Pulsefire Haste 2 Wireless",
     vid: HP,
-    pids: &[0x0f98],
+    pids: &[0x0f98, 0x0d97],
     family: Family::Universal {
-        links: &[(0x0f98, 2, false)],
-        rates: 4,
-        presets: true,
+        links: &[link(0x0f98, 2, false, R1K), link(0x0d97, 2, true, R1K)],
+        caps: HASTE_2_WIRELESS_CAPS,
     },
 };
 /// Dongle 06bf (config node on interface 3), cable 04bf (interface 2).
@@ -72,9 +163,124 @@ pub(super) const SAGA_PRO: Spec<Family> = Spec {
     vid: HP,
     pids: &[0x06bf, 0x04bf],
     family: Family::Universal {
-        links: &[(0x06bf, 3, false), (0x04bf, 2, true)],
-        rates: 6,
-        presets: false,
+        links: &[link(0x06bf, 3, false, R4K), link(0x04bf, 2, true, R1K)],
+        caps: STANDARD,
+    },
+};
+/// NGENUITY's universal mice with no extra protocol: PIDs, interfaces, rate
+/// and DPI limits from `NGenuity2.Devices.Universals.Mouses` and
+/// `HyperXDeviceUtils` (`docs/vendor-re/hyperx.md` §3). Dongle first.
+pub(super) const HASTE_2: Spec<Family> = Spec {
+    name: "HyperX Pulsefire Haste 2",
+    vid: HP,
+    pids: &[0x0b97],
+    family: Family::Universal {
+        links: &[link(0x0b97, 2, true, R8K)],
+        caps: STANDARD,
+    },
+};
+pub(super) const HASTE_2_MINI_WIRELESS: Spec<Family> = Spec {
+    name: "HyperX Pulsefire Haste 2 Mini Wireless",
+    vid: HP,
+    pids: &[0x0da0, 0x0ba0],
+    family: Family::Universal {
+        links: &[link(0x0da0, 2, false, R1K), link(0x0ba0, 2, true, R1K)],
+        caps: STANDARD,
+    },
+};
+pub(super) const HASTE_2_S_WIRELESS: Spec<Family> = Spec {
+    name: "HyperX Pulsefire Haste 2 S Wireless",
+    vid: HP,
+    pids: &[0x0bb8, 0x0ab8],
+    family: Family::Universal {
+        links: &[link(0x0bb8, 2, false, R1K), link(0x0ab8, 2, true, R1K)],
+        caps: STANDARD,
+    },
+};
+pub(super) const HASTE_2_CORE: Spec<Family> = Spec {
+    name: "HyperX Pulsefire Haste 2 Core",
+    vid: HP,
+    pids: &[0x04b5],
+    family: Family::Universal {
+        links: &[link(0x04b5, 2, true, R1K)],
+        caps: Caps {
+            max_dpi: 8000,
+            lift: false,
+            ..STANDARD
+        },
+    },
+};
+pub(super) const HASTE_2_CORE_WIRELESS: Spec<Family> = Spec {
+    name: "HyperX Pulsefire Haste 2 Core Wireless",
+    vid: HP,
+    pids: &[0x0ab5],
+    family: Family::Universal {
+        links: &[link(0x0ab5, 2, false, R1K)],
+        caps: Caps {
+            max_dpi: 12000,
+            lift: false,
+            ..STANDARD
+        },
+    },
+};
+/// Dongle on interface 3, cable on 2; 4000 Hz only over the dongle.
+pub(super) const HASTE_2_PRO: Spec<Family> = Spec {
+    name: "HyperX Pulsefire Haste 2 Pro",
+    vid: HP,
+    pids: &[0x0cbd, 0x0abd],
+    family: Family::Universal {
+        links: &[link(0x0cbd, 3, false, R4K), link(0x0abd, 2, true, R1K)],
+        caps: STANDARD,
+    },
+};
+pub(super) const FUSE_WIRELESS: Spec<Family> = Spec {
+    name: "HyperX Pulsefire Fuse Wireless",
+    vid: HP,
+    pids: &[0x0fbd],
+    family: Family::Universal {
+        links: &[link(0x0fbd, 2, false, R1K)],
+        caps: Caps {
+            max_dpi: 12000,
+            lift: false,
+            ..STANDARD
+        },
+    },
+};
+pub(super) const ALLOY_RISE: Spec<Family> = Spec {
+    name: "HyperX Alloy Rise",
+    vid: HP,
+    pids: &[0x0fa0],
+    family: Family::Universal {
+        links: &[link(0x0fa0, 2, true, 0)],
+        caps: KEYBOARD,
+    },
+};
+pub(super) const ALLOY_RISE_75: Spec<Family> = Spec {
+    name: "HyperX Alloy Rise 75",
+    vid: HP,
+    pids: &[0x02a1],
+    family: Family::Universal {
+        links: &[link(0x02a1, 2, true, 0)],
+        caps: KEYBOARD,
+    },
+};
+/// Dongle 01b9, keyboard on its cable 0eb8 (both interface 2).
+pub(super) const ALLOY_RISE_75_WIRELESS: Spec<Family> = Spec {
+    name: "HyperX Alloy Rise 75 Wireless",
+    vid: HP,
+    pids: &[0x01b9, 0x0eb8],
+    family: Family::Universal {
+        links: &[link(0x01b9, 2, false, 0), link(0x0eb8, 2, true, 0)],
+        caps: KEYBOARD_WIRELESS,
+    },
+};
+pub(super) const SAGA: Spec<Family> = Spec {
+    name: "HyperX Pulsefire Saga",
+    vid: HP,
+    pids: &[0x0ebe],
+    family: Family::Universal {
+        links: &[link(0x0ebe, 2, true, R8K)],
+        caps: STANDARD,
     },
 };
 /// Wireless dongle first (interface 2), cable second (interface 1).
@@ -82,23 +288,62 @@ pub(super) const DART: Spec<Family> = Spec {
     name: "HyperX Pulsefire Dart",
     vid: KINGSTON,
     pids: &[0x16e1, 0x16e2],
-    family: Family::Dart,
+    family: DART_FAMILY,
 };
 pub(super) const DART_HP: Spec<Family> = Spec {
     name: "HyperX Pulsefire Dart",
     vid: HP,
     pids: &[0x068e, 0x088e],
-    family: Family::Dart,
+    family: DART_FAMILY,
+};
+/// NGENUITY's `MousePulsefireHasteWireless` mirrors the Dart's command classes
+/// (lighting `d2`, rate `d0`, battery `51`, link `46 00`) with one LED (id 0, the
+/// wheel) and DPI stages as raw register bytes (not documented here, so none).
+/// Dongle 028e and cable 048e are both interface 2.
+pub(super) const HASTE_WIRELESS: Spec<Family> = Spec {
+    name: "HyperX Pulsefire Haste Wireless",
+    vid: HP,
+    pids: &[0x028e, 0x048e],
+    family: Family::Dart {
+        dpi: false,
+        leds: &[DART_LED_LOGO],
+        cable_iface: 2,
+    },
+};
+
+const DART_FAMILY: Family = Family::Dart {
+    dpi: true,
+    leds: DART_LEDS,
+    cable_iface: 1,
 };
 
 #[cfg(test)]
-pub(super) const ALL: &[&Spec<Family>] = &[&HASTE_2_WIRELESS, &SAGA_PRO, &DART, &DART_HP];
+pub(super) const ALL: &[&Spec<Family>] = &[
+    &HASTE_2_WIRELESS,
+    &SAGA_PRO,
+    &HASTE_2,
+    &HASTE_2_MINI_WIRELESS,
+    &HASTE_2_S_WIRELESS,
+    &HASTE_2_CORE,
+    &HASTE_2_CORE_WIRELESS,
+    &HASTE_2_PRO,
+    &FUSE_WIRELESS,
+    &SAGA,
+    &ALLOY_RISE,
+    &ALLOY_RISE_75,
+    &ALLOY_RISE_75_WIRELESS,
+    &DART,
+    &DART_HP,
+    &HASTE_WIRELESS,
+];
 
 pub(super) fn open(spec: &'static Spec<Family>, pid: u16, ctx: &DriverCtx) -> Opened {
     let paths = ctx.paths.clone();
     Ok(vec![match spec.family {
         Family::Universal { .. } => Box::new(UniversalMouse::open(spec, pid, paths)?),
-        Family::Dart => Box::new(DartMouse::open(spec, pid, paths)?) as Box<dyn DeviceAdapter>,
+        Family::Dart { .. } => {
+            Box::new(DartMouse::open(spec, pid, paths)?) as Box<dyn DeviceAdapter>
+        }
     }])
 }
 
@@ -151,6 +396,27 @@ fn uni(cmd: u8, sub: u8, payload: &[u8]) -> Vec<u8> {
 
 fn is_reply(r: &[u8], cmd: u8, sub: u8) -> bool {
     matches!(r, [c, s, ..] if *c == cmd + 1 && *s == sub)
+}
+
+/// `ff 01 <12-byte device id> <cmd> <sub> <status>`: the status of the ack for
+/// `cmd, sub` (NGENUITY `SetCommandsAck` reads bytes 14..=16 and ignores the id).
+fn ack_status(r: &[u8], cmd: u8, sub: u8) -> Option<u8> {
+    match r {
+        [0xff, 0x01, rest @ ..] if rest.get(12..14) == Some(&[cmd, sub]) => rest.get(14).copied(),
+        _ => None,
+    }
+}
+
+/// NGENUITY's `AckResult`: 0 success, 1 failure (resent up to three times).
+const ACK_FAILURE: u8 = 1;
+const ACK_RETRIES: usize = 3;
+/// NGENUITY's `AckChannel.ReadAsync` default.
+const ACK_WAIT: Duration = Duration::from_millis(500);
+
+/// Writes whose only answer is the dongle's ack (`32 01` DPI table, `36 01`
+/// sensor, `40 01` brightness); everything else is waited for to its reply.
+fn is_write(cmd: u8, sub: u8) -> bool {
+    sub == 0x01 && matches!(cmd, 0x32 | 0x36 | 0x40)
 }
 
 /// `33 02`: \[2\] rate, \[3\] stage mask, \[4\] active stage, [5 + 5i] stage i =
@@ -313,6 +579,21 @@ fn store_table(q: &mut Query) -> Result<()> {
     Ok(())
 }
 
+/// Read back a live DPI-table or sensor write `w` (the same reads the write
+/// was built from); other writes are not checked.
+fn check_live(q: &mut Query, w: &[u8]) -> Result<()> {
+    let (read, got, sent) = match w {
+        [0x32, 0x01, ..] => (0x32, 2..60, 4..62),
+        [0x36, 0x01, ..] => (0x36, 2..7, 4..9),
+        _ => return Ok(()),
+    };
+    let back = q(&uni(read, 0x02, &[0]))?.context("the mouse did not answer")?;
+    if back.get(got) != w.get(sent) {
+        bail!("the mouse reads back different settings from what was written");
+    }
+    Ok(())
+}
+
 /// NGENUITY's Save for brightness: the live value copied to slot 1, read back.
 fn store_brightness(q: &mut Query) -> Result<()> {
     fn read(q: &mut Query, slot: u8) -> Result<u8> {
@@ -341,13 +622,45 @@ fn parse_lift(r: &[u8]) -> Option<i64> {
 }
 
 fn lift_write(r: &[u8], mm: i64) -> Option<Vec<u8>> {
+    sensor_write(r, LIVE, Some(mm))
+}
+
+/// `36 01 <slot u16> <the five bytes of a 37 02 reply>`, with the lift-off
+/// replaced when `mm` is given.
+fn sensor_write(r: &[u8], slot: [u8; 2], mm: Option<i64>) -> Option<Vec<u8>> {
     let [0x37, 0x02, ..] = r else {
         return None;
     };
-    let mut p = uni(0x36, 0x01, &LIVE);
+    let mut p = uni(0x36, 0x01, &slot);
     p[4..9].copy_from_slice(r.get(2..7)?);
-    p[7] = if mm == 2 { 0x02 } else { 0x00 };
+    if let Some(mm) = mm {
+        p[7] = if mm == 2 { 0x02 } else { 0x00 };
+    }
     Some(p)
+}
+
+/// NGENUITY's Save for lift-off (Haste 2 Wireless: the sensor packet goes to
+/// the onboard slot with the DPI table): the live sensor bytes copied to slot
+/// 1. Both slots must read as a known lift-off code; slot 1 is read back.
+fn store_lift(q: &mut Query) -> Result<()> {
+    fn read(q: &mut Query, slot: u8) -> Result<Vec<u8>> {
+        let r = q(&uni(0x36, 0x02, &[slot]))?
+            .with_context(|| format!("no sensor settings for profile slot {slot}"))?;
+        // 00 = 1 mm, 02 = 2 mm are the only codes seen.
+        if !matches!(r.get(5), Some(0x00 | 0x02)) || parse_lift(&r).is_none() {
+            bail!("sensor settings of slot {slot} hold an unknown lift-off code");
+        }
+        Ok(r)
+    }
+    let live = read(q, 0)?;
+    read(q, 1)?;
+    let w = sensor_write(&live, SAVED, None).context("bad sensor settings")?;
+    q(&w)?;
+    let back = read(q, 1)?;
+    if back.get(2..7) != live.get(2..7) {
+        bail!("the onboard sensor settings read back different from what was written");
+    }
+    Ok(())
 }
 
 /// NGENUITY sends floor(percent * 255 / 100).
@@ -438,29 +751,33 @@ fn stage_controls(mask: u8, max_dpi: f64) -> Vec<SettingMeta> {
     c
 }
 
-/// `rates`: how many [`RATE_CODES`] to offer; `presets`: lighting effects
-/// besides brightness; `mask`: the enabled DPI stages last read.
-fn universal_controls(effect: &str, rates: usize, presets: bool, mask: u8) -> Vec<SettingMeta> {
+/// `rates`: how many [`RATE_CODES`] to offer; `caps`: the model's features;
+/// `mask`: the enabled DPI stages last read.
+fn universal_controls(effect: &str, rates: usize, caps: Caps, mask: u8) -> Vec<SettingMeta> {
     use SettingKey::*;
-    // Haste 2 Wireless and Saga Pro: 200-26000 DPI in steps of 50.
-    let mut c = vec![SettingMeta::slider(Dpi, "DPI", 200.0, 26000.0, 50.0).unit("dpi")];
-    c.extend(stage_controls(mask, 26000.0));
-    c.extend([
-        SettingMeta::dropdown(
+    let max_dpi = f64::from(caps.max_dpi);
+    let mut c = Vec::new();
+    if caps.dpi {
+        // 200 DPI in steps of 50 up to the model's maximum.
+        c.push(SettingMeta::slider(Dpi, "DPI", 200.0, max_dpi, 50.0).unit("dpi"));
+        c.extend(stage_controls(mask, max_dpi));
+        c.push(SettingMeta::dropdown(
             ReportRate,
             "Report rate",
             RATE_CODES[..rates]
                 .iter()
                 .map(|&(hz, _)| SettingOption::int(hz, &format!("{hz} Hz")))
                 .collect(),
-        ),
-        SettingMeta::dropdown(
+        ));
+    }
+    if caps.lift {
+        c.push(SettingMeta::dropdown(
             LiftOffDistance,
             "Lift-off",
             vec![SettingOption::int(1, "1 mm"), SettingOption::int(2, "2 mm")],
-        ),
-    ]);
-    if presets {
+        ));
+    }
+    if caps.presets {
         c.extend(lighting_controls(
             &UNI_EFFECTS,
             effect,
@@ -470,10 +787,17 @@ fn universal_controls(effect: &str, rates: usize, presets: bool, mask: u8) -> Ve
     } else {
         c.push(SettingMeta::slider(Brightness, "Brightness", 0.0, 100.0, 1.0).unit("%"));
     }
+    if !caps.dpi {
+        return c;
+    }
     c.push(
         SettingMeta::toggle(
             SaveToDevice,
-            "Save DPI, report rate and brightness to device memory",
+            if caps.save_lift {
+                "Save DPI, report rate, brightness and lift-off to device memory"
+            } else {
+                "Save DPI, report rate and brightness to device memory"
+            },
         )
         .persistent(),
     );
@@ -481,15 +805,23 @@ fn universal_controls(effect: &str, rates: usize, presets: bool, mask: u8) -> Ve
 }
 
 /// Settings the save-to-device mode stores in slot 1.
-fn saved_by(key: SettingKey) -> bool {
-    matches!(
-        key,
-        SettingKey::Dpi | SettingKey::ReportRate | SettingKey::Brightness
-    )
+fn saved_by(key: SettingKey, caps: Caps) -> bool {
+    match key {
+        SettingKey::Dpi | SettingKey::ReportRate | SettingKey::Brightness => true,
+        SettingKey::LiftOffDistance => caps.save_lift,
+        _ => false,
+    }
 }
 
 const REPLY_WAIT: Duration = Duration::from_millis(300);
+/// How long a Dart waits for the `de` report after a save (NGENUITY: 1000 ms).
+const SAVE_WAIT: Duration = Duration::from_millis(1000);
+/// Dart heartbeat.
 const POLL: Duration = Duration::from_secs(30);
+/// NGENUITY asks a dongle for the link every 5 s and the battery every 60 s
+/// (`MousePulsefireHaste2Wireless.InitDevice`).
+const LINK_POLL: Duration = Duration::from_secs(5);
+const BATTERY_POLL: Duration = Duration::from_secs(60);
 /// How often a failed re-apply after link-up is tried again.
 const RESYNC_RETRY: Duration = Duration::from_secs(10);
 
@@ -500,7 +832,7 @@ struct UniversalMouse {
     /// On the cable: always linked, no connection query.
     cabled: bool,
     rates: usize,
-    presets: bool,
+    caps: Caps,
     /// What the user chose; re-applied whenever the mouse links up.
     user: SettingsMap,
     settings: SettingsMap,
@@ -513,7 +845,8 @@ struct UniversalMouse {
     resync_error: Option<String>,
     /// Enabled DPI stages from the last table read (0 = not read yet).
     mask: u8,
-    last_poll: Option<Instant>,
+    last_link: Option<Instant>,
+    last_battery: Option<Instant>,
     failures: u8,
     last_error: Option<String>,
     paths: ConfigPaths,
@@ -521,24 +854,23 @@ struct UniversalMouse {
 
 impl UniversalMouse {
     fn open(spec: &'static Spec<Family>, pid: u16, paths: ConfigPaths) -> Result<Self> {
-        let Family::Universal {
-            links,
-            rates,
-            presets,
-        } = spec.family
-        else {
+        let Family::Universal { links, caps } = spec.family else {
             bail!("{} is not a universal-protocol mouse", spec.name);
         };
-        let &(_, iface, cabled) = links
+        let &Link {
+            iface,
+            cabled,
+            rates,
+            ..
+        } = links
             .iter()
-            .find(|l| l.0 == pid)
+            .find(|l| l.pid == pid)
             .with_context(|| format!("{} has no PID {pid:04x}", spec.name))?;
         let (dev, instance) = open_node(spec.vid, pid, Node::Iface(iface))?;
         info!("{} open via {}", spec.name, dev.path.display());
         let mut user = hako_core::config::load_device_settings(&paths, spec.vid, spec.pids[0])?;
-        let rates = if cabled { rates.min(4) } else { rates };
         // Every stage until the table is read, as `snapshot` offers them.
-        let offered = universal_controls(text(&user, SettingKey::Effect, ""), rates, presets, 0x1f);
+        let offered = universal_controls(text(&user, SettingKey::Effect, ""), rates, caps, 0x1f);
         crate::drivers::sanitize_saved(&mut user, &offered);
         Ok(Self {
             spec,
@@ -549,9 +881,8 @@ impl UniversalMouse {
             },
             dev: Some(dev),
             cabled,
-            // A cable caps the rate at 1000 Hz (Saga Control).
             rates,
-            presets,
+            caps,
             settings: user.clone(),
             user,
             battery: BatteryState {
@@ -565,7 +896,8 @@ impl UniversalMouse {
             last_resync: None,
             resync_error: None,
             mask: 0,
-            last_poll: None,
+            last_link: None,
+            last_battery: None,
             failures: 0,
             last_error: None,
             paths,
@@ -573,24 +905,49 @@ impl UniversalMouse {
     }
 
     /// Send `req` and return its `cmd+1, sub` reply if one arrives in time.
+    /// Like NGENUITY: the first `ff` ack for the packet decides; status 1
+    /// means failure and the packet is sent again (at most [`ACK_RETRIES`]
+    /// times), any other status is accepted. A write without a mouse reply
+    /// is done at its ack; no ack within [`ACK_WAIT`] is not an error here
+    /// (the read-backs check what matters).
     fn query(&mut self, req: &[u8]) -> Result<Option<Vec<u8>>> {
         let (cmd, sub) = (req[0], req[1]);
-        let dev = self.dev.as_mut().context("not connected")?;
-        let reports = exchange(dev, req, REPLY_WAIT, |r| is_reply(r, cmd, sub))?;
-        for r in &reports {
-            self.event(r);
+        let write = is_write(cmd, sub);
+        for attempt in 0..=ACK_RETRIES {
+            let dev = self.dev.as_mut().context("not connected")?;
+            let reports = exchange(dev, req, ACK_WAIT, |r| {
+                is_reply(r, cmd, sub)
+                    || ack_status(r, cmd, sub).is_some_and(|status| write || status == ACK_FAILURE)
+            })?;
+            for r in &reports {
+                self.event(r);
+            }
+            if let Some(reply) = reports.iter().find(|r| is_reply(r, cmd, sub)) {
+                return Ok(Some(reply.clone()));
+            }
+            let first = reports.iter().find_map(|r| ack_status(r, cmd, sub));
+            if first != Some(ACK_FAILURE) || attempt == ACK_RETRIES {
+                break;
+            }
+            warn!(
+                "{}: {cmd:02x} {sub:02x} failed (ack status 1), sending it again",
+                self.spec.name
+            );
         }
-        Ok(reports.into_iter().find(|r| is_reply(r, cmd, sub)))
+        Ok(None)
     }
 
     fn event(&mut self, r: &[u8]) {
         match r {
             [0xfb, 0x0a, s, ..] | [0x53, 0x01, s, ..] => {
-                let online = *s == 0x01;
-                // The mouse sends 51 02 by itself after waking.
+                // 0 = lost / asleep, anything else = linked (NGENUITY).
+                let online = *s != 0x00;
+                // The mouse sends 51 02 by itself after waking; NGENUITY also asks
+                // for the battery again, then re-applies its settings.
                 if online && !self.online {
                     self.sync = true;
                     self.last_resync = None;
+                    self.last_battery = None;
                 }
                 self.online = online;
                 self.battery.present = online;
@@ -644,7 +1001,7 @@ impl UniversalMouse {
                 lift_write(&reply, mm).context("bad sensor settings")?
             }
             Brightness => brightness_write(int(s, Brightness, 100)),
-            Effect | Speed | ColorR | ColorG | ColorB if self.presets => {
+            Effect | Speed | ColorR | ColorG | ColorB if self.caps.presets => {
                 preset_write(text(s, Effect, "static"), rgb(s), text(s, Speed, "medium"))
             }
             _ => bail!("unsupported setting {}", key.as_str()),
@@ -656,7 +1013,7 @@ impl UniversalMouse {
         if packet.starts_with(&[0x42, 0x02]) && reply.is_none() {
             bail!("the mouse did not answer the lighting write");
         }
-        Ok(())
+        check_live(&mut |req: &[u8]| self.query(req), &packet)
     }
 
     fn saving(&self) -> bool {
@@ -666,12 +1023,16 @@ impl UniversalMouse {
     /// Copy the live value(s) behind `key` to the onboard slot (`None`: all).
     fn store(&mut self, key: Option<SettingKey>) -> Result<()> {
         use SettingKey::*;
+        let save_lift = self.caps.save_lift;
         let mut q = |req: &[u8]| self.query(req);
         if matches!(key, None | Some(Dpi | ReportRate)) {
             store_table(&mut q)?;
         }
         if matches!(key, None | Some(Brightness)) {
             store_brightness(&mut q)?;
+        }
+        if save_lift && matches!(key, None | Some(LiftOffDistance)) {
+            store_lift(&mut q)?;
         }
         Ok(())
     }
@@ -680,10 +1041,11 @@ impl UniversalMouse {
     fn resync(&mut self) -> Result<()> {
         use SettingKey::*;
         let has = |k: SettingKey| get_setting(&self.user, k).is_some();
-        let lighting = self.presets && [Effect, Speed, ColorR, ColorG, ColorB].into_iter().any(has);
+        let lighting =
+            self.caps.presets && [Effect, Speed, ColorR, ColorG, ColorB].into_iter().any(has);
         let pending: Vec<_> = [
             (Dpi, TABLE_KEYS.into_iter().any(has)),
-            (LiftOffDistance, has(LiftOffDistance)),
+            (LiftOffDistance, self.caps.lift && has(LiftOffDistance)),
             (Brightness, has(Brightness)),
             (Effect, lighting),
         ]
@@ -694,12 +1056,13 @@ impl UniversalMouse {
             self.apply_key(k)?;
         }
         // Read requests take the profile slot as one byte.
-        let reads: &[(u8, u8)] = if self.presets {
-            &[(0x32, 0x02), (0x36, 0x02), (0x40, 0x02), (0x42, 0x03)]
-        } else {
-            &[(0x32, 0x02), (0x36, 0x02), (0x40, 0x02)]
-        };
-        for &(cmd, sub) in reads {
+        let reads = [
+            self.caps.dpi.then_some((0x32, 0x02)),
+            self.caps.lift.then_some((0x36, 0x02)),
+            Some((0x40, 0x02)),
+            self.caps.presets.then_some((0x42, 0x03)),
+        ];
+        for (cmd, sub) in reads.into_iter().flatten() {
             let Some(r) = self.query(&uni(cmd, sub, &[0]))? else {
                 continue;
             };
@@ -740,14 +1103,18 @@ impl UniversalMouse {
         for r in read_reports(dev, Duration::ZERO, |_| false) {
             self.event(&r);
         }
-        if self.last_poll.is_none_or(|t| t.elapsed() >= POLL) {
-            self.last_poll = Some(Instant::now());
-            if !self.cabled {
-                self.query(&uni(0x52, 0x01, &[]))?;
-            }
-            if self.online {
-                self.query(&uni(0x50, 0x02, &[]))?;
-            }
+        if !self.cabled && self.last_link.is_none_or(|t| t.elapsed() >= LINK_POLL) {
+            self.last_link = Some(Instant::now());
+            self.query(&uni(0x52, 0x01, &[]))?;
+        }
+        if self.caps.battery
+            && self.online
+            && self
+                .last_battery
+                .is_none_or(|t| t.elapsed() >= BATTERY_POLL)
+        {
+            self.last_battery = Some(Instant::now());
+            self.query(&uni(0x50, 0x02, &[]))?;
         }
         if self.online && self.sync && self.last_resync.is_none_or(|t| t.elapsed() >= RESYNC_RETRY)
         {
@@ -776,15 +1143,19 @@ impl DeviceAdapter for UniversalMouse {
     fn snapshot(&self) -> DeviceSnapshot {
         DeviceSnapshot {
             id: self.id.clone(),
-            kind: DeviceKind::Mouse,
+            kind: self.caps.kind,
             name: self.spec.name.into(),
             connected: self.dev.is_some(),
-            batteries: vec![self.battery.clone()],
+            batteries: if self.caps.battery {
+                vec![self.battery.clone()]
+            } else {
+                vec![]
+            },
             settings: self.settings.clone(),
             controls: universal_controls(
                 text(&self.settings, SettingKey::Effect, ""),
                 self.rates,
-                self.presets,
+                self.caps,
                 // All five until the table is read (e.g. a profile applied to a
                 // sleeping mouse); `table_write` refuses a disabled active stage.
                 if self.mask == 0 { 0x1f } else { self.mask },
@@ -826,7 +1197,7 @@ impl DeviceAdapter for UniversalMouse {
         if key == SettingKey::SaveToDevice {
             return Ok(());
         }
-        let store = self.saving() && saved_by(key);
+        let store = self.saving() && saved_by(key, self.caps);
         if !self.online {
             // The link-up re-apply never saves.
             if store {
@@ -886,7 +1257,13 @@ fn dart_packet(led: u8, mode: u8, [r, g, b]: [u8; 3], brightness: u8, speed: u8)
 
 /// Modes 00 static, 12 cycle, 20 breathing, 30 reactive; speed 0x64 slowest
 /// .. 0x00 fastest. Color modes go per LED (scroll wheel, then logo).
-fn dart_packets(effect: &str, rgb: [u8; 3], brightness: i64, speed: &str) -> Vec<[u8; 65]> {
+fn dart_packets(
+    leds: &[u8],
+    effect: &str,
+    rgb: [u8; 3],
+    brightness: i64,
+    speed: &str,
+) -> Vec<[u8; 65]> {
     let b = brightness.clamp(0, 100) as u8;
     let spd = match speed {
         "slow" => 0x64,
@@ -899,10 +1276,9 @@ fn dart_packets(effect: &str, rgb: [u8; 3], brightness: i64, speed: &str) -> Vec
         "reactive" => (0x30, spd),
         _ => (0x00, 0x00),
     };
-    vec![
-        dart_packet(DART_LED_SCROLL, mode, rgb, b, spd),
-        dart_packet(DART_LED_LOGO, mode, rgb, b, spd),
-    ]
+    leds.iter()
+        .map(|&led| dart_packet(led, mode, rgb, b, spd))
+        .collect()
 }
 
 /// 65 bytes: report id 0, then `cmd` and its payload.
@@ -931,6 +1307,43 @@ fn dart_active(stage: u8) -> [u8; 65] {
     dart_cmd(&[0xd3, 0x00, 0x00, 0x01, stage])
 }
 
+/// `d3 01 00 01 <mask>`: the enabled stages. NGENUITY (`CMDMSPulsefireDartApplyDPISettings`)
+/// writes the stage DPIs and colors, then this with the low bits set for
+/// as many stages as the profile has, then the active stage.
+fn dart_stage_mask(count: u8) -> [u8; 65] {
+    dart_cmd(&[0xd3, 0x01, 0x00, 0x01, (1u8 << count.clamp(1, 5)) - 1])
+}
+
+/// `de ff`: store the live profile (NGENUITY `CMDMSPulsefireDartSave`; the
+/// second byte is always `ff` there). Answered with a `de` report.
+fn dart_save() -> [u8; 65] {
+    dart_cmd(&[0xde, 0xff])
+}
+
+/// The `ff 03` status report: `[2]` DPI stage, `[3]` charging, `[4]` link
+/// (the dongle's view of the mouse), `[6] == 1` the mouse reset itself to its
+/// onboard profile (NGENUITY `Device_InputReportReceived`; its buffer index is
+/// one higher because it counts the report id).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DartStatus {
+    stage: u8,
+    charging: bool,
+    linked: bool,
+    reset: bool,
+}
+
+fn parse_dart_status(r: &[u8]) -> Option<DartStatus> {
+    match r {
+        [0xff, 0x03, stage, charging, link, _, reset, ..] => Some(DartStatus {
+            stage: *stage,
+            charging: *charging == 0x01,
+            linked: *link == 0x01,
+            reset: *reset == 0x01,
+        }),
+        _ => None,
+    }
+}
+
 /// Heartbeat reply `51 00 00 03 <battery %> <1 = charging> ..`.
 fn parse_heartbeat(r: &[u8]) -> Option<(u8, bool)> {
     match r {
@@ -946,15 +1359,23 @@ const DART_EFFECTS: [(&str, &str); 4] = [
     ("reactive", "Reactive"),
 ];
 
-/// `de ff` (santeri3700 notes; OpenRGB `HyperXPulsefireDartController::Save`
-/// by the same author): one line of reverse engineering, byte 1 unexplained.
-const DART_SAVE_BLOCKED: &str = "only one reverse-engineering source documents the save (de ff) \
-     and what its second byte selects is unknown";
-
-fn dart_controls(effect: &str) -> Vec<SettingMeta> {
-    // Five stages up to 16000 DPI (santeri3700); the enabled-stage mask
-    // (`d3 01`) cannot be read back, so it is left as the mouse has it.
-    let mut c = stage_controls(0x1f, 16000.0);
+/// The `de ff` save is sent by NGENUITY itself (exact PID, always `ff`) and
+/// is documented by santeri3700 / OpenRGB: shown as an owner opt-in.
+/// The enabled stages cannot be read back, so the count is the user's choice;
+/// until chosen the stage sliders show all five and the mouse keeps its mask.
+fn dart_controls(effect: &str, stages: u8, dpi: bool) -> Vec<SettingMeta> {
+    let mut c = Vec::new();
+    if dpi {
+        // Five stages up to 16000 DPI (santeri3700).
+        c.extend(stage_controls((1u8 << stages.clamp(1, 5)) - 1, 16000.0));
+        c.push(SettingMeta::dropdown(
+            SettingKey::DpiStageCount,
+            "DPI stages",
+            (1..=5)
+                .map(|n| SettingOption::int(n, &n.to_string()))
+                .collect(),
+        ));
+    }
     c.push(SettingMeta::dropdown(
         SettingKey::ReportRate,
         "Report rate",
@@ -970,11 +1391,14 @@ fn dart_controls(effect: &str) -> Vec<SettingMeta> {
         &["static", "breathing", "reactive"],
     ));
     c.push(
-        SettingMeta::toggle(SettingKey::SaveToDevice, "Save changes to device memory")
-            .persistent()
-            .blocked(DART_SAVE_BLOCKED),
+        SettingMeta::toggle(SettingKey::SaveToDevice, "Save changes to device memory").persistent(),
     );
     c
+}
+
+/// Stages shown (`dpi_stage_count`, all five until chosen).
+fn dart_stage_count(s: &SettingsMap) -> u8 {
+    int(s, SettingKey::DpiStageCount, 5).clamp(1, 5) as u8
 }
 
 struct DartMouse {
@@ -988,14 +1412,31 @@ struct DartMouse {
     paths: ConfigPaths,
 }
 
+/// DPI stages, LED ids and the cable's interface of a Dart-family model.
+fn dart_parts(spec: &Spec<Family>) -> (bool, &'static [u8], u32) {
+    match spec.family {
+        Family::Dart {
+            dpi,
+            leds,
+            cable_iface,
+        } => (dpi, leds, cable_iface),
+        Family::Universal { .. } => (false, &[], 0),
+    }
+}
+
 impl DartMouse {
     fn open(spec: &'static Spec<Family>, pid: u16, paths: ConfigPaths) -> Result<Self> {
         // OpenRGB: dongle interface 2 (usage page ff00), cable interface 1 (ff13).
-        let iface = if pid == spec.pids[0] { 2 } else { 1 };
+        let (dpi, _, cable_iface) = dart_parts(spec);
+        let iface = if pid == spec.pids[0] { 2 } else { cable_iface };
         let (dev, instance) = open_node(spec.vid, pid, Node::Iface(iface))?;
         info!("{} open via {}", spec.name, dev.path.display());
         let mut settings = hako_core::config::load_device_settings(&paths, spec.vid, spec.pids[0])?;
-        let offered = dart_controls(text(&settings, SettingKey::Effect, "static"));
+        let offered = dart_controls(
+            text(&settings, SettingKey::Effect, "static"),
+            dart_stage_count(&settings),
+            dpi,
+        );
         crate::drivers::sanitize_saved(&mut settings, &offered);
         let mut a = Self {
             spec,
@@ -1023,11 +1464,13 @@ impl DartMouse {
     /// Everything is volatile: the saved choices are sent on open and
     /// whenever the heartbeat finds the mouse again.
     fn restore(&mut self) {
-        let keys = STAGES.into_iter().chain([
-            SettingKey::DpiStageActive,
-            SettingKey::ReportRate,
-            SettingKey::Effect,
-        ]);
+        let dpi = dart_parts(self.spec).0;
+        let keys = [SettingKey::DpiStageCount]
+            .into_iter()
+            .chain(STAGES)
+            .chain([SettingKey::DpiStageActive])
+            .filter(|_| dpi)
+            .chain([SettingKey::ReportRate, SettingKey::Effect]);
         let mut errors = Vec::new();
         for key in keys {
             if get_setting(&self.settings, key).is_some() {
@@ -1040,12 +1483,90 @@ impl DartMouse {
         self.last_error = (!errors.is_empty()).then(|| errors.join("; "));
     }
 
+    fn persist(&self) -> Result<()> {
+        hako_core::config::save_device_settings(
+            &self.paths,
+            self.spec.vid,
+            self.spec.pids[0],
+            &self.settings,
+        )
+        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
+    }
+
+    fn saving(&self) -> bool {
+        get_setting(&self.settings, SettingKey::SaveToDevice).and_then(|v| v.as_bool())
+            == Some(true)
+    }
+
+    /// NGENUITY's Save: `de ff`, answered with a `de` report (it waits up to a
+    /// second, the mouse writes flash).
+    fn save(&mut self) -> Result<()> {
+        let dev = self.dev.as_mut().context("not connected")?;
+        let reports = exchange(dev, &dart_save(), SAVE_WAIT, |r| r.first() == Some(&0xde))?;
+        let acked = reports.iter().any(|r| r.first() == Some(&0xde));
+        for r in &reports {
+            self.status(r);
+        }
+        if !acked {
+            bail!("the mouse did not acknowledge the save command");
+        }
+        Ok(())
+    }
+
+    /// An `ff 03` status report: charging, the active stage, and the link
+    /// and reset flags (the volatile settings are lost on both).
+    fn status(&mut self, r: &[u8]) {
+        let Some(s) = parse_dart_status(r) else {
+            return;
+        };
+        self.battery.charging = s.charging;
+        if usize::from(s.stage) < STAGES.len() {
+            merge_setting(
+                &mut self.settings,
+                SettingKey::DpiStageActive,
+                SettingValue::Int(i64::from(s.stage) + 1),
+            );
+        }
+        // Only the dongle reports the mouse's link.
+        let dongle = self.id.product_id == self.spec.pids[0];
+        let mut resend = s.reset;
+        if dongle && s.linked != self.battery.present {
+            resend |= s.linked;
+            self.battery.present = s.linked;
+            if !s.linked {
+                self.battery.percent = None;
+            }
+        }
+        if resend {
+            self.restore();
+        }
+    }
+
     /// Lighting goes out as several packets (one per LED).
     fn is_lighting(key: SettingKey) -> bool {
-        key != SettingKey::ReportRate && key != SettingKey::DpiStageActive && !STAGES.contains(&key)
+        !matches!(
+            key,
+            SettingKey::ReportRate | SettingKey::DpiStageActive | SettingKey::DpiStageCount
+        ) && !STAGES.contains(&key)
     }
 
     fn apply(&mut self, key: SettingKey) -> Result<()> {
+        if key == SettingKey::DpiStageCount {
+            let n = dart_stage_count(&self.settings);
+            let active = int(&self.settings, SettingKey::DpiStageActive, 1) - 1;
+            let dev = self.dev.as_mut().context("not connected")?;
+            dev.write(&dart_stage_mask(n))?;
+            // A stage that is no longer enabled cannot stay active.
+            if active >= i64::from(n) {
+                dev.write(&dart_active(n - 1))?;
+                merge_setting(
+                    &mut self.settings,
+                    SettingKey::DpiStageActive,
+                    SettingValue::Int(i64::from(n)),
+                );
+            }
+            return Ok(());
+        }
         let s = &self.settings;
         let single = if key == SettingKey::ReportRate {
             let hz = int(s, SettingKey::ReportRate, 1000);
@@ -1062,6 +1583,7 @@ impl DartMouse {
             return self.dev.as_mut().context("not connected")?.write(&p);
         }
         let packets = dart_packets(
+            dart_parts(self.spec).1,
             text(s, SettingKey::Effect, "static"),
             rgb(s),
             int(s, SettingKey::Brightness, 100),
@@ -1089,7 +1611,11 @@ impl DeviceAdapter for DartMouse {
             connected: self.dev.is_some(),
             batteries: vec![self.battery.clone()],
             settings: self.settings.clone(),
-            controls: dart_controls(text(&self.settings, SettingKey::Effect, "static")),
+            controls: dart_controls(
+                text(&self.settings, SettingKey::Effect, "static"),
+                dart_stage_count(&self.settings),
+                dart_parts(self.spec).0,
+            ),
             last_error: self.last_error.clone(),
         }
     }
@@ -1097,24 +1623,37 @@ impl DeviceAdapter for DartMouse {
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
         let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value);
-        if let Err(e) = self.apply(key) {
+        // Turning save mode on stores the live profile once; off writes nothing.
+        if key == SettingKey::SaveToDevice {
+            if self.saving() {
+                if let Err(e) = self.save() {
+                    self.settings = before;
+                    return Err(e);
+                }
+            }
+            return self.persist();
+        }
+        if let Err(mut e) = self.apply(key) {
             // The mouse kept its old value; so do the UI and the file.
             self.settings = before;
-            self.last_error = Some(e.to_string());
             if Self::is_lighting(key) {
                 // An LED written before the failure gets the old lighting back.
-                let _ = self.apply(key);
+                if let Err(re) = self.apply(key) {
+                    e = anyhow::anyhow!(
+                        "{e:#}; restoring the previous value also failed ({re:#}), the mouse may show part of the change"
+                    );
+                }
             }
+            self.last_error = Some(e.to_string());
             return Err(e);
         }
         self.last_error = None;
-        hako_core::config::save_device_settings(
-            &self.paths,
-            self.spec.vid,
-            self.spec.pids[0],
-            &self.settings,
-        )
-        .map_err(|e| anyhow::anyhow!("applied, but not saved: {e:#}"))
+        self.persist()?;
+        if self.saving() {
+            self.save()
+                .context("changed, but not saved to device memory")?;
+        }
+        Ok(())
     }
 
     /// Heartbeat every [`POLL`]; silence means the mouse is off or asleep.
@@ -1126,6 +1665,13 @@ impl DeviceAdapter for DartMouse {
         let Some(dev) = self.dev.as_mut() else {
             return Ok(());
         };
+        // Status reports (DPI button, link, reset) arrive unsolicited.
+        for r in read_reports(dev, Duration::ZERO, |_| false) {
+            self.status(&r);
+        }
+        let Some(dev) = self.dev.as_mut() else {
+            return Ok(());
+        };
         if self.last_poll.is_some_and(|t| t.elapsed() < POLL) {
             return Ok(());
         }
@@ -1133,6 +1679,9 @@ impl DeviceAdapter for DartMouse {
         let reports = exchange(dev, &dart_cmd(&[0x51]), REPLY_WAIT, |r| {
             parse_heartbeat(r).is_some()
         })?;
+        for r in &reports {
+            self.status(r);
+        }
         let b = &mut self.battery;
         let was_present = b.present;
         match reports.iter().find_map(|r| parse_heartbeat(r)) {
@@ -1338,6 +1887,8 @@ mod tests {
     struct TwoSlots {
         table: [Vec<u8>; 2],
         bright: [u8; 2],
+        /// `37 02` replies of slot 0 and 1.
+        sensor: [Vec<u8>; 2],
         drop_writes: bool,
         writes: Vec<Vec<u8>>,
     }
@@ -1349,6 +1900,10 @@ mod tests {
             Self {
                 table: [pad(&TABLE, 64), saved],
                 bright: [0x82, 0xff],
+                sensor: [
+                    pad(&[0x37, 0x02, 0x00, 0x01, 0x00, 0x02, 0x01], 64),
+                    pad(&[0x37, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00], 64),
+                ],
                 drop_writes: false,
                 writes: vec![],
             }
@@ -1359,6 +1914,14 @@ mod tests {
             Ok(Some(match *req {
                 [0x32, 0x02, slot, ..] => self.table[usize::from(slot)].clone(),
                 [0x40, 0x02, slot, ..] => pad(&[0x41, 0x02, self.bright[usize::from(slot)]], 64),
+                [0x36, 0x02, slot, ..] => self.sensor[usize::from(slot)].clone(),
+                [0x36, 0x01, slot, 0x00, ..] => {
+                    self.writes.push(req.to_vec());
+                    if keep {
+                        self.sensor[usize::from(slot)][2..7].copy_from_slice(&req[4..9]);
+                    }
+                    pad(&[0x37, 0x01], 64)
+                }
                 [0x32, 0x01, slot, 0x00, ..] => {
                     self.writes.push(req.to_vec());
                     if keep {
@@ -1422,37 +1985,258 @@ mod tests {
     }
 
     #[test]
+    fn lift_off_save_copies_the_live_sensor_bytes() {
+        // NGENUITY (Haste 2 Wireless) sends the sensor packet to the onboard
+        // slot in its Save: `36 01 01 00 <snap> <tune> <tune_en> <lift> <motion>`.
+        let mut m = TwoSlots::new();
+        store_lift(&mut |r: &[u8]| m.query(r)).unwrap();
+        assert_eq!(
+            m.writes[0][..9],
+            [0x36, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x02, 0x01]
+        );
+        assert_eq!(m.sensor[1][2..7], m.sensor[0][2..7]);
+        // An unknown lift-off code on either slot aborts before any write.
+        for slot in 0..2 {
+            let mut m = TwoSlots::new();
+            m.sensor[slot][5] = 0x05;
+            assert!(store_lift(&mut |r: &[u8]| m.query(r)).is_err());
+            assert!(m.writes.is_empty());
+        }
+        // A dropped write is reported; so is no answer.
+        let mut m = TwoSlots::new();
+        m.drop_writes = true;
+        let err = store_lift(&mut |r: &[u8]| m.query(r)).unwrap_err();
+        assert!(err.to_string().contains("read back"), "{err}");
+        assert!(store_lift(&mut |_: &[u8]| Ok(None)).is_err());
+        // Only the Haste 2 Wireless saves lift-off; the Saga Pro's NGENUITY
+        // Save sends it to the live slot.
+        assert!(saved_by(SettingKey::LiftOffDistance, HASTE_2_WIRELESS_CAPS));
+        let Family::Universal { caps, .. } = SAGA_PRO.family else {
+            unreachable!()
+        };
+        assert!(!saved_by(SettingKey::LiftOffDistance, caps));
+    }
+
+    #[test]
+    fn ack_status_follows_ngenuity() {
+        // `ff 01 <12-byte id> <cmd> <sub> <status>`.
+        let mut ack = pad(&[0xff, 0x01], 64);
+        ack[14..17].copy_from_slice(&[0x32, 0x01, 0x00]);
+        assert_eq!(ack_status(&ack, 0x32, 0x01), Some(0));
+        ack[16] = 0x01;
+        assert_eq!(ack_status(&ack, 0x32, 0x01), Some(ACK_FAILURE));
+        // Another command's ack, or another report, is not this one's.
+        assert_eq!(ack_status(&ack, 0x36, 0x01), None);
+        assert_eq!(ack_status(&pad(&[0x33, 0x01], 64), 0x32, 0x01), None);
+        assert!(is_write(0x32, 0x01) && is_write(0x40, 0x01) && is_write(0x36, 0x01));
+        // Reads and the `42 02` preset (the mouse answers) wait for the reply.
+        assert!(!is_write(0x32, 0x02) && !is_write(0x42, 0x02) && !is_write(0x52, 0x01));
+    }
+
+    #[test]
+    fn model_data_matches_ngenuity() {
+        let caps = |s: &Spec<Family>| match s.family {
+            Family::Universal { caps, .. } => caps,
+            Family::Dart { .. } => unreachable!(),
+        };
+        let links = |s: &Spec<Family>| match s.family {
+            Family::Universal { links, .. } => links,
+            Family::Dart { .. } => unreachable!(),
+        };
+        for s in ALL
+            .iter()
+            .filter(|s| matches!(s.family, Family::Universal { .. }))
+        {
+            // Every PID has exactly one link and vice versa.
+            assert_eq!(links(s).len(), s.pids.len(), "{}", s.name);
+            assert!(links(s).iter().zip(s.pids).all(|(l, p)| l.pid == *p));
+            assert!(links(s).iter().all(|l| l.rates <= RATE_CODES.len()));
+            assert!(caps(s).max_dpi <= 26000 && caps(s).max_dpi % 50 == 0);
+        }
+        assert_eq!(caps(&HASTE_2_CORE).max_dpi, 8000);
+        assert_eq!(caps(&HASTE_2_CORE_WIRELESS).max_dpi, 12000);
+        assert_eq!(caps(&FUSE_WIRELESS).max_dpi, 12000);
+        assert!(!caps(&HASTE_2_CORE).lift && !caps(&FUSE_WIRELESS).lift);
+        assert!(caps(&HASTE_2).lift);
+        // A cable keeps NGENUITY's cable rates; 8000 Hz only on Haste 2 / Saga.
+        assert_eq!(links(&SAGA_PRO)[0].rates, R4K);
+        assert_eq!(links(&SAGA_PRO)[1].rates, R1K);
+        assert_eq!(links(&HASTE_2_PRO)[0], link(0x0cbd, 3, false, R4K));
+        assert_eq!(links(&HASTE_2)[0].rates, R8K);
+        assert_eq!(links(&SAGA)[0].rates, R8K);
+        assert_eq!(RATE_CODES[R8K - 1].0, 8000);
+        assert_eq!(RATE_CODES[R4K - 1].0, 4000);
+        assert_eq!(RATE_CODES[R1K - 1].0, 1000);
+        // The slider follows the model's maximum; no lift-off control without it.
+        let c = universal_controls("", R1K, caps(&HASTE_2_CORE), 0x03);
+        let dpi = c.iter().find(|m| m.key == SettingKey::Dpi).unwrap();
+        assert!(dpi.validate(&SettingValue::Int(8000)).is_ok());
+        assert!(dpi.validate(&SettingValue::Int(8050)).is_err());
+        assert!(c.iter().all(|m| m.key != SettingKey::LiftOffDistance));
+        // The Haste 2 Wireless cable is a second PID of the same model.
+        assert_eq!(HASTE_2_WIRELESS.pids, [0x0f98, 0x0d97]);
+    }
+
+    #[test]
+    fn live_table_write_is_read_back() {
+        let mut m = TwoSlots::new();
+        let edit = TableEdit {
+            hz: Some(250),
+            ..TableEdit::default()
+        };
+        let w = dpi_write(&pad(&TABLE, 64), &edit).unwrap();
+        m.query(&w).unwrap();
+        check_live(&mut |r: &[u8]| m.query(r), &w).unwrap();
+        // A write the mouse dropped, or no answer at all, is an error.
+        let mut m = TwoSlots::new();
+        m.drop_writes = true;
+        m.query(&w).unwrap();
+        let err = check_live(&mut |r: &[u8]| m.query(r), &w).unwrap_err();
+        assert!(err.to_string().contains("reads back"), "{err}");
+        let err = check_live(&mut |_: &[u8]| Ok(None), &w).unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err}");
+        // Brightness and presets have no read-back here.
+        check_live(&mut |_: &[u8]| Ok(None), &brightness_write(50)).unwrap();
+    }
+
+    #[test]
     fn save_controls() {
         for presets in [true, false] {
-            let c = universal_controls("static", 4, presets, 0x1f);
+            let caps = Caps {
+                presets,
+                ..STANDARD
+            };
+            let c = universal_controls("static", 4, caps, 0x1f);
             let save = c
                 .iter()
                 .find(|c| c.key == SettingKey::SaveToDevice)
                 .unwrap();
             assert!(save.persistent && save.blocked.is_none());
         }
-        assert!(saved_by(SettingKey::Dpi) && saved_by(SettingKey::Brightness));
-        assert!(!saved_by(SettingKey::LiftOffDistance) && !saved_by(SettingKey::Effect));
-        let dart = dart_controls("static");
+        assert!(saved_by(SettingKey::Dpi, STANDARD) && saved_by(SettingKey::Brightness, STANDARD));
+        assert!(!saved_by(SettingKey::LiftOffDistance, STANDARD));
+        assert!(!saved_by(SettingKey::Effect, STANDARD));
+        let dart = dart_controls("static", 5, true);
         let save = dart
             .iter()
             .find(|c| c.key == SettingKey::SaveToDevice)
             .unwrap();
-        assert!(save.persistent && save.blocked.is_some());
+        // NGENUITY sends `de ff` itself: an owner opt-in, not a placeholder.
+        assert!(save.persistent && save.blocked.is_none());
+    }
+
+    #[test]
+    fn alloy_rise_keyboards_only_have_brightness() {
+        // NGENUITY `UniversalKeyboardBase.ChangeBrightness`: the generic `40 01`.
+        for (spec, battery) in [
+            (&ALLOY_RISE, false),
+            (&ALLOY_RISE_75, false),
+            (&ALLOY_RISE_75_WIRELESS, true),
+        ] {
+            let Family::Universal { links, caps } = spec.family else {
+                unreachable!()
+            };
+            assert_eq!(caps.kind, DeviceKind::Keyboard, "{}", spec.name);
+            assert_eq!(caps.battery, battery, "{}", spec.name);
+            assert_eq!(links.len(), spec.pids.len());
+            let c = universal_controls("", 0, caps, 0x1f);
+            assert_eq!(
+                c.iter().map(|m| m.key).collect::<Vec<_>>(),
+                [SettingKey::Brightness],
+                "{}",
+                spec.name
+            );
+        }
+        assert_eq!(ALLOY_RISE_75_WIRELESS.pids, [0x01b9, 0x0eb8]);
+        // Mice keep their battery and DPI controls and the kind.
+        let Family::Universal { caps, .. } = HASTE_2.family else {
+            unreachable!()
+        };
+        assert!(caps.battery && caps.dpi && caps.kind == DeviceKind::Mouse);
+    }
+
+    #[test]
+    fn haste_wireless_is_a_single_led_dart_without_dpi() {
+        // NGENUITY `CMDMSPulsefireHasteWirelessShowLighting`: led 0, mode 0.
+        let (dpi, leds, cable) = dart_parts(&HASTE_WIRELESS);
+        assert!(!dpi && cable == 2);
+        let p = dart_packets(leds, "static", [1, 2, 3], 100, "medium");
+        assert_eq!(p.len(), 1);
+        assert_eq!(
+            p[0][1..13],
+            [0xd2, 0x00, 0x00, 0x08, 1, 2, 3, 1, 2, 3, 100, 0]
+        );
+        assert_eq!(
+            dart_packets(leds, "spectrum", [0; 3], 100, "medium").len(),
+            1
+        );
+        let c = dart_controls("static", 5, dpi);
+        assert!(c.iter().all(|m| !matches!(
+            m.key,
+            SettingKey::DpiStage1 | SettingKey::DpiStageActive | SettingKey::DpiStageCount
+        )));
+        assert!(c.iter().any(|m| m.key == SettingKey::ReportRate));
+        assert_eq!(HASTE_WIRELESS.pids, [0x028e, 0x048e]);
+        // The Dart keeps two LEDs and its stages.
+        assert_eq!(dart_parts(&DART), (true, DART_LEDS, 1));
+    }
+
+    #[test]
+    fn dart_stage_mask_save_and_status() {
+        // NGENUITY: `d3 01 00 01 <low bits for the profile's stage count>`.
+        assert_eq!(
+            dart_stage_mask(3)[..6],
+            [0x00, 0xd3, 0x01, 0x00, 0x01, 0x07]
+        );
+        assert_eq!(dart_stage_mask(5)[5], 0x1f);
+        assert_eq!(dart_stage_mask(0)[5], 0x01);
+        assert_eq!(dart_save()[..4], [0x00, 0xde, 0xff, 0x00]);
+        // `ff 03 <stage> <charging> <link> .. <reset>`.
+        assert_eq!(
+            parse_dart_status(&[0xff, 0x03, 2, 1, 1, 0, 0, 0]),
+            Some(DartStatus {
+                stage: 2,
+                charging: true,
+                linked: true,
+                reset: false
+            })
+        );
+        assert_eq!(
+            parse_dart_status(&[0xff, 0x03, 0, 0, 0, 0, 1, 0]).map(|s| (s.linked, s.reset)),
+            Some((false, true))
+        );
+        assert_eq!(parse_dart_status(&[0x51, 0x03, 0, 0, 0, 0, 0]), None);
+        // The stage count hides the stages above it and limits the active one.
+        let c = dart_controls("static", 3, true);
+        let hidden = |k| c.iter().find(|m| m.key == k).unwrap().hidden;
+        assert!(!hidden(SettingKey::DpiStage3) && hidden(SettingKey::DpiStage4));
+        let active = c
+            .iter()
+            .find(|m| m.key == SettingKey::DpiStageActive)
+            .unwrap();
+        assert!(active.validate(&SettingValue::Int(3)).is_ok());
+        assert!(active.validate(&SettingValue::Int(4)).is_err());
+        let count = c
+            .iter()
+            .find(|m| m.key == SettingKey::DpiStageCount)
+            .unwrap();
+        assert!(count.validate(&SettingValue::Int(5)).is_ok());
+        assert!(count.validate(&SettingValue::Int(6)).is_err());
+        assert_eq!(dart_stage_count(&SettingsMap::new()), 5);
     }
 
     #[test]
     fn dart_packets_match_layout() {
-        let p = dart_packets("static", [1, 2, 3], 100, "fast");
+        let p = dart_packets(DART_LEDS, "static", [1, 2, 3], 100, "fast");
         assert_eq!(p.len(), 2);
         assert_eq!(
             p[0][..13],
             [0x00, 0xd2, 0x10, 0x00, 0x08, 1, 2, 3, 1, 2, 3, 0x64, 0x00]
         );
         assert_eq!(p[1][2], DART_LED_LOGO);
-        let p = dart_packets("breathing", [1, 2, 3], 50, "slow");
+        let p = dart_packets(DART_LEDS, "breathing", [1, 2, 3], 50, "slow");
         assert_eq!(p[0][3..13], [0x20, 0x08, 1, 2, 3, 1, 2, 3, 50, 0x64]);
-        let p = dart_packets("spectrum", [0; 3], 100, "medium");
+        let p = dart_packets(DART_LEDS, "spectrum", [0; 3], 100, "medium");
         assert_eq!(p.len(), 1);
         assert_eq!(p[0][1..5], [0xd2, 0x20, 0x12, 0x08]);
         assert_eq!(p[0][12], 0x32);
@@ -1461,9 +2245,9 @@ mod tests {
 
     #[test]
     fn every_model_has_controls() {
-        assert!(!universal_controls("static", 4, true, 0).is_empty());
+        assert!(!universal_controls("static", 4, STANDARD, 0).is_empty());
         for (e, _) in UNI_EFFECTS {
-            assert!(universal_controls(e, 4, true, 0)
+            assert!(universal_controls(e, 4, HASTE_2_WIRELESS_CAPS, 0)
                 .iter()
                 .find(|c| c.key == SettingKey::Effect)
                 .unwrap()
@@ -1471,12 +2255,12 @@ mod tests {
                 .is_ok());
         }
         for (e, _) in DART_EFFECTS {
-            let c = dart_controls(e);
+            let c = dart_controls(e, 5, true);
             let color = c.iter().find(|c| c.key == SettingKey::ColorR).unwrap();
             assert_eq!(color.hidden, e == "spectrum");
         }
         // Saga Pro: brightness only; cable capped at 1000 Hz.
-        let saga = universal_controls("", 6, false, 0x0f);
+        let saga = universal_controls("", 6, STANDARD, 0x0f);
         assert!(saga.iter().all(|c| !matches!(
             c.key,
             SettingKey::Effect | SettingKey::ColorR | SettingKey::Speed
@@ -1491,7 +2275,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(links.len(), SAGA_PRO.pids.len());
-        assert!(links.iter().all(|l| SAGA_PRO.pids.contains(&l.0)));
+        assert!(links.iter().all(|l| SAGA_PRO.pids.contains(&l.pid)));
     }
 
     #[test]
@@ -1508,7 +2292,7 @@ mod tests {
             Some((57, true))
         );
         assert_eq!(parse_heartbeat(&[0x51, 0, 0, 0x03, 0xff, 0]), None);
-        let c = dart_controls("static");
+        let c = dart_controls("static", 5, true);
         let rate = c.iter().find(|c| c.key == SettingKey::ReportRate).unwrap();
         assert!(rate.validate(&SettingValue::Int(500)).is_ok());
     }
@@ -1528,7 +2312,7 @@ mod tests {
         // Notes: 16000 DPI = 0x0140 -> 40 01.
         assert_eq!(dart_stage(4, 16000)[5..7], [0x40, 0x01]);
         assert_eq!(dart_active(0)[..6], [0x00, 0xd3, 0x00, 0x00, 0x01, 0x00]);
-        let c = dart_controls("static");
+        let c = dart_controls("static", 5, true);
         let stage = c.iter().find(|m| m.key == SettingKey::DpiStage5).unwrap();
         assert!(stage.validate(&SettingValue::Int(16000)).is_ok());
         assert!(stage.validate(&SettingValue::Int(16050)).is_err());
@@ -1545,7 +2329,7 @@ mod tests {
         merge_setting(&mut s, SettingKey::DpiStage1, SettingValue::Int(40_000));
         merge_setting(&mut s, SettingKey::DpiStageActive, SettingValue::Int(9));
         merge_setting(&mut s, SettingKey::ReportRate, SettingValue::Int(8000));
-        crate::drivers::sanitize_saved(&mut s, &dart_controls("static"));
+        crate::drivers::sanitize_saved(&mut s, &dart_controls("static", 5, true));
         assert_eq!(
             get_setting(&s, SettingKey::DpiStage1),
             Some(&SettingValue::Int(16_000))
@@ -1556,7 +2340,7 @@ mod tests {
         let mut s = SettingsMap::new();
         merge_setting(&mut s, SettingKey::LiftOffDistance, SettingValue::Int(7));
         merge_setting(&mut s, SettingKey::DpiStageActive, SettingValue::Int(5));
-        crate::drivers::sanitize_saved(&mut s, &universal_controls("", 4, true, 0x1f));
+        crate::drivers::sanitize_saved(&mut s, &universal_controls("", 4, STANDARD, 0x1f));
         assert_eq!(get_setting(&s, SettingKey::LiftOffDistance), None);
         assert_eq!(
             get_setting(&s, SettingKey::DpiStageActive),

@@ -261,10 +261,10 @@ const ACTIVE_PROFILE: &str =
     "VARSTORE writes profile 1, not the active onboard profile (OpenRazer PR #2935)";
 const BASILISK_V3_BOOT: &str =
     "a Basilisk V3 stopped enumerating at boot with a stored effect (OpenRazer #1767)";
-const OTHER_FX_COMMANDS: &str =
-    "OpenRazer drives part of this model's lighting with other commands; not confirmed";
 const LED_ID_DIFFERS: &str =
     "OpenRazer stores this model's effects on another LED id than OpenRGB uses; not confirmed";
+const NEW_MODEL: &str =
+    "added from Synapse 4 data only; no second source confirms its stored lighting bytes";
 const NOT_IN_OPENRAZER: &str = "only OpenRGB supports this model, which never stores lighting";
 /// Effects OpenRGB offers a keyboard without asking its firmware.
 const OPENRGB_KBD_FX: u8 = OFF | STATIC | SPECTRUM | WAVE | BREATH;
@@ -567,7 +567,7 @@ pub const SPECS: &[Spec] = &[
         "Razer DeathAdder V3 Pro",
         &[0x00b6, 0x00b7, 0x00c2, 0x00c3],
         0x1f,
-        35000,
+        30000,
         Classic,
     )
     .stages()
@@ -578,7 +578,7 @@ pub const SPECS: &[Spec] = &[
         "Razer DeathAdder V3 HyperSpeed",
         &[0x00c4, 0x00c5],
         0x1f,
-        26000,
+        20000,
         Classic,
     )
     .stages()
@@ -822,7 +822,7 @@ pub const SPECS: &[Spec] = &[
         "Razer Basilisk V4 Pro",
         &[0x00e2, 0x00e3],
         0x1f,
-        0,
+        50000,
         Poll::None,
     )
     .iface(3)
@@ -863,8 +863,7 @@ pub const SPECS: &[Spec] = &[
         .stages()
         .battery(Rechargeable)
         .idle()
-        .wait(31)
-        .volatile_lighting(OTHER_FX_COMMANDS),
+        .wait(31),
     mouse("Razer Naga V2 HyperSpeed", &[0x00b4], 0x1f, 30000, Classic)
         .stages()
         .battery(Cell)
@@ -876,8 +875,7 @@ pub const SPECS: &[Spec] = &[
         .stages()
         .battery(Rechargeable)
         .idle()
-        .wait(31)
-        .volatile_lighting(OTHER_FX_COMMANDS),
+        .wait(31),
     mouse(
         "Razer Naga Left-Handed Edition 2020",
         &[0x008d],
@@ -956,8 +954,7 @@ pub const SPECS: &[Spec] = &[
     .stages()
     .battery(Rechargeable)
     .idle()
-    .wait(31)
-    .volatile_lighting(OTHER_FX_COMMANDS),
+    .wait(31),
     mouse(
         "Razer Pro Click V2 Vertical Edition",
         &[0x00c7, 0x00c8],
@@ -969,8 +966,7 @@ pub const SPECS: &[Spec] = &[
     .stages()
     .battery(Rechargeable)
     .idle()
-    .wait(31)
-    .volatile_lighting(OTHER_FX_COMMANDS),
+    .wait(31),
     // Mamba.
     mouse("Razer Mamba Elite", &[0x006c], 0x1f, 16000, Classic)
         .txns(&[(Family::Poll, 0xff)])
@@ -1074,6 +1070,171 @@ pub const SPECS: &[Spec] = &[
     mouse("Razer Ouroboros", &[0x0032], 0xff, 8200, Classic)
         .battery(Rechargeable)
         .idle(),
+    // ── Added from Synapse 4 module data (docs/vendor-re/razer.md): PIDs, DPI
+    // ranges and DPI stages come from the product modules; transaction ids
+    // follow the sibling model (Synapse sends a rolling id, not a fixed one),
+    // lighting stays volatile until a second source confirms it.
+    mouse("Razer Cobra (PID 00a2)", &[0x00a2], 0xff, 8500, Classic)
+        .fx_txn(0x1f)
+        .txns(&[(Fx(Effect::Breathing), 0x3f)])
+        .lit(&[LOGO_LED], ZONE_FX)
+        .stages()
+        .volatile_lighting(NEW_MODEL),
+    mouse("Razer Jugan", &[0x0063], 0xff, 7200, Classic),
+    mouse("Razer Abyssus Lite", &[0x0074], 0xff, 6400, Classic),
+    mouse(
+        "Razer Naga Classic Edition",
+        &[0x0093],
+        0x1f,
+        16000,
+        Classic,
+    ),
+    mouse("Razer Krakoff", &[0x00dd], 0x1f, 45000, HYPER_8K)
+        .stages()
+        .battery(Rechargeable)
+        .idle()
+        .wait(31),
+    mouse(
+        "Razer Orochi V2 (PID 00e0)",
+        &[0x00e0],
+        0x1f,
+        18000,
+        Classic,
+    )
+    .stages()
+    .battery(Cell)
+    .idle()
+    .wait(60),
+    mouse(
+        "Razer Viper V4 Pro",
+        &[0x00e5, 0x00e6],
+        0x1f,
+        50000,
+        HYPER_8K,
+    )
+    .stages()
+    .battery(Rechargeable)
+    .idle()
+    .wait(31),
+    mouse("Razer Naga V3 Pro", &[0x00e7, 0x00e8], 0x1f, 50000, Classic)
+        .lit(&[LOGO_LED], ZONE_FX | WAVE)
+        .stages()
+        .battery(Rechargeable)
+        .idle()
+        .wait(31)
+        .volatile_lighting(NEW_MODEL),
+    mouse(
+        "Razer Basilisk V4 HyperSpeed",
+        &[0x00eb, 0x00ea],
+        0x1f,
+        33000,
+        Classic,
+    )
+    .lit(&[ZERO_LED], MATRIX_FX)
+    .stages()
+    .battery(Cell)
+    .idle()
+    .wait(31)
+    .volatile_lighting(NEW_MODEL),
+    mouse(
+        "Razer DeathAdder V4 Pro Carbon Fiber Edition",
+        &[0x00ef, 0x00f0],
+        0x1f,
+        50000,
+        HYPER_8K,
+    )
+    .stages()
+    .battery(Rechargeable)
+    .idle()
+    .wait(31),
+    // Keyboards.
+    kbd(
+        "Razer Huntsman Essential",
+        &[0x0250],
+        0x1f,
+        2,
+        OPENRGB_KBD_FX,
+    )
+    .volatile_lighting(NEW_MODEL),
+    kbd(
+        "Razer Huntsman V3 X Tenkeyless",
+        &[0x02b1],
+        0x1f,
+        2,
+        OPENRGB_KBD_FX,
+    )
+    .volatile_lighting(NEW_MODEL),
+    kbd(
+        "Razer Reclusa X Mini 65%",
+        &[0x02e3],
+        0x1f,
+        2,
+        OPENRGB_KBD_FX,
+    )
+    .volatile_lighting(NEW_MODEL),
+    // Dongle 0x02c9 is steered with 0x80 (Detect Manager `dongleV2.json`).
+    kbd(
+        "Razer BlackWidow V4 Low-profile HyperSpeed",
+        &[0x02cc, 0x02c9],
+        0x1f,
+        3,
+        OPENRGB_KBD_FX,
+    )
+    .alt(0x02c9, link(0x9f, 2))
+    .battery(Rechargeable)
+    .wait(5)
+    .volatile_lighting(NEW_MODEL),
+    kbd(
+        "Razer BlackWidow V4 75% (Xbox Anniversary Edition)",
+        &[0x02f0],
+        0x1f,
+        3,
+        ALL_FX,
+    )
+    .poll(KBD_8K)
+    .volatile_lighting(NEW_MODEL),
+    // Huntsman V3 family (same module layout as the V3 Pro: 5 onboard slots).
+    kbd(
+        "Razer Huntsman V3 Pro Tenkeyless 8KHz",
+        &[0x02d0],
+        0x1f,
+        3,
+        ALL_FX,
+    )
+    .volatile_lighting(ACTIVE_PROFILE),
+    kbd(
+        "Razer Huntsman V3 Pro Mini 8KHz",
+        &[0x02d1],
+        0x1f,
+        3,
+        ALL_FX,
+    )
+    .wave(Wave::ZeroBased)
+    .volatile_lighting(ACTIVE_PROFILE),
+    kbd(
+        "Razer Huntsman V3 Tenkeyless 8KHz",
+        &[0x02e5],
+        0x1f,
+        3,
+        ALL_FX,
+    )
+    .volatile_lighting(ACTIVE_PROFILE),
+    kbd(
+        "Razer Huntsman V3 HE Magnetic Tenkeyless 8KHz",
+        &[0x02ea],
+        0x1f,
+        3,
+        ALL_FX,
+    )
+    .volatile_lighting(ACTIVE_PROFILE),
+    kbd(
+        "Razer Huntsman Signature Edition",
+        &[0x02d8],
+        0x1f,
+        3,
+        ALL_FX,
+    )
+    .volatile_lighting(ACTIVE_PROFILE),
 ];
 
 pub fn spec_for(pid: u16) -> Option<&'static Spec> {
@@ -1236,6 +1397,12 @@ mod tests {
         0x00de, 0x00df,
     ];
 
+    /// PIDs whose Synapse 4 module writes the stage block (`04/06`, slot 1)
+    /// and that OpenRazer does not know; layout-validated before each write.
+    const SYNAPSE_VARSTORE_STAGES: &[u16] = &[
+        0x00a2, 0x00dd, 0x00e0, 0x00e5, 0x00e6, 0x00e7, 0x00e8, 0x00ea, 0x00eb, 0x00ef, 0x00f0,
+    ];
+
     /// Save mode only stores what OpenRazer stores, with the same command,
     /// for that exact PID.
     #[test]
@@ -1251,17 +1418,23 @@ mod tests {
                     assert!(OPENRAZER_VARSTORE_LIGHTING.contains(pid), "{pid:04x}");
                 }
                 if s.stages {
-                    assert!(OPENRAZER_VARSTORE_STAGES.contains(pid), "{pid:04x}");
+                    assert!(
+                        OPENRAZER_VARSTORE_STAGES.contains(pid)
+                            || SYNAPSE_VARSTORE_STAGES.contains(pid),
+                        "{pid:04x}"
+                    );
                 }
             }
         }
         let held = |pid| spec_for(pid).unwrap().volatile_lighting.is_some();
-        for pid in [
-            0x0099, 0x00cb, 0x00aa, 0x02a6, 0x02a7, 0x02b0, 0x00a7, 0x00d0,
-        ] {
+        for pid in [0x0099, 0x00cb, 0x00aa, 0x02a6, 0x02a7, 0x02b0] {
             assert!(held(pid), "{pid:04x}");
         }
+        // Synapse sends the same extended-matrix bytes to these (slot 1).
         assert!(!held(0x0084) && !held(0x0287));
+        for pid in [0x008f, 0x00a7, 0x00d0, 0x00c7] {
+            assert!(!held(pid), "{pid:04x}");
+        }
     }
 
     /// Rows from OpenRazer (02cf, Tartarus) and OpenRGB (the rest): link per
@@ -1286,7 +1459,7 @@ mod tests {
         assert_eq!(row(0x00e3), (0x1f, 0x1f, 3, &[ZERO_LED][..], None));
         let v4 = spec_for(0x00e2).unwrap();
         assert!(!v4.has_effect(Effect::Breathing) && v4.has_effect(Effect::Wave));
-        assert_eq!((v4.dpi_max, v4.link.poll), (0, Poll::None));
+        assert_eq!((v4.dpi_max, v4.link.poll), (50000, Poll::None));
         assert!(!spec_for(0x02b3).unwrap().has_effect(Effect::Reactive));
         for pid in [0x02cf, 0x022b, 0x0244, 0x02b3, 0x02d4, 0x00e2] {
             assert!(

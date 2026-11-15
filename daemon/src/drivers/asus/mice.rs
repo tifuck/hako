@@ -11,6 +11,10 @@
 //! auto-off are stored too but cannot be read back to check them first.
 //! Re-applying settings on (re)connect never saves.
 //!
+//! The mouse also pushes `12 08` reports on its event collection (usage page
+//! 0xFFC1): a DPI button press names the new stage at once, so the stage
+//! follows the button between the periodic polls. The node is optional.
+//!
 //! DPI: `dpi_stage_1..N` are the onboard stages, `dpi_stage_active` the stage
 //! the DPI button selected and `dpi` mirrors the active stage's value (the
 //! active stage is re-read on connect and every few seconds, as the button
@@ -20,6 +24,7 @@ pub use super::mouse_models::{find, find_omni, MouseSpec};
 use super::protocol::{self as p, Battery, Exchange, Lod, Transport, VID};
 use super::{effect_of, int_of, lighting_controls, lighting_defaults, rgb_of};
 use crate::drivers::DeviceAdapter;
+use crate::hid::{enumerate_hidraw, usage_pages, HidrawDevice};
 use anyhow::{bail, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::{get_setting, merge_setting, ConfigPaths};
@@ -32,6 +37,9 @@ const BATTERY_POLL: Duration = Duration::from_secs(30);
 const RELINK_POLL: Duration = Duration::from_secs(5);
 /// How often the active DPI stage is re-read.
 const STAGE_POLL: Duration = Duration::from_secs(5);
+/// Usage page of the collection that pushes `12 08` events (Gear Link
+/// `SUPPORT_DEVICES.eventUsagePage` of the mice).
+const EVENT_PAGE: u16 = 0xffc1;
 
 const STAGE_KEYS: [SettingKey; 4] = [
     SettingKey::DpiStage1,
@@ -57,6 +65,8 @@ pub struct MouseAdapter {
     spec: &'static MouseSpec,
     id: DeviceId,
     t: Option<Transport>,
+    /// The event collection of a mouse on its own PID, if it has one.
+    ev: Option<HidrawDevice>,
     settings: SettingsMap,
     battery: Option<BatteryState>,
     /// Raw low-battery threshold from `12 07`; auto-off writes must resend it.
@@ -80,7 +90,11 @@ impl MouseAdapter {
             .map(|i| i.name)
             .unwrap_or_default();
         let spec = variant(spec, &name);
-        Self::with(spec, pid, t, path, paths)
+        let mut a = Self::with(spec, pid, t, path, paths)?;
+        if !a.spec.rx.contains(&pid) {
+            a.ev = open_events(pid);
+        }
+        Ok(a)
     }
 
     /// A mouse the Omni receiver `receiver` lists as `paired`.
@@ -116,6 +130,7 @@ impl MouseAdapter {
                 instance: path.clone(),
             },
             t: Some(t),
+            ev: None,
             settings,
             battery: (spec.battery != Battery::None).then(|| BatteryState {
                 label: "Mouse".into(),
@@ -240,16 +255,59 @@ impl MouseAdapter {
         let Some(d) = spec.dpi.filter(|d| d.active) else {
             return Ok(());
         };
-        let stage = p::parse_stage(
+        let Some(stage) = p::parse_stage(
             &self.t()?.transact(p::GET_PROFILE)?,
             spec.stages,
             d.zero_based,
-        );
+        ) else {
+            return Ok(());
+        };
         if int_of(&self.settings, SettingKey::DpiStageActive, 0) != i64::from(stage) {
             mirror_active(&mut self.settings, stage);
             self.persist()?;
         }
         Ok(())
+    }
+
+    /// Handle the `12 08` reports queued on the event collection.
+    fn read_events(&mut self) {
+        let Some(ev) = self.ev.as_mut() else {
+            return;
+        };
+        let mut buf = [0u8; 65];
+        let mut stage = None;
+        let mut woke = false;
+        for _ in 0..16 {
+            match p::poll_report(ev, &mut buf) {
+                Ok(Some(n)) => match p::parse_event(&buf[..n]) {
+                    Some(p::MouseEvent::DpiButton(i) | p::MouseEvent::DpiChanged(i)) => {
+                        stage = Some(i.saturating_add(1));
+                    }
+                    Some(p::MouseEvent::Awake(on)) => woke |= on,
+                    None => {}
+                },
+                Ok(None) => break,
+                Err(_) => {
+                    self.ev = None;
+                    break;
+                }
+            }
+        }
+        if let Some(stage) = stage.filter(|s| (1..=self.spec.stages).contains(s)) {
+            if self.spec.dpi.is_some_and(|d| d.active)
+                && int_of(&self.settings, SettingKey::DpiStageActive, 0) != i64::from(stage)
+            {
+                mirror_active(&mut self.settings, stage);
+                if let Err(e) = self.persist() {
+                    self.last_error = Some(format!("DPI stage: {e:#}"));
+                }
+            }
+        } else if woke {
+            // Re-read the stage on the next tick: it may have moved while asleep.
+            self.last_stage_poll = Instant::now()
+                .checked_sub(STAGE_POLL)
+                .unwrap_or_else(Instant::now);
+        }
     }
 
     fn apply(&mut self, key: SettingKey) -> Result<()> {
@@ -335,7 +393,8 @@ impl MouseAdapter {
             &self.t()?.transact(p::GET_PROFILE)?,
             spec.stages,
             d.zero_based,
-        );
+        )
+        .context("the mouse reports no valid active DPI stage")?;
         self.write_stage(stage, dpi)?;
         merge_setting(
             &mut self.settings,
@@ -469,14 +528,16 @@ fn read_performance(spec: &MouseSpec, t: &mut impl Exchange) -> Result<SettingsM
             }
         }
         if d.active {
-            let stage = p::parse_stage(&t.transact(p::GET_PROFILE)?, spec.stages, d.zero_based);
-            merge_setting(
-                &mut hw,
-                SettingKey::DpiStageActive,
-                SettingValue::Int(stage.into()),
-            );
-            if let Some(v) = get_setting(&hw, stage_key(stage)).cloned() {
-                merge_setting(&mut hw, SettingKey::Dpi, v);
+            let r = t.transact(p::GET_PROFILE)?;
+            if let Some(stage) = p::parse_stage(&r, spec.stages, d.zero_based) {
+                merge_setting(
+                    &mut hw,
+                    SettingKey::DpiStageActive,
+                    SettingValue::Int(stage.into()),
+                );
+                if let Some(v) = get_setting(&hw, stage_key(stage)).cloned() {
+                    merge_setting(&mut hw, SettingKey::Dpi, v);
+                }
             }
         }
     }
@@ -496,9 +557,43 @@ fn read_performance(spec: &MouseSpec, t: &mut impl Exchange) -> Result<SettingsM
 /// the user pressing it, not a failed write.
 const UNCHECKED: [SettingKey; 2] = [SettingKey::Dpi, SettingKey::DpiStageActive];
 
+/// Keys [`read_performance`] reads back on `spec` that [`check_profile`] compares.
+fn checked_keys(spec: &MouseSpec) -> Vec<SettingKey> {
+    let mut keys = Vec::new();
+    if spec.dpi.is_some() {
+        keys.extend((1..=spec.stages).map(stage_key));
+    }
+    if !spec.rates.is_empty() {
+        keys.push(SettingKey::ReportRate);
+    }
+    if spec.snapping {
+        keys.push(SettingKey::AngleSnapping);
+    }
+    if spec.debounce {
+        keys.push(SettingKey::Debounce);
+    }
+    if spec.lod != Lod::None {
+        keys.push(SettingKey::LiftOffDistance);
+    }
+    keys
+}
+
 /// Every value read back from the active profile that the user has set must
-/// match it, so a dropped or refused write is never made permanent.
-fn check_profile(expected: &SettingsMap, hw: &SettingsMap) -> Result<()> {
+/// match it, so a dropped or refused write is never made permanent. A set
+/// value that did not read back (out of range, unknown) cannot be checked, so
+/// it fails too.
+fn check_profile(spec: &MouseSpec, expected: &SettingsMap, hw: &SettingsMap) -> Result<()> {
+    let unread: Vec<&str> = checked_keys(spec)
+        .into_iter()
+        .filter(|&k| get_setting(expected, k).is_some() && get_setting(hw, k).is_none())
+        .map(SettingKey::as_str)
+        .collect();
+    if !unread.is_empty() {
+        bail!(
+            "not saved: the mouse's active profile is unreadable for {}",
+            unread.join(", ")
+        );
+    }
     let diff: Vec<String> = hw
         .iter()
         .filter_map(|(k, got)| {
@@ -519,7 +614,7 @@ fn check_profile(expected: &SettingsMap, hw: &SettingsMap) -> Result<()> {
 /// Read the active profile back, check it, then `50 03` (store it).
 fn store_profile(spec: &MouseSpec, t: &mut impl Exchange, expected: &SettingsMap) -> Result<()> {
     let hw = read_performance(spec, t)?;
-    check_profile(expected, &hw)?;
+    check_profile(spec, expected, &hw)?;
     t.transact(p::MOUSE_SAVE).context("save to device memory")?;
     Ok(())
 }
@@ -631,14 +726,18 @@ impl DeviceAdapter for MouseAdapter {
         } else {
             self.apply(key)
         };
-        if let Err(e) = result {
+        if let Err(mut e) = result {
             // The device kept its old value; so do the UI and the file.
             self.settings = before;
-            self.last_error = Some(e.to_string());
             if is_lighting(key) && self.spec.zones.len() > 1 {
                 // Zones written before the failure get the old lighting back.
-                let _ = self.write_lighting();
+                if let Err(restore) = self.write_lighting() {
+                    e = anyhow::anyhow!(
+                        "{e:#}; restoring the previous look also failed: {restore:#}"
+                    );
+                }
             }
+            self.last_error = Some(e.to_string());
             return Err(e);
         }
         // The change is live; storing it is a separate step that can fail.
@@ -659,6 +758,7 @@ impl DeviceAdapter for MouseAdapter {
     }
 
     fn tick(&mut self) -> Result<()> {
+        self.read_events();
         if self.spec.battery != Battery::None {
             let every = if self.online {
                 BATTERY_POLL
@@ -675,14 +775,27 @@ impl DeviceAdapter for MouseAdapter {
             }
         }
         if self.online && self.last_stage_poll.elapsed() >= STAGE_POLL {
-            let _ = self.poll_stage();
+            if let Err(e) = self.poll_stage() {
+                self.last_error = Some(format!("DPI stage: {e:#}"));
+            }
         }
         Ok(())
     }
 
     fn shutdown(&mut self) {
         self.t = None;
+        self.ev = None;
     }
+}
+
+/// The node of `pid` that declares the event usage page, if there is one.
+fn open_events(pid: u16) -> Option<HidrawDevice> {
+    let info = enumerate_hidraw().ok()?.into_iter().find(|d| {
+        d.vendor_id == VID
+            && d.product_id == pid
+            && usage_pages(&d.report_descriptor()).contains(&EVENT_PAGE)
+    })?;
+    HidrawDevice::open(&info.path).ok()
 }
 
 #[cfg(test)]
@@ -718,6 +831,29 @@ mod tests {
         for m in MICE {
             assert_eq!(find(m.pids[0]).map(|s| s.name), Some(m.name));
         }
+    }
+
+    #[test]
+    fn gear_link_models() {
+        // GL p713 caps the Harpe Ace Aim Lab at 42000 DPI.
+        assert_eq!(find(0x1a92).unwrap().dpi.unwrap().max, 42_000);
+        // 1-dpi wire unit for the 65000 group (`dpiLevelBase` 1), 50 for p731.
+        for (pid, step, max) in [
+            (0x1db0, 1, 65_000),
+            (0x1e4e, 1, 65_000),
+            (0x1e2f, 1, 65_000),
+            (0x1e51, 1, 65_000),
+            (0x1dde, 1, 65_000),
+            (0x1d7a, 1, 65_000),
+            (0x1e4a, 50, 42_000),
+        ] {
+            let d = find(pid).unwrap().dpi.unwrap();
+            assert_eq!((d.step, d.max), (step, max), "{pid:04x}");
+        }
+        // Wireless PIDs are reached through the Omni receiver's pairing list.
+        assert_eq!(find_omni(0x1dbf).unwrap().name, "ASUS ROG Gladius IV Ace");
+        assert_eq!(find_omni(0x1c6b).unwrap().name, "ASUS ROG Harpe II Ace");
+        assert_eq!(find(0x1dde).unwrap().rates, &[125, 250, 500, 1000]);
     }
 
     #[test]
@@ -946,6 +1082,39 @@ mod tests {
             .find(|m| m.key == SettingKey::SaveToDevice)
             .unwrap();
         assert!(save.persistent && save.blocked.is_none());
+    }
+
+    #[test]
+    fn save_refuses_values_it_cannot_read_back() {
+        // Gladius II Wireless (as above), stage 2 raw FFFF: beyond max DPI.
+        let spec = find(0x18a0).unwrap();
+        let settings = p::packet(&[
+            0x12, 0x04, 0x00, 0x00, 0x07, 0x00, 0xff, 0xff, 0x03, 0x00, 0x02, 0x00, 0x00,
+        ]);
+        // Active-stage byte names no stage of a 2-stage mouse.
+        let mut profile = p::packet(&[0x12, 0x00]);
+        profile[11] = 7;
+        let mut m = FakeMouse {
+            settings,
+            profile,
+            reject_save: false,
+            sent: vec![],
+        };
+        let hw = read_performance(spec, &mut m).unwrap();
+        assert_eq!(get_setting(&hw, SettingKey::DpiStage2), None);
+        assert_eq!(get_setting(&hw, SettingKey::DpiStageActive), None);
+        assert_eq!(get_setting(&hw, SettingKey::Dpi), None);
+
+        let mut want = SettingsMap::new();
+        merge_setting(&mut want, SettingKey::DpiStage1, SettingValue::Int(800));
+        merge_setting(&mut want, SettingKey::DpiStage2, SettingValue::Int(1600));
+        m.sent.clear();
+        let err = store_profile(spec, &mut m, &want).unwrap_err().to_string();
+        assert!(
+            err.contains("unreadable") && err.contains("dpi_stage_2"),
+            "{err}"
+        );
+        assert!(m.sent.iter().all(|c| c[0] != 0x50));
     }
 
     /// Read-only: profile, settings and battery of the first ASUS mouse found.

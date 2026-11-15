@@ -10,18 +10,23 @@
 //! - OpenRGB `Controllers/HyperXMouseController`, `Controllers/HyperXKeyboardController`
 //!   (GPL, layouts only): <https://gitlab.com/CalcProgrammer1/OpenRGB>
 //! - Pulsefire Dart RE notes (CC0; writes are volatile until a `de ff` save, which
-//!   we never send): <https://github.com/santeri3700/hyperx_pulsefire_dart_reverse_engineering>
+//!   only the owner's opt-in sends): <https://github.com/santeri3700/hyperx_pulsefire_dart_reverse_engineering>
 //! - PlasmaNGenuity `plasmangenuity/drivers/hyperx/protocol.py` (MIT, Dart heartbeat):
 //!   <https://github.com/radoslavchobanov/PlasmaNGenuity>
 //! - HyperX Saga Control `docs/protocol-notes.md`, `hyperx_saga_control/protocol.py`
 //!   (MIT, Saga Pro IDs and live writes): <https://github.com/notwaterbtl/hyperx-saga-control>
+//! - HyperX NGENUITY 5.38 (Store) and 3.2.0, read statically for interoperability
+//!   (no code used): the PID table (`HyperXDeviceUtils`), per-family setter acks,
+//!   the universal `ff` ack / `fb 0a` wake handling, model limits of the
+//!   universal mice, the Flight battery table, the Dart's `d3 01` mask and `de ff`.
 //!
 //! `headset.rs`, `mouse.rs`, `pulsefire.rs` and `keyboard.rs` each hold pure packet
 //! builders and parsers and a spec table (one entry per model); `direct.rs` is the
-//! shared adapter for host-streamed lighting. The only onboard write is the
-//! universal-protocol mice's slot-1 copy of the DPI table and brightness,
-//! behind the owner's save-to-device opt-in (`mouse.rs`); other documented
-//! profile writes are blocked placeholders (docs/onboard-writes/hyperx.md).
+//! shared adapter for host-streamed lighting. The onboard writes are the
+//! universal-protocol mice's slot-1 copy of the DPI table, brightness (and,
+//! on the Haste 2 Wireless, lift-off) and the Dart's `de ff`, all behind the
+//! owner's save-to-device opt-in (`mouse.rs`); other documented profile writes
+//! are blocked placeholders (docs/onboard-writes/hyperx.md).
 //! Firmware is never written.
 
 mod direct;
@@ -81,10 +86,24 @@ pub const MODELS: &[Model] = &[
     model!(Headset, headset::CLOUD_FLIGHT_S),
     model!(Headset, headset::CLOUD_III_WIRED),
     model!(Headset, headset::CLOUD_ALPHA_S),
+    model!(Headset, headset::CLOUD_ALPHA_S_HP),
+    model!(Headset, headset::CLOUD_II_HP_7_1),
     model!(Mouse, mouse::HASTE_2_WIRELESS),
     model!(Mouse, mouse::SAGA_PRO),
+    model!(Mouse, mouse::HASTE_2),
+    model!(Mouse, mouse::HASTE_2_MINI_WIRELESS),
+    model!(Mouse, mouse::HASTE_2_S_WIRELESS),
+    model!(Mouse, mouse::HASTE_2_CORE),
+    model!(Mouse, mouse::HASTE_2_CORE_WIRELESS),
+    model!(Mouse, mouse::HASTE_2_PRO),
+    model!(Mouse, mouse::FUSE_WIRELESS),
+    model!(Mouse, mouse::SAGA),
+    model!(Keyboard, mouse::ALLOY_RISE),
+    model!(Keyboard, mouse::ALLOY_RISE_75),
+    model!(Keyboard, mouse::ALLOY_RISE_75_WIRELESS),
     model!(Mouse, mouse::DART),
     model!(Mouse, mouse::DART_HP),
+    model!(Mouse, mouse::HASTE_WIRELESS),
     model!(Mouse, pulsefire::HASTE),
     model!(Mouse, pulsefire::HASTE_HP),
     model!(Mouse, pulsefire::SURGE),
@@ -92,7 +111,9 @@ pub const MODELS: &[Model] = &[
     model!(Mouse, pulsefire::CORE),
     model!(Mouse, pulsefire::CORE_HP),
     model!(Mouse, pulsefire::FPS_PRO),
+    model!(Mouse, pulsefire::FPS_PRO_HP),
     model!(Mouse, pulsefire::RAID),
+    model!(Mouse, pulsefire::RAID_HP),
     model!(Keyboard, keyboard::ORIGINS),
     model!(Keyboard, keyboard::ORIGINS_HP),
     model!(Keyboard, keyboard::ORIGINS_CORE),

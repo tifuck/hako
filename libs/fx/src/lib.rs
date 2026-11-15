@@ -221,12 +221,13 @@ unsafe extern "C" fn instantiate(desc: *const Descriptor, rate: c_ulong) -> *mut
         return std::ptr::null_mut();
     };
     let ports = desc.port_count as usize;
+    let defaults: Vec<f32> = defaults.into_iter().map(|(_, v)| v).collect();
     Box::into_raw(Box::new(Instance {
         prepare: effect.reset_preparer(),
         effect,
         ports: vec![std::ptr::null_mut(); ports],
-        controls: vec![0.0; ports - AUDIO_PORTS.len()],
-        defaults: defaults.into_iter().map(|(_, v)| v).collect(),
+        controls: defaults.clone(),
+        defaults,
         reset: AtomicBool::new(false),
     }))
     .cast()
@@ -382,6 +383,22 @@ mod tests {
             index += 1;
         }
         assert!(ladspa_descriptor(index).is_null());
+    }
+
+    /// A control port the host never connects runs on its table default.
+    #[test]
+    fn unconnected_controls_start_at_their_defaults() {
+        let stages = AuxEffectKind::all()
+            .into_iter()
+            .filter_map(|k| k.fx_controls());
+        for (index, (label, controls)) in stages.enumerate() {
+            let desc = unsafe { &*ladspa_descriptor(index as c_ulong) };
+            let handle = unsafe { (desc.instantiate)(desc, 48000) };
+            let defaults: Vec<f32> = controls.iter().map(|(_, v)| *v).collect();
+            let instance = unsafe { &*handle.cast::<Instance>() };
+            assert_eq!(instance.controls, defaults, "{label}");
+            unsafe { (desc.cleanup)(handle) };
+        }
     }
 
     /// Runs plugin `index` on `values` through the C ABI: 100 blocks of a vowel plus sibilance,

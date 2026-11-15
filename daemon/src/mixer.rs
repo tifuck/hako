@@ -12,7 +12,7 @@
 //! profiles at start (`scenes_to_profiles`).
 
 use crate::drivers::EventTx;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use hako_audio::mixer::{
     apps, devices, starter_scene, Detected, MixerGraph, Naming, Side, StripKey,
 };
@@ -166,6 +166,7 @@ impl MixerService {
             suppressed: false,
             game: None,
             latency,
+            listing_failed: None,
             audio: audio.clone(),
             shared: shared.clone(),
         };
@@ -275,7 +276,9 @@ impl MixerService {
         let file = loop {
             if needed && made.is_none() {
                 let line_in = legacy_line_in(&self.shared.paths);
-                made = Some(starter(&self.shared.paths, &self.audio, line_in));
+                made = Some(
+                    starter(&self.shared.paths, &self.audio, line_in).map_err(PatchError::Io)?,
+                );
             }
             let mut cache = lock(&self.shared.cache);
             if cache.stopped {
@@ -292,9 +295,7 @@ impl MixerService {
                     needed = true;
                     continue;
                 };
-                if let Some(live) = layout {
-                    next.live = live;
-                }
+                next.live = layout;
             }
             if later {
                 cache.dirty.get_or_insert_with(Instant::now);
@@ -334,12 +335,14 @@ impl MixerService {
     }
 
     /// Kill-switch: the graph goes and stays down until the next patch.
-    /// Blocking.
-    pub fn reset(&self) {
+    /// An error when the engine did not confirm it. Blocking.
+    pub fn reset(&self) -> Result<()> {
         let (reply, done) = mpsc::channel();
-        if self.tx.send(Cmd::Reset(reply)).is_ok() {
-            let _ = done.recv_timeout(APPLY_WAIT);
+        // No engine thread: its graph went with it.
+        if self.tx.send(Cmd::Reset(reply)).is_err() {
+            return Ok(());
         }
+        wait_for_engine(&done)
     }
 
     /// Daemon stop: save a pending fader change, tear the graph down (ChatMix
@@ -348,9 +351,25 @@ impl MixerService {
         lock(&self.shared.cache).stopped = true;
         let (reply, done) = mpsc::channel();
         if self.tx.send(Cmd::Shutdown(reply)).is_ok() {
-            let _ = done.recv_timeout(APPLY_WAIT);
+            if let Err(e) = wait_for_engine(&done) {
+                warn!("mixer shutdown: {e:#}");
+            }
         }
         self.shared.flush(true);
+    }
+}
+
+/// The engine's answer to a teardown (`Reset` / `Shutdown`).
+fn wait_for_engine(done: &mpsc::Receiver<()>) -> Result<()> {
+    match done.recv_timeout(APPLY_WAIT) {
+        Ok(()) => Ok(()),
+        Err(RecvTimeoutError::Timeout) => anyhow::bail!(
+            "the mixer did not stop within {} s (its strips may still run)",
+            APPLY_WAIT.as_secs()
+        ),
+        Err(RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("the mixer engine crashed while stopping (it restarts on its own)")
+        }
     }
 }
 
@@ -360,8 +379,9 @@ fn starter(
     paths: &ConfigPaths,
     audio: &AudioService,
     line_in: (bool, Option<u8>),
-) -> Option<Scene> {
-    let (devices, default_sink) = devices(&[]).unwrap_or_default();
+) -> Result<Scene> {
+    let (devices, default_sink) =
+        devices(&[]).context("the starter layout needs the audio devices")?;
     let aux = load_app_config(paths).map(|c| c.aux).unwrap_or_default();
     let headset = audio.chatmix_sink();
     let live = starter_scene(&Detected {
@@ -372,13 +392,9 @@ fn starter(
         aux_enabled: line_in.0,
         capture_percent: Some(line_in.1.unwrap_or(aux.capture_percent)),
     });
-    match live.validate() {
-        Ok(()) => Some(live),
-        Err(e) => {
-            warn!("mixer starter layout: {e}");
-            None
-        }
-    }
+    live.validate()
+        .map_err(|e| anyhow::anyhow!("the starter layout is invalid: {e}"))?;
+    Ok(live)
 }
 
 /// The headset's pre-mixer line-in, from its device file: whether it was on
@@ -461,17 +477,22 @@ fn migrate(paths: &ConfigPaths, audio: &AudioService, file: MixerFile) -> MixerF
     let fresh = migrates(line_in.0, &file);
     // ponytail: no line-in device yet (PipeWire still starting) retries at
     // the next daemon start; watch for it if that turns out to happen.
-    let Some((live, source)) = starter(paths, audio, line_in).and_then(|scene| {
-        let source = scene
-            .inputs
-            .iter()
-            .find(|i| i.id == "line-in")
-            .and_then(|i| match &i.kind {
-                InputKind::Hardware { sources } => sources.first().cloned(),
-                InputKind::Virtual { .. } => None,
-            })?;
-        Some((scene, source))
-    }) else {
+    let live = match starter(paths, audio, line_in) {
+        Ok(live) => live,
+        Err(e) => {
+            warn!("mixer: line-in was on, but not moved into the mixer yet: {e:#}");
+            return file;
+        }
+    };
+    let Some(source) = live
+        .inputs
+        .iter()
+        .find(|i| i.id == "line-in")
+        .and_then(|i| match &i.kind {
+            InputKind::Hardware { sources } => sources.first().cloned(),
+            InputKind::Virtual { .. } => None,
+        })
+    else {
         warn!("mixer: line-in was on, but its device is not there; not moved into the mixer yet");
         return file;
     };
@@ -590,10 +611,17 @@ fn supervise(mut actor: Actor, rx: mpsc::Receiver<Cmd>) {
             .min(RESTART_MAX);
         crashes += 1;
         error!("mixer engine crashed; restarting it in {wait:?}");
-        let events = actor.shared.events.clone();
+        let (audio, shared) = (actor.audio.clone(), actor.shared.clone());
         if catch_unwind(AssertUnwindSafe(|| actor.recover(wait))).is_err() {
             error!("mixer engine: recovering from a crash failed; stopped");
-            let _ = events.send(AdapterEvent::Error {
+            lock(&shared.status).running = false;
+            if !matches!(
+                catch_unwind(AssertUnwindSafe(|| audio.hand_over(false))),
+                Ok(Ok(()))
+            ) {
+                warn!("mixer engine stopped: ChatMix could not be handed back");
+            }
+            let _ = shared.events.send(AdapterEvent::Error {
                 device: None,
                 message: "Mixer: the engine crashed and could not recover; restart hakod".into(),
             });
@@ -628,6 +656,8 @@ struct Actor {
     game: Option<bool>,
     /// `node.latency` in samples, for a graph rebuilt after a crash.
     latency: u32,
+    /// The last failed device / app listing's error, logged once.
+    listing_failed: Option<String>,
     audio: Arc<AudioService>,
     shared: Arc<Shared>,
 }
@@ -701,7 +731,15 @@ impl Actor {
     /// After a crash: the graph's processes go (a fresh graph is built at
     /// the next sync), ChatMix is handed back, the status says not running.
     fn recover(&mut self, wait: Duration) {
-        self.graph = MixerGraph::new(Naming::daemon(), self.latency);
+        // Gone before ChatMix comes back (same sink names). Its teardown runs
+        // on state that just panicked: a panic there keeps nothing handed over.
+        let old = std::mem::replace(
+            &mut self.graph,
+            MixerGraph::new(Naming::daemon(), self.latency),
+        );
+        if catch_unwind(AssertUnwindSafe(|| drop(old))).is_err() {
+            error!("mixer engine: tearing down the crashed graph failed");
+        }
         self.game = None;
         let handed_back = std::mem::take(&mut self.handed_over);
         if handed_back {
@@ -771,7 +809,8 @@ impl Actor {
     }
 
     /// Publish status and meter nodes; send `MixerUpdated` if anything changed.
-    fn publish(&self) {
+    /// A failed device or app listing keeps the lists published before.
+    fn publish(&mut self) {
         let live = &self.file.live;
         let mut created: Vec<&str> = self.graph.node_names();
         created.extend(live.inputs.iter().filter_map(|i| match &i.kind {
@@ -782,13 +821,27 @@ impl Actor {
             OutputKind::Virtual { node_name } => Some(node_name.as_str()),
             OutputKind::Hardware { .. } => None,
         }));
+        let listed = devices(&created)
+            .and_then(|(list, _)| Ok((list.into_iter().map(|d| d.device).collect(), apps()?)));
+        let (devices, apps) = match listed {
+            Ok(lists) => {
+                is_new_error(&mut self.listing_failed, None);
+                lists
+            }
+            Err(e) => {
+                let error = format!("{e:#}");
+                if is_new_error(&mut self.listing_failed, Some(&error)) {
+                    warn!("mixer: listing audio devices and apps: {error}");
+                }
+                let published = lock(&self.shared.status);
+                (published.devices.clone(), published.apps.clone())
+            }
+        };
         let status = MixerStatus {
             running: self.graph.running(),
             problems: self.graph.problems().to_vec(),
-            devices: devices(&created)
-                .map(|(list, _)| list.into_iter().map(|d| d.device).collect())
-                .unwrap_or_default(),
-            apps: apps().unwrap_or_default(),
+            devices,
+            apps,
         };
         *lock(&self.shared.meters) = live
             .inputs
@@ -1270,6 +1323,22 @@ mod tests {
             mute: true,
         };
         assert!(matches!(dead.patch(&[mute]), Err(PatchError::Io(_))));
+        assert!(dead.reset().is_ok(), "no engine: nothing left to tear down");
+
+        // An engine that drops the kill-switch's reply did not confirm it.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(cmd) = rx.recv() {
+                drop(cmd);
+            }
+        });
+        let wedged = MixerService {
+            tx,
+            shared: mixer.shared.clone(),
+            audio: mixer.audio.clone(),
+        };
+        let e = wedged.reset().unwrap_err();
+        assert!(format!("{e:#}").contains("crashed while stopping"), "{e:#}");
         mixer.shutdown();
         let _ = std::fs::remove_dir_all(&paths.root);
     }

@@ -26,6 +26,12 @@
 //! `03 b1 01` link up / `03 b1 f0` asleep, vole §4a, xm2ctl), and the
 //! configuration is read right after one of them.
 //!
+//! Vendor configuration tools (OP1w / XM2w 4k v1.04 and v2 1.02, decompiled for
+//! `docs/vendor-re/endgamegear.md`) agree with the framing: status `01` done,
+//! `03` pending (re-read after +200 / +400 ms), a 500 ms wait after a cabled
+//! settings write (880 ms through the dongle), `0x15` payload 10 bytes (v1) /
+//! 11 bytes (v2).
+//!
 //! Every setting lives in a block the mouse stores (`0x14` sensor/CPI, `0x15`
 //! polling/power/filters, `0x16` buttons) and is rewritten whole. The one
 //! write offered is the `0x14` block on the XM2w 4k (v1) by cable, where all
@@ -124,8 +130,8 @@ const CABLE_REFRESH: Duration = Duration::from_secs(60);
 /// Over the dongle, at most this often, and only right after a report.
 const DONGLE_REFRESH: Duration = Duration::from_secs(300);
 
-const ONE_SOURCE: &str =
-    "one source (vole) for this model; every change rewrites a settings block in the mouse";
+const ONE_SOURCE: &str = "the vendor tool confirms vole's framing, but this model's field \
+offsets are verified by neither on hardware; every change rewrites a settings block in the mouse";
 const RECEIVER: &str = "connect the cable to change it: over the receiver a command to a \
 sleeping mouse can block the receiver until it is replugged (xm2ctl)";
 const NOT_IDENTIFIED: &str = "the mouse has not identified itself yet (move it)";
@@ -155,13 +161,25 @@ fn request(cmd: u8, target: u8, len: u8) -> [u8; 64] {
     b
 }
 
+/// Wait before the first status read, in `PACE` units (ms): 360 for the block,
+/// 150 for queries, and 500 after a settings write over the cable (the
+/// vendor tool's 500 ms; it waits 880 ms through the dongle, where hako does
+/// not write).
+fn settle_ms(cmd: u8) -> u32 {
+    match cmd {
+        CMD_CONFIG => 360,
+        CMD_SENSOR => 500,
+        _ => 150,
+    }
+}
+
 /// Sends `req` and reads the reply (report `a0` for the configuration
 /// block): the status and the whole reply. Pending replies are re-read; one
 /// still pending after the last round is an error, not a status.
 fn transact(dev: &impl Feature, req: &mut [u8; 64], pace: Duration) -> Result<(u8, Vec<u8>)> {
     let bulk = req[1] == CMD_CONFIG;
     dev.set(req)?;
-    std::thread::sleep(pace * if bulk { 360 } else { 150 });
+    std::thread::sleep(pace * settle_ms(req[1]));
     let mut buf = vec![0u8; if bulk { BULK_LEN } else { 64 }];
     for round in 1..=4 {
         buf.fill(0);
@@ -920,6 +938,13 @@ mod tests {
         let s = read_status(&dev, XM2W_V1, Duration::ZERO).unwrap();
         assert_eq!(s.battery, Some(battery(None, true)));
         assert!(dev.sent.borrow().iter().all(|r| r[1] != CMD_PROBE));
+    }
+
+    #[test]
+    fn settle_times_follow_the_vendor_tool() {
+        assert_eq!(settle_ms(CMD_SENSOR), 500);
+        assert_eq!(settle_ms(CMD_CONFIG), 360);
+        assert_eq!(settle_ms(CMD_BATTERY), 150);
     }
 
     #[test]

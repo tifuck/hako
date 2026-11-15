@@ -528,6 +528,22 @@ fn settings_page_renders_with_and_without_settings() {
 }
 
 #[test]
+fn settings_page_says_why_there_are_no_settings() {
+    let why = "Settings unavailable: parse config.toml: boom";
+    let mut h = drive(HakoAppUi {
+        state: Some(sample_state()),
+        daemon_error: None,
+        show_settings: true,
+        settings_error: Some("parse config.toml: boom".into()),
+        ..Default::default()
+    });
+    assert!(shown(&h, why));
+    h.state_mut().0.settings = Some(AppSettings::default());
+    h.run_steps(4);
+    assert!(!shown(&h, why));
+}
+
+#[test]
 fn latency_labels_cover_the_presets() {
     let values: Vec<_> = AUDIO_LATENCY_LABELS.iter().map(|(v, _)| *v).collect();
     let presets: Vec<_> = hako_core::AUDIO_LATENCIES.iter().map(|(v, _)| *v).collect();

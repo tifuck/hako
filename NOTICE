@@ -14,6 +14,9 @@ Protocol references (not vendored):
   Logitech HID++ 1.0/2.0 features and receiver pairing
 - HeadsetControl (GPL-3.0) - SteelSeries, HyperX and Logitech headset commands
 - rivalcfg (WTFPL) - SteelSeries mouse commands
+- SteelSeries GG (proprietary, nothing included) - SteelSeries reply layouts,
+  save opcodes and device IDs, recorded from static analysis of its device
+  definitions (docs/vendor-re/steelseries.md)
 - OpenRGB (GPL-2.0) - SteelSeries Apex, HyperX, ASUS Aura and Corsair lighting
   layouts and device IDs
 - HyperHeadset (MIT), ngenuity-linux-cli, santeri3700 Pulsefire Dart notes
@@ -46,6 +49,9 @@ Protocol references (not vendored):
 - halobattery-stealth700 (MIT) and HaloBattery PR #211, tb-heal (MIT),
   tb-stealth600 (no licence; read for layouts only) - Turtle Beach Gen 3
   transmitter RACE / CoAP status read and device IDs
+- Turtle Beach Swarm II Mobile and Audio Hub V2 (proprietary; interoperability
+  study, protocol facts only, no code) - Turtle Beach Gen 3 settings keys,
+  device IDs and Stealth Pro status layout
 - PlasmaNGenuity (MIT), HyperX Saga Control (MIT) - HyperX Pulsefire Dart
   heartbeat and Pulsefire Saga Pro protocol
 - OpenRazer (GPL-2.0) razerkraken driver - Razer Kraken headset LED reports
@@ -122,9 +128,19 @@ Protocol references (not vendored):
 - libratbag (MIT) src/asus.c, src/driver-asus.c; G-Helper (GPL-3.0)
   AsusMouse.cs, AsusKeyboard.cs; OpenRGB (GPL-2.0) AsusAuraMouseController,
   AsusAuraKeyboardController - ASUS `50 03` / `50 55` onboard-profile save
+- ASUS Gear Link (public web configurator and companion services, studied
+  statically, no code included) - ASUS ROG mouse DPI-stage numbering, `12 08`
+  events, dpiLevelBase and PIDs, headset lighting switch, newer-protocol
+  battery reads (docs/vendor-re/asus.md)
 - ngenuity-linux-cli docs/protocol/universal.md and cli.py, HyperX Saga
   Control (MIT) protocol.py - HyperX universal-protocol onboard slot 1 (DPI
   table, brightness)
+- HyperX NGENUITY 5.38 / 3.2.0 (proprietary; the installed software was read
+  statically for interoperability, no code is included): setter ack handling per
+  headset family, universal ack status (0 ok / 1 resend), wake handling and
+  poll intervals, Cloud Flight battery table, Cloud III Wireless sidetone range,
+  Pulsefire Dart `d3 01` stage mask and `de ff` save, Haste 2 Wireless
+  lift-off save, universal-mouse model data and HP-era PIDs
 - Wooting wooting-rgb-sdk (MPL-2.0) src/wooting-usb.c, src/wooting-usb.h,
   src/wooting-rgb-sdk.c - Wooting device IDs, config interface, direct-mode
   colour reports (v1 / v2 / v3), CRC and reset command

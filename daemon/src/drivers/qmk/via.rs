@@ -171,10 +171,12 @@ pub enum Reply<'a> {
 }
 
 /// Match a reply against the command it answers. `header_len` bytes of the
-/// command (command, channel, value id) must come back unchanged.
+/// command (command, channel, value id) must come back unchanged, in a full
+/// `REPORT_LEN` buffer: VIA answers with the whole command buffer, so a
+/// shorter report is other traffic.
 pub fn parse_reply<'a>(sent: &[u8], header_len: usize, got: &'a [u8]) -> Reply<'a> {
     let n = header_len.min(sent.len());
-    if got.len() < n.max(1) || got[1..n] != sent[1..n] {
+    if got.len() < REPORT_LEN || got[1..n] != sent[1..n] {
         return Reply::Other;
     }
     if got[0] == sent[0] {
@@ -327,6 +329,11 @@ mod tests {
             panic!("version reply");
         };
         assert_eq!(parse_version(d), Some(0x000c));
+        // A short report starting with 01 is not the version reply.
+        assert_eq!(parse_reply(&v, 1, &[0x01]), Reply::Other);
+        assert_eq!(parse_reply(&v, 1, &got[..3]), Reply::Other);
+        let sent = get_value(Channel::RgbMatrix, Value::Brightness);
+        assert_eq!(parse_reply(&sent, 3, &[0x08, 0x03, 0x01]), Reply::Other);
     }
 
     #[test]

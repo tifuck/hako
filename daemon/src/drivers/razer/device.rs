@@ -71,7 +71,13 @@ impl Feature for HidrawDevice {
         self.set_feature(buf)?;
         std::thread::sleep(wait);
         *buf = [0u8; 91];
-        self.get_feature(buf)
+        let n = self.get_feature_len(buf)?;
+        ensure!(
+            n >= buf.len(),
+            "HIDIOCGFEATURE: short reply ({n} of {} bytes)",
+            buf.len()
+        );
+        Ok(())
     }
 
     fn gone(&self) -> bool {
@@ -797,6 +803,9 @@ impl DeviceAdapter for RazerAdapter {
         if !self.supports(key) {
             bail!("{} has no {} control", self.spec.name, key.as_str());
         }
+        if !self.link_up {
+            bail!(NO_LINK);
+        }
         let before = (self.chosen.clone(), self.settings.clone());
         let old = get_setting(&self.settings, key).cloned();
         // In save mode the device already holds an unchanged value.
@@ -1141,7 +1150,7 @@ mod tests {
             battery: None,
             last_error: None,
             paths,
-            link_up: false,
+            link_up: true,
             last_poll: Instant::now(),
             stage_count: MAX_DPI_STAGES,
         }
@@ -1373,6 +1382,22 @@ mod tests {
             Some(&SettingValue::Int(80))
         );
         assert!(a.last_error.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A device that does not answer refuses a change up front: nothing is
+    /// sent, so nothing needs restoring.
+    #[test]
+    fn set_without_link_sends_nothing() {
+        let root = std::env::temp_dir().join(format!("hako-razer-nolink-{}", std::process::id()));
+        let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake::new()));
+        let mut a = fake_adapter(0x008c, &fake, &root);
+        a.link_up = false;
+        let err = a
+            .set(SettingKey::Brightness, SettingValue::Int(40))
+            .unwrap_err();
+        assert_eq!(err.to_string(), NO_LINK);
+        assert!(fake.lock().unwrap().sent.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -24,10 +24,17 @@
 //!   0x0E) on the V2 receivers: HeadsetControl `corsair_void_v2w.hpp`
 //!   (2a08, 2a02, 0a97) and OpenLinkHub `voidV2W.go`, `virtuosomaxW.go`,
 //!   `hs80maxW.go` (every V2 receiver PID) write the same properties.
-//! - Virtuoso XT/SE sleep timer on their receivers: HeadsetControl
-//!   `corsair_virtuoso_xt.hpp` and OpenLinkHub `virtuosorgbXTW.go` /
-//!   `virtuosoSEW.go` agree (0x0D, 0x0E); on the cable OpenLinkHub also
-//!   writes 0x37, so the cable PIDs stay blocked.
+//! - Sleep timer (0x0D, 0x0E; iCUE's `SetSleepMode`, docs/vendor-re/corsair.md):
+//!   Virtuoso XT/SE (HeadsetControl `corsair_virtuoso_xt.hpp`, OpenLinkHub
+//!   `virtuosorgbXTW.go` / `virtuosoSEW.go` agree) on the receivers and,
+//!   now, on the cables: iCUE tags those headsets `SleepMode_99min10`, no
+//!   separate power-save timeout, so OpenLinkHub's extra 0x37 on the cable
+//!   files does not apply. Every other Bragi headset in iCUE's tables has
+//!   the same tag; OpenLinkHub writes the same pair for the Virtuoso RGB and
+//!   HS80 RGB. Wireless Bragi keyboards carry `SleepMode_99min` in iCUE
+//!   (0x0D, 0x0E). Wireless mice tagged `SeparateSleepTimeoutInPowerSave`
+//!   (`SLEEP_POWERSAVE`) take 0x0D = 1, 0x37, 0x0E in that order (iCUE, and
+//!   OpenLinkHub's mouse files); all values in ms.
 //! - NXP mouse poll rate (`07 0A 00 00 <ms>`, write-only, current rate read
 //!   from the `0E 01` identification report): ckb-next `device_mouse.c`
 //!   `cmd_pollrate` on its `SUPPORTS_ADJRATE` PIDs and OpenLinkHub
@@ -60,6 +67,8 @@ pub struct Onboard {
     /// Switch active noise cancellation off before turning sidetone on.
     pub anc: bool,
     pub sleep: Offer,
+    /// The sleep write includes the power-save timeout (property 0x37).
+    pub sleep_powersave: bool,
     pub dpi_stages: Offer,
     /// NXP "save to hardware" (whole onboard profile).
     pub save: Offer,
@@ -135,7 +144,7 @@ pub const REPORT_RATE: &[(u16, u32)] = &[
 /// Wired Bragi PIDs with a poll-rate write that is known but not offered.
 const REPORT_RATE_BLOCKED: &[(u16, &str)] = &[(
     0x2b14,
-    "boot loops reported on this model (OpenLinkHub #326)",
+    "boot loops reported on this model (OpenLinkHub #326); iCUE writes the rate but declares no 8 kHz ceiling",
 )];
 
 /// Bragi mice whose angle-snapping write a source applies to that exact PID.
@@ -147,14 +156,28 @@ pub const ANGLE_SNAP: &[u16] = &[
 
 /// Virtuoso XT (receiver, cable) and SE (receiver, cable): HeadsetControl.
 pub const HEADSET_LIGHTS: &[u16] = &[0x0a64, 0x0a62, 0x0a3e, 0x0a3d];
-/// Virtuoso XT / SE receivers: sleep timer agreed by both sources.
-const XT_SE_RECEIVERS: &[u16] = &[0x0a64, 0x0a3e];
+/// Bragi headsets whose iCUE manifest has no sleep tags (HS55 CORE).
+const NO_SLEEP_HEADSETS: &[u16] = &[0x0a94, 0x0a95];
+/// Wireless Bragi mice iCUE tags `SleepMode_SeparateSleepTimeoutInPowerSave`:
+/// they also take the power-save timeout (property 0x37).
+pub const SLEEP_POWERSAVE: &[u16] = &[
+    0x1b80, 0x1b7e, 0x1b5e, 0x1b4c, 0x2b32, 0x1bb5, 0x1bd6, 0x1bf1, 0x2b08, 0x1bf2, 0x1bb2, 0x1bb8,
+    0x1b98, 0x1bdb, 0x2b22, 0x1bba, 0x1bae, 0x1bfb, 0x2b1e,
+];
 /// Virtuoso XT: sidetone properties with a disputed enable polarity.
 const XT: &[u16] = &[0x0a64, 0x0a62];
 /// V2 receivers (OpenLinkHub `devices.go`): sidetone and sleep timer, with
 /// whether the headset has ANC to switch off (OpenLinkHub writes 0xD1 for
 /// the Void V2 and Virtuoso MAX, not the HS80 MAX).
 pub const V2: &[(u16, bool)] = &[
+    // Headsets on their cable (iCUE: same sidetone/sleep tags as their receivers).
+    (0x2a09, true),
+    (0x2a07, true),
+    (0x2a10, true),
+    (0x2a00, true),
+    (0x0a96, false),
+    (0x2a0e, false),
+    (0x2a0b, false),
     (0x2a08, true),
     (0x2a05, true),
     (0x2a12, true),
@@ -164,19 +187,19 @@ pub const V2: &[(u16, bool)] = &[
     (0x2a0f, false),
     (0x2a0c, false),
 ];
-/// NXP mice in ckb-next `usb.h` `SUPPORTS_ADJRATE`.
+/// NXP mice in ckb-next `usb.h` `SUPPORTS_ADJRATE`, plus the IRONCLAW RGB
+/// (1b5d) and M65 RGB ELITE IG (1b88), which iCUE marks `ReadWrite` with the
+/// same `SetPollingRate` command as the rest.
 pub const NXP_REPORT_RATE: &[u16] = &[
     0x1b12, 0x1b2e, 0x1b5a, 0x1b14, 0x1b19, 0x1b2f, 0x1b32, 0x1b1e, 0x1b3e, 0x1b8b, 0x1b3c, 0x1b75,
-    0x1b34, 0x1b74, 0x1b22, 0x1b5c,
+    0x1b34, 0x1b74, 0x1b22, 0x1b5c, 0x1b5d, 0x1b88,
 ];
 
 const NO_SOURCE: &str = "no source writes it for this model";
 const VIA_RECEIVER: &str = "set on the wireless receiver, which is not offered";
-const SLEEP: &str = "single source (OpenLinkHub) and an unexplained extra property 0x37";
-const SLEEP_HEADSET: &str =
-    "sources disagree: OpenLinkHub also writes property 0x37, HeadsetControl does not";
 const SIDETONE: &str =
-    "sources disagree on the enable property 0x46 (HeadsetControl 1 = on, OpenLinkHub 0 = on)";
+    "property 0x46 is SidetoneMuted in iCUE (0 = on, as OpenLinkHub), but HeadsetControl's \
+                        Virtuoso XT code enables with 1; needs a hardware test";
 const DPI_STAGES: &str = "layout only noted in a ckb-next comment; no implementation writes it";
 const NXP_SAVE: &str = "single implementation (ckb-next); unsupported on boards with hardware \
                         animations and reports of lost onboard profiles";
@@ -220,7 +243,12 @@ pub fn of(family: Family, pid: u16, via_receiver: bool) -> Onboard {
                 o.dpi_stages = Offer::Blocked(DPI_STAGES);
             }
             if wireless {
-                o.sleep = Offer::Blocked(SLEEP);
+                o.sleep_powersave = SLEEP_POWERSAVE.contains(&pid);
+                o.sleep = if dpi.is_none() || o.sleep_powersave {
+                    Offer::Yes
+                } else {
+                    Offer::Blocked(NO_SOURCE)
+                };
             }
         }
         Family::BragiHeadset { .. } => {
@@ -229,12 +257,10 @@ pub fn of(family: Family, pid: u16, via_receiver: bool) -> Onboard {
             } else {
                 Offer::Blocked(NO_SOURCE)
             };
-            o.sleep = if XT_SE_RECEIVERS.contains(&pid) {
-                Offer::Yes
-            } else if HEADSET_LIGHTS.contains(&pid) {
-                Offer::Blocked(SLEEP_HEADSET)
-            } else {
+            o.sleep = if NO_SLEEP_HEADSETS.contains(&pid) {
                 Offer::Blocked(NO_SOURCE)
+            } else {
+                Offer::Yes
             };
             if XT.contains(&pid) {
                 o.sidetone = Offer::Blocked(SIDETONE);
@@ -311,10 +337,14 @@ mod tests {
         let wired = of(family(0x1b80), 0x1b80, false);
         assert_eq!(wired.report_rate, Offer::Yes);
         assert_eq!(wired.angle_snap, Offer::Yes);
-        assert!(matches!(wired.sleep, Offer::Blocked(_)));
+        assert_eq!(wired.sleep, Offer::Yes);
+        assert!(wired.sleep_powersave);
         assert!(matches!(wired.dpi_stages, Offer::Blocked(_)));
         let dongle = of(family(0x1b80), 0x1b80, true);
         assert_eq!(dongle.report_rate, Offer::Blocked(VIA_RECEIVER));
+        // Wireless keyboards sleep without the power-save property.
+        let k65 = of(family(0x2b10), 0x2b10, false);
+        assert_eq!((k65.sleep, k65.sleep_powersave), (Offer::Yes, false));
         // K70 PRO TKL is known but blocked; K65 PLUS has no source.
         assert!(matches!(
             of(family(0x2b14), 0x2b14, false).report_rate,
@@ -330,13 +360,14 @@ mod tests {
         assert!(matches!(xt.sidetone, Offer::Blocked(_)));
         let se = of(family(0x0a3d), 0x0a3d, false);
         assert_eq!((se.lights, se.sidetone), (Offer::Yes, Offer::No));
-        // Sleep timer on the XT/SE receivers, blocked on their cables.
+        // Sleep timer on the XT/SE receivers and cables (iCUE: no 0x37).
         assert_eq!(xt.sleep, Offer::Yes);
         assert_eq!(of(family(0x0a3e), 0x0a3e, false).sleep, Offer::Yes);
-        assert_eq!(se.sleep, Offer::Blocked(SLEEP_HEADSET));
+        assert_eq!((se.sleep, se.sleep_powersave), (Offer::Yes, false));
+        assert_eq!(of(family(0x0a62), 0x0a62, false).sleep, Offer::Yes);
         assert_eq!(
-            of(family(0x0a62), 0x0a62, false).sleep,
-            Offer::Blocked(SLEEP_HEADSET)
+            of(family(0x0a95), 0x0a95, false).sleep,
+            Offer::Blocked(NO_SOURCE)
         );
         // V2 receivers: sidetone and sleep; ANC only where it exists.
         let void_v2 = of(family(0x2a08), 0x2a08, false);
@@ -355,10 +386,10 @@ mod tests {
         // NXP mice: poll rate up to 1 kHz where ckb-next adjusts it.
         let m65 = of(family(0x1b5a), 0x1b5a, false);
         assert_eq!((m65.report_rate, m65.report_rate_max), (Offer::Yes, 1000));
-        assert_eq!(
-            of(family(0x1b5d), 0x1b5d, false).report_rate,
-            Offer::Blocked(NXP_RATE)
-        );
+        let ironclaw = of(family(0x1b5d), 0x1b5d, false);
+        assert_eq!(ironclaw.report_rate, Offer::Yes);
+        // Not an NXP mouse any list names: still blocked.
+        assert_eq!(of(family(0x1b49), 0x1b49, false).report_rate, Offer::No);
         assert_eq!(of(family(0x0a14), 0x0a14, false), Onboard::default());
     }
 

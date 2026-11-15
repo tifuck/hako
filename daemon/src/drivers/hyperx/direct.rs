@@ -35,6 +35,8 @@ pub(super) trait Frames: Copy + Send + Sync + 'static {
 /// Frame interval of animated effects (OpenRGB's keepalive period).
 const ANIMATED: Duration = Duration::from_millis(50);
 const IDLE: Duration = Duration::from_secs(1);
+/// Frame failures closer together than this count once.
+const FAILURE_SPACING: Duration = Duration::from_secs(1);
 
 const EFFECTS: [(&str, &str); 4] = [
     ("onboard", "Onboard profile"),
@@ -129,6 +131,7 @@ pub(super) fn open<F: Frames>(
         settings: hako_core::config::load_device_settings(&ctx.paths, spec.vid, spec.pids[0])?,
         started: Instant::now(),
         failures: 0,
+        last_failure: None,
         last_error: None,
         paths: ctx.paths.clone(),
     })])
@@ -142,6 +145,8 @@ struct Direct<F: 'static> {
     settings: SettingsMap,
     started: Instant,
     failures: u8,
+    /// When `failures` was last counted up.
+    last_failure: Option<Instant>,
     last_error: Option<String>,
     paths: ConfigPaths,
 }
@@ -193,17 +198,22 @@ impl<F: Frames> DeviceAdapter for Direct<F> {
     }
 
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+        let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value);
         self.started = Instant::now();
         let result = self.send_frame();
         self.last_error = result.as_ref().err().map(|e| e.to_string());
+        if result.is_err() {
+            // The device did not show it; the UI and the file keep the old value.
+            self.settings = before;
+            return result;
+        }
         hako_core::config::save_device_settings(
             &self.paths,
             self.spec.vid,
             self.spec.pids[0],
             &self.settings,
-        )?;
-        result
+        )
     }
 
     /// Keepalive / next animation frame.
@@ -218,13 +228,20 @@ impl<F: Frames> DeviceAdapter for Direct<F> {
         let result = self.send_frame();
         self.last_error = result.as_ref().err().map(|e| e.to_string());
         if result.is_err() {
-            self.failures = self.failures.saturating_add(1);
+            if self
+                .last_failure
+                .is_none_or(|t| t.elapsed() >= FAILURE_SPACING)
+            {
+                self.failures = self.failures.saturating_add(1);
+                self.last_failure = Some(Instant::now());
+            }
             // Stop streaming into a node that keeps failing (unplugged).
             if self.failures >= 3 {
                 self.dev = None;
             }
         } else {
             self.failures = 0;
+            self.last_failure = None;
         }
         result
     }

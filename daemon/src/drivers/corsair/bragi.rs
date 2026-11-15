@@ -17,6 +17,9 @@
 //! HeadsetControl `lib/devices/corsair_virtuoso_xt.hpp`,
 //! `corsair_void_v2w.hpp` and github.com/joanjgm/hs80-battery (headset
 //! framing, battery in tenths of a percent, writes persist on headsets).
+//! Status codes, property names, the DPI write order and the sleep-timer
+//! property set come from the iCUE 5.52.93 Bragi library and device
+//! manifests (`docs/vendor-re/corsair.md`).
 //!
 //! Property writes are kept in the device's onboard memory: only `store`
 //! (read, validate, write, read back) writes the poll rate, angle snapping
@@ -44,21 +47,26 @@ pub const PROP_POLLRATE: u8 = 0x01;
 pub const PROP_BRIGHTNESS: u8 = 0x02;
 pub const PROP_MODE: u8 = 0x03;
 pub const PROP_ANGLE_SNAP: u8 = 0x07;
-/// Headset sleep timer on (1) / off (0), and its timeout in ms.
+/// Sleep timer on (1) / off (0), and its timeout in ms.
 pub const PROP_SLEEP_ENABLED: u8 = 0x0d;
 pub const PROP_SLEEP_TIMEOUT: u8 = 0x0e;
+/// Sleep timeout while in power-save mode, ms. Only mice that iCUE tags
+/// `SleepMode_SeparateSleepTimeoutInPowerSave` take it.
+pub const PROP_SLEEP_POWERSAVE: u8 = 0x37;
 pub const PROP_BATTERY_LEVEL: u8 = 0x0f;
 pub const PROP_BATTERY_STATUS: u8 = 0x10;
 pub const PROP_PID: u8 = 0x12;
 pub const PROP_APP_VER: u8 = 0x13;
+/// Combined X+Y resolution, for mice without independent axes.
+pub const PROP_DPI: u8 = 0x20;
 pub const PROP_DPI_X: u8 = 0x21;
 pub const PROP_DPI_Y: u8 = 0x22;
 pub const PROP_SUBDEVICES: u8 = 0x36;
-/// V2 headsets: 0 = sidetone on, 1 = off (HeadsetControl
-/// `corsair_void_v2w.hpp`, OpenLinkHub `voidV2W.go`); the XT reads it the
-/// other way round.
-pub const PROP_SIDETONE_OFF: u8 = 0x46;
-/// Sidetone level, 0..=1000 in steps of 10.
+/// `SidetoneMuted` in iCUE: 0 = sidetone audible, 1 = muted (HeadsetControl
+/// `corsair_void_v2w.hpp`, OpenLinkHub `voidV2W.go` agree). HeadsetControl's
+/// Virtuoso XT code writes it the other way round (see `onboard.rs`).
+pub const PROP_SIDETONE_MUTED: u8 = 0x46;
+/// `SidetoneLevel`: percent x 10, 0..=1000 (iCUE multiplies by 10).
 pub const PROP_SIDETONE_LEVEL: u8 = 0x47;
 /// Highest poll-rate value the device accepts (read only; ckb-next).
 pub const PROP_MAX_POLLRATE: u8 = 0x96;
@@ -119,6 +127,23 @@ pub fn write_data(addr: u8, handle: u8, data: &[u8], pkt_len: usize) -> Vec<Vec<
         out.push(f);
     }
     out
+}
+
+/// Name of a reply status (iCUE `bragiprotocol::Status`).
+pub fn status_name(status: u8) -> &'static str {
+    match status {
+        0 => "Success",
+        1 => "InvalidArgument",
+        2 => "InsufficientBufferSize",
+        3 => "InvalidState",
+        4 => "CommandNotSupported",
+        5 => "PropertyNotSupported",
+        6 => "InvalidDeviceAddress",
+        7 => "HardwareError",
+        9 => "InvalidOperation",
+        10 => "InvalidFirmwareFile",
+        _ => "unknown",
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,8 +207,10 @@ pub fn storable(prop: u8, value: u32) -> bool {
         PROP_POLLRATE => pollrate_hz(value).is_some(),
         PROP_ANGLE_SNAP => value <= 1,
         PROP_BRIGHTNESS => value <= BRIGHTNESS_MAX,
-        PROP_SLEEP_ENABLED | PROP_SIDETONE_OFF => value <= 1,
-        PROP_SLEEP_TIMEOUT => value <= SLEEP_MAX_MS && value.is_multiple_of(MINUTE_MS),
+        PROP_SLEEP_ENABLED | PROP_SIDETONE_MUTED => value <= 1,
+        PROP_SLEEP_TIMEOUT | PROP_SLEEP_POWERSAVE => {
+            value <= SLEEP_MAX_MS && value.is_multiple_of(MINUTE_MS)
+        }
         PROP_SIDETONE_LEVEL => value <= SIDETONE_LEVEL_MAX && value.is_multiple_of(10),
         PROP_ANC => value <= 2,
         _ => false,
@@ -220,6 +247,39 @@ pub fn store(io: &mut impl Props, addr: u8, prop: u8, value: u32) -> Result<()> 
         bail!("property {prop:#04x} reads back {now} after writing {value}");
     }
     Ok(())
+}
+
+/// Write one DPI axis. ckb-next ignores the status here because the first
+/// write after a mode switch is reported failed although it applies, so a
+/// failed write counts when the axis reads back `dpi`.
+fn set_dpi_axis(io: &mut impl Props, addr: u8, prop: u8, dpi: u16) -> Result<()> {
+    let Err(e) = io.set(addr, prop, u32::from(dpi)) else {
+        return Ok(());
+    };
+    match io.get(addr, prop) {
+        Ok(v) if v == u32::from(dpi) => Ok(()),
+        Ok(v) => bail!("{e:#}; DPI reads back {v}"),
+        Err(re) => bail!("{e:#}; reading the DPI back also failed ({re:#})"),
+    }
+}
+
+/// Live DPI. iCUE writes the combined property 0x20 on mice without
+/// independent axes (`combined`) and X (0x21) then Y (0x22) on the others,
+/// checking each status. A combined write that fails outright falls back to
+/// the axes, which ckb-next and OpenLinkHub use on every mouse.
+pub fn set_dpi(io: &mut impl Props, addr: u8, dpi: u16, combined: bool) -> Result<()> {
+    let axes = |io: &mut _| {
+        [PROP_DPI_X, PROP_DPI_Y]
+            .into_iter()
+            .try_for_each(|prop| set_dpi_axis(io, addr, prop, dpi))
+    };
+    if !combined {
+        return axes(io);
+    }
+    match set_dpi_axis(io, addr, PROP_DPI, dpi) {
+        Ok(()) => Ok(()),
+        Err(e) => axes(io).with_context(|| format!("{e:#}")),
+    }
 }
 
 /// `store` each of `writes` on the last of `path`, in software mode, which
@@ -328,13 +388,23 @@ impl Link {
 
     /// Send `frame` and wait for its reply, skipping unrelated reports.
     pub fn transact(&mut self, frame: &[u8], timeout: Duration) -> Result<Reply> {
+        self.request(frame, timeout)?
+            .with_context(|| format!("no reply to {:02x?}", &frame[..frame.len().min(4)]))
+    }
+
+    /// [`Self::transact`] where no reply in time is `None`; send and read
+    /// errors are still errors.
+    fn request(&mut self, frame: &[u8], timeout: Duration) -> Result<Option<Reply>> {
         self.dev.drain(Duration::ZERO);
         self.send(frame)?;
         let deadline = Instant::now() + timeout;
         let mut buf = vec![0u8; self.wire_len.max(64) + 1];
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            let Ok(n) = self.dev.read_timeout(&mut buf, left) else {
-                break;
+            let n = match self.dev.read_timeout(&mut buf, left) {
+                Ok(n) => n,
+                // A timeout is a plain message, a device error an io::Error.
+                Err(e) if e.downcast_ref::<std::io::Error>().is_some() => return Err(e),
+                Err(_) => break,
             };
             let r = match (self.headset, buf.first()) {
                 (true, Some(0x01)) => &buf[1..n],
@@ -342,16 +412,20 @@ impl Link {
                 (false, _) => &buf[..n],
             };
             if let Some(reply) = parse_reply(r, frame[0], frame[1]) {
-                return Ok(reply);
+                return Ok(Some(reply));
             }
         }
-        bail!("no reply to {:02x?}", &frame[..frame.len().min(4)])
+        Ok(None)
     }
 
     pub fn get(&mut self, addr: u8, prop: u8) -> Result<u32> {
         let r = self.transact(&get(addr, prop), TIMEOUT)?;
         if r.status != 0 {
-            bail!("get property {prop:#04x}: status {:#04x}", r.status);
+            bail!(
+                "get property {prop:#04x}: status {:#04x} ({})",
+                r.status,
+                status_name(r.status)
+            );
         }
         Ok(r.value)
     }
@@ -359,7 +433,11 @@ impl Link {
     pub fn set(&mut self, addr: u8, prop: u8, value: u32) -> Result<()> {
         let r = self.transact(&set(addr, prop, value), TIMEOUT)?;
         if r.status != 0 {
-            bail!("set property {prop:#04x}: status {:#04x}", r.status);
+            bail!(
+                "set property {prop:#04x}: status {:#04x} ({})",
+                r.status,
+                status_name(r.status)
+            );
         }
         Ok(())
     }
@@ -403,10 +481,12 @@ pub struct Bragi {
     format: Option<Format>,
     software: Option<bool>,
     wireless: bool,
+    /// DPI goes through the combined property 0x20 (no independent axes).
+    combined_dpi: bool,
 }
 
 impl Bragi {
-    pub fn new(link: Link, addr: u8, leds: u16, wireless: bool) -> Self {
+    pub fn new(link: Link, addr: u8, leds: u16, wireless: bool, combined_dpi: bool) -> Self {
         Self {
             link,
             addr,
@@ -414,6 +494,7 @@ impl Bragi {
             format: None,
             software: None,
             wireless,
+            combined_dpi,
         }
     }
 
@@ -474,23 +555,21 @@ impl Backend for Bragi {
         let frames = write_data(self.addr, LIGHTING_HANDLE, &data, self.link.pkt_len());
         let first = self.link.transact(&frames[0], TIMEOUT)?;
         if first.status != 0 {
-            bail!("lighting write: status {:#04x}", first.status);
+            bail!(
+                "lighting write: status {:#04x} ({})",
+                first.status,
+                status_name(first.status)
+            );
         }
         // Continuation frames are not reliably acknowledged (OpenRGB paces them).
         for f in &frames[1..] {
-            let _ = self.link.transact(f, Duration::from_millis(20));
+            self.link.request(f, Duration::from_millis(20))?;
         }
         Ok(())
     }
 
     fn dpi(&mut self, dpi: u16) -> Result<()> {
-        // ckb-next ignores the status here: the first write after a mode
-        // switch is reported failed although it applies.
-        for prop in [PROP_DPI_X, PROP_DPI_Y] {
-            self.link
-                .transact(&set(self.addr, prop, u32::from(dpi)), TIMEOUT)?;
-        }
-        Ok(())
+        set_dpi(&mut self.link, self.addr, dpi, self.combined_dpi)
     }
 
     fn battery(&mut self) -> Result<Option<BatteryState>> {
@@ -503,13 +582,22 @@ impl Backend for Bragi {
     }
 
     fn keepalive(&mut self) -> Result<()> {
-        // iCUE pings about every 50 s; some boards (K55 RGB PRO) fall back to
-        // their onboard lighting without it.
+        // iCUE pings every 60 s (manifest `RequiredPingInterval`, also on the
+        // K55 RGB PRO, which falls back to its onboard lighting without it).
         self.link.transact(&ping(self.addr), TIMEOUT).map(drop)
     }
 
     fn read_dpi(&mut self) -> Option<u16> {
-        self.link.get(self.addr, PROP_DPI_X).ok().map(|v| v as u16)
+        let prop = if self.combined_dpi {
+            PROP_DPI
+        } else {
+            PROP_DPI_X
+        };
+        self.link
+            .get(self.addr, prop)
+            .or_else(|_| self.link.get(self.addr, PROP_DPI_X))
+            .ok()
+            .map(|v| v as u16)
     }
 
     fn report_rate(&mut self) -> Option<u32> {
@@ -592,6 +680,8 @@ mod tests {
         writes: Vec<(u8, u32)>,
         /// Value the firmware keeps instead of the one written.
         sticky: Option<u32>,
+        /// Writes apply but report a failure status.
+        refuse: bool,
     }
 
     impl Props for Fake {
@@ -602,6 +692,9 @@ mod tests {
             self.writes.push((prop, value));
             if prop != PROP_MODE {
                 self.props.insert(prop, self.sticky.unwrap_or(value));
+            }
+            if self.refuse {
+                bail!("set property {prop:#04x}: status 0x05");
             }
             Ok(())
         }
@@ -642,6 +735,54 @@ mod tests {
         d.sticky = Some(0);
         let e = store(&mut d, SELF, PROP_ANGLE_SNAP, 1).unwrap_err();
         assert!(e.to_string().contains("reads back 0"), "{e}");
+    }
+
+    #[test]
+    fn dpi_write_reported_failed_counts_when_it_reads_back() {
+        let mut d = fake(PROP_DPI_X, 800);
+        set_dpi_axis(&mut d, SELF, PROP_DPI_X, 1600).unwrap();
+        // ckb-next's quirk: refused, yet applied.
+        d.refuse = true;
+        set_dpi_axis(&mut d, SELF, PROP_DPI_X, 3200).unwrap();
+        assert_eq!(d.props[&PROP_DPI_X], 3200);
+        // Refused and not applied.
+        d.sticky = Some(3200);
+        let e = set_dpi_axis(&mut d, SELF, PROP_DPI_X, 400).unwrap_err();
+        assert!(e.to_string().contains("reads back 3200"), "{e}");
+    }
+
+    #[test]
+    fn dpi_writes_follow_icue() {
+        // Independent axes: X (0x21) then Y (0x22).
+        let mut d = Fake::default();
+        set_dpi(&mut d, SELF, 1600, false).unwrap();
+        assert_eq!(d.writes, [(PROP_DPI_X, 1600), (PROP_DPI_Y, 1600)]);
+        // No independent axes: the combined property only.
+        let mut d = Fake::default();
+        set_dpi(&mut d, SELF, 1600, true).unwrap();
+        assert_eq!(d.writes, [(PROP_DPI, 1600)]);
+        // A combined write the device refuses and does not apply falls back
+        // to the axes.
+        let mut d = Fake {
+            refuse: true,
+            sticky: Some(800),
+            ..Fake::default()
+        };
+        assert!(set_dpi(&mut d, SELF, 1600, true).is_err());
+        assert_eq!(d.writes[0], (PROP_DPI, 1600));
+        assert_eq!(d.writes[1], (PROP_DPI_X, 1600));
+        // X refused: Y is not written (iCUE stops at the first failure).
+        assert_eq!(d.writes.len(), 2);
+    }
+
+    #[test]
+    fn status_names_match_icue_enum() {
+        assert_eq!(status_name(0), "Success");
+        assert_eq!(status_name(5), "PropertyNotSupported");
+        assert_eq!(status_name(9), "InvalidOperation");
+        assert_eq!(status_name(8), "unknown");
+        assert!(storable(PROP_SLEEP_POWERSAVE, 15 * MINUTE_MS));
+        assert!(!storable(PROP_SLEEP_POWERSAVE, 1000));
     }
 
     #[test]
@@ -694,7 +835,7 @@ mod tests {
         // A timeout that is not whole minutes (or over 90) is never sent, and
         // nor is anything after it.
         let mut d = fake(PROP_SLEEP_TIMEOUT, 0);
-        let bad = [(PROP_SLEEP_TIMEOUT, 61_000), (PROP_SIDETONE_OFF, 0)];
+        let bad = [(PROP_SLEEP_TIMEOUT, 61_000), (PROP_SIDETONE_MUTED, 0)];
         assert!(store_in_software(&mut d, &[SELF], &bad, true).is_err());
         assert!(!storable(PROP_SLEEP_TIMEOUT, 91 * MINUTE_MS));
         assert!(!storable(PROP_SIDETONE_LEVEL, 1005));

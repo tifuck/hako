@@ -64,6 +64,14 @@ pub(super) const CLOUD_II: Spec<Family> = Spec {
     pids: &[0x1718, 0x0b92],
     family: Cloud2Kingston,
 };
+/// NGENUITY's `HeadsetCloudIIWireless` also handles the HP dongle 03f0:0c8a
+/// (`HyperXDeviceUtils.DEVICE_HS_CLOUD_II_WIRELESS_DONGLE2`), same protocol.
+pub(super) const CLOUD_II_HP_7_1: Spec<Family> = Spec {
+    name: "HyperX Cloud II Wireless",
+    vid: HP,
+    pids: &[0x0c8a],
+    family: Cloud2Kingston,
+};
 /// HyperHeadset lists 16ea/16eb with the Cloud II protocol as Cloud Flight S.
 pub(super) const CLOUD_FLIGHT_S: Spec<Family> = Spec {
     name: "HyperX Cloud Flight S",
@@ -87,7 +95,8 @@ pub(super) const CLOUD_STINGER_2: Spec<Family> = Spec {
 pub(super) const CLOUD_III: Spec<Family> = Spec {
     name: "HyperX Cloud III Wireless",
     vid: HP,
-    pids: &[0x05b7, 0x0c9d],
+    // 0e9d / 06b7: the headset itself over its cable (NGENUITY `HeadsetCloud3Wireless`).
+    pids: &[0x05b7, 0x0c9d, 0x06b7, 0x0e9d],
     family: Cloud3,
 };
 pub(super) const CLOUD_II_CORE: Spec<Family> = Spec {
@@ -139,6 +148,13 @@ pub(super) const CLOUD_ALPHA_S: Spec<Family> = Spec {
     pids: &[0x16ed],
     family: AlphaS,
 };
+/// HP-era Alpha S (`DEVICE_HS_CLOUD_ALPHA_S_2`, interface 5 like the Kingston one).
+pub(super) const CLOUD_ALPHA_S_HP: Spec<Family> = Spec {
+    name: "HyperX Cloud Alpha S",
+    vid: HP,
+    pids: &[0x0c91],
+    family: AlphaS,
+};
 
 #[cfg(test)]
 pub(super) const ALL: &[&Spec<Family>] = &[
@@ -155,6 +171,8 @@ pub(super) const ALL: &[&Spec<Family>] = &[
     &CLOUD_FLIGHT_HP,
     &CLOUD_III_WIRED,
     &CLOUD_ALPHA_S,
+    &CLOUD_ALPHA_S_HP,
+    &CLOUD_II_HP_7_1,
 ];
 
 fn node(f: Family) -> Node {
@@ -248,7 +266,7 @@ fn queries(f: Family) -> Vec<Vec<u8>> {
         Cloud2Kingston => &[0x01, 0x02, 0x03, 0x1a],
         // No 0x01 here: HyperHeadset notes it resets state (unmutes the mic).
         Cloud2Hp => &[0x02, 0x03, 0x05, 0x06, 0x0b, 0x07, 0x08],
-        Cloud3 => &[0x82, 0x89, 0x8a, 0x86, 0x84, 0x85],
+        Cloud3 => &[0x82, 0x89, 0x8a, 0x86, 0x84, 0x88, 0x85],
         Cloud2Core => &[0x82, 0x89, 0x8a, 0x86, 0x84, 0x88, 0x85, 0x8c],
         Cloud3S => {
             return [0x02, 0x06, 0x48, 0x04, 0x16, 0x14, 0x4b]
@@ -288,6 +306,11 @@ fn set_packets(f: Family, key: SettingKey, value: &SettingValue) -> Result<Vec<V
         (Cloud3 | Cloud2Core, SettingKey::MicMute) => vec![p(0x03, on.unwrap_or(0))],
         (Cloud3 | Cloud2Core, SettingKey::PmShutdown) => vec![p(0x02, n)],
         (Cloud3, SettingKey::MicSideTone) => vec![p(0x01, n)],
+        // NGENUITY clamps to -5..=+5 and sends the signed byte.
+        (Cloud3, SettingKey::MicSideToneVolume) => {
+            let level = value.as_int().unwrap_or(0).clamp(-5, 5) as i8;
+            vec![p(0x05, level as u8)]
+        }
         // Code 0 = off, 1..=11 = level -5..=+5 (signed byte on the wire).
         (Cloud2Core, SettingKey::MicSideTone) if n == 0 => vec![p(0x01, 0)],
         (Cloud2Core, SettingKey::MicSideTone) => {
@@ -321,7 +344,7 @@ enum Event {
     Muted(bool),
     SideToneOn(bool),
     SideToneLevel(i64),
-    SideToneVolume(u8),
+    SideToneVolume(i64),
     MicAttached(bool),
     AutoOff(u8),
     EqPreset(u8),
@@ -329,18 +352,26 @@ enum Event {
     VoicePrompts(bool),
 }
 
-/// Cloud Flight battery estimate from millivolts (HyperHeadset's threshold
-/// table: 5 % steps from 3328 mV to 3970 mV).
+/// Cloud Flight battery estimate from millivolts: 5 % steps from 3328 mV to
+/// 3970 mV, NGENUITY's table (`HeadsetCloudFlightWireless.BatteryPercentage`;
+/// HyperHeadset's has 3732 for the 25 % step, NGENUITY 0x0e95 = 3733).
 const FLIGHT_MV: [u16; 20] = [
-    3328, 3584, 3674, 3704, 3732, 3744, 3754, 3764, 3774, 3784, 3794, 3804, 3824, 3840, 3860, 3890,
+    3328, 3584, 3674, 3704, 3733, 3744, 3754, 3764, 3774, 3784, 3794, 3804, 3824, 3840, 3860, 3890,
     3910, 3940, 3960, 3970,
 ];
-/// Above this the Flight reports its charger voltage (HeadsetControl).
-const FLIGHT_CHARGING_MV: u16 = 0x100b;
+/// From here (0x1014, NGENUITY) the Flight reports its charger voltage.
+const FLIGHT_CHARGING_MV: u16 = 0x1014;
 
-fn flight_percent(mv: u16) -> u8 {
+/// `None` for 0 mV: no voltage was measured. NGENUITY shows 1 % below 3328 mV.
+fn flight_percent(mv: u16) -> Option<u8> {
+    if mv == 0 {
+        return None;
+    }
+    if mv < FLIGHT_MV[0] {
+        return Some(1);
+    }
     let i = FLIGHT_MV.partition_point(|&t| t <= mv).saturating_sub(1);
-    (i as u8 + 1) * 5
+    Some((i as u8 + 1) * 5)
 }
 
 fn parse(f: Family, r: &[u8]) -> Vec<Event> {
@@ -349,10 +380,12 @@ fn parse(f: Family, r: &[u8]) -> Vec<Event> {
         Flight => match r {
             [0x21, 0xff, 0x05, hi, lo, ..] => {
                 let mv = u16::from_be_bytes([*hi, *lo]);
-                if mv > FLIGHT_CHARGING_MV {
+                if mv >= FLIGHT_CHARGING_MV {
                     vec![Online(true), Charging(true)]
+                } else if let Some(p) = flight_percent(mv) {
+                    vec![Online(true), Battery(p), Charging(false)]
                 } else {
-                    vec![Online(true), Battery(flight_percent(mv)), Charging(false)]
+                    vec![]
                 }
             }
             [0x64, 0x01 | 0x03, ..] => vec![Online(true)],
@@ -395,7 +428,7 @@ fn parse(f: Family, r: &[u8]) -> Vec<Event> {
                 0x06 | 0x21 => vec![SideToneOn(*d4 == 0x01)],
                 0x07 | 0x22 => vec![AutoOff(*d4)],
                 0x08 => vec![MicAttached(*d4 == 0x01)],
-                0x0b => vec![SideToneVolume(*d4)],
+                0x0b => vec![SideToneVolume(i64::from(*d4))],
                 _ => vec![],
             },
             _ => vec![],
@@ -415,13 +448,18 @@ fn parse(f: Family, r: &[u8]) -> Vec<Event> {
                     0x85 => vec![AutoOff(*a)],
                     0x02 if core => vec![AutoOff(*a)],
                     0x8c | 0x07 if core => vec![MicAttached(*a == 0x01)],
-                    0x88 | 0x05 if core => {
+                    0x88 | 0x05 => {
                         let level = *a as i8;
-                        vec![SideToneLevel(if (-5..=5).contains(&level) {
+                        let level = if (-5..=5).contains(&level) {
                             i64::from(level)
                         } else {
                             0
-                        })]
+                        };
+                        vec![if core {
+                            SideToneLevel(level)
+                        } else {
+                            SideToneVolume(level)
+                        }]
                     }
                     _ => vec![],
                 },
@@ -553,6 +591,11 @@ fn alpha2_ack(r: &[u8], cmd: u8, sub: u8) -> Option<bool> {
     }
 }
 
+/// Whether any of `reports` is a reply this family understands.
+fn answers(f: Family, reports: &[Vec<u8>]) -> bool {
+    reports.iter().any(|r| !parse(f, r).is_empty())
+}
+
 /// The `mic_side_tone` value the family's control shows, from the on flag and level.
 fn sidetone_value(f: Family, on: Option<bool>, level: Option<i64>) -> Option<i64> {
     match f {
@@ -675,6 +718,16 @@ fn controls(f: Family) -> Vec<SettingMeta> {
         }
         Alpha | Flight => {}
     }
+    // NGENUITY: -5..=+5, the sidetone on/off stays a separate toggle.
+    if f == Cloud3 {
+        c.push(SettingMeta::slider(
+            MicSideToneVolume,
+            "Sidetone volume",
+            -5.0,
+            5.0,
+            1.0,
+        ));
+    }
     // A byte per hsctl; HyperHeadset offers 0..=250.
     if f == Cloud2Hp {
         c.push(SettingMeta::slider(
@@ -705,6 +758,29 @@ const POLL: Duration = Duration::from_secs(30);
 const REPLY_WAIT: Duration = Duration::from_millis(300);
 /// HyperHeadset waits 50 ms between packets; bursts upset the Cloud III S dongle.
 const GAP: Duration = Duration::from_millis(50);
+
+/// What NGENUITY does after a setter, per family (`NGenuity2Helper`
+/// `HeadsetCloud*.SetOutputReport` / `GetInputReport`): the answer to wait
+/// for, and the pause before the next packet. Cloud II Core waits up to 50 ms
+/// for the echo of the command; the Stinger 2 only sleeps 100 ms; Cloud II
+/// (HP DTS, Kingston) reads one report without checking it; Alpha, Cloud III,
+/// Cloud III S, Flight and the wired boxes never read after a write (their
+/// echo is picked up by the next tick).
+fn set_timing(spec: &Spec<Family>) -> (Duration, Duration) {
+    match spec.family {
+        Cloud2Core => (Duration::from_millis(50), GAP),
+        Cloud2Hp if spec.pids == CLOUD_STINGER_2.pids => {
+            (Duration::ZERO, Duration::from_millis(100))
+        }
+        Cloud2Hp | Cloud2Kingston => (Duration::from_millis(100), GAP),
+        _ => (Duration::ZERO, GAP),
+    }
+}
+
+/// An input report that echoes the setter `req` (`66 <cmd> ..`).
+fn echoes(f: Family, req: &[u8], r: &[u8]) -> bool {
+    f == Cloud2Core && r.first() == req.first() && r.get(1) == req.get(1)
+}
 
 pub(super) fn open(spec: &'static Spec<Family>, pid: u16, ctx: &DriverCtx) -> Opened {
     Ok(vec![Box::new(HeadsetAdapter::open(
@@ -811,6 +887,23 @@ impl HeadsetAdapter {
         Ok(reports)
     }
 
+    /// Send a setter the way NGENUITY does ([`set_timing`]), then pause.
+    fn send_set(&mut self, packet: &[u8]) -> Result<()> {
+        let f = self.family();
+        let (wait, gap) = set_timing(self.spec);
+        if f == Cloud2Core {
+            let dev = self.dev.as_mut().context("not connected")?;
+            let reports = exchange(dev, packet, wait, |r| echoes(f, packet, r))?;
+            for r in &reports {
+                self.handle(r);
+            }
+        } else {
+            self.send(packet, wait)?;
+        }
+        std::thread::sleep(gap);
+        Ok(())
+    }
+
     fn handle(&mut self, report: &[u8]) {
         for e in parse(self.family(), report) {
             self.apply(e);
@@ -839,7 +932,7 @@ impl HeadsetAdapter {
             Event::SideToneVolume(v) => merge_setting(
                 &mut self.settings,
                 SettingKey::MicSideToneVolume,
-                SettingValue::Int(i64::from(v)),
+                SettingValue::Int(v),
             ),
             Event::MicAttached(on) => merge_setting(
                 &mut self.settings,
@@ -887,7 +980,7 @@ impl HeadsetAdapter {
         self.last_poll = Some(Instant::now());
         let mut any = false;
         for q in queries(self.family()) {
-            let answered = !self.send(&q, REPLY_WAIT)?.is_empty();
+            let answered = answers(self.family(), &self.send(&q, REPLY_WAIT)?);
             any |= answered;
             // No point asking an absent headset for the rest.
             if answered && !self.battery.present {
@@ -989,17 +1082,19 @@ impl DeviceAdapter for HeadsetAdapter {
         } else {
             let old = get_setting(&self.settings, key).cloned();
             for (i, p) in set_packets(f, key, &value)?.iter().enumerate() {
-                if let Err(e) = self.send(p, Duration::from_millis(100)) {
+                if let Err(mut e) = self.send_set(p) {
                     // A packet before this one landed: put the old value back.
                     if let (true, Some(old)) = (i > 0, &old) {
-                        for p in set_packets(f, key, old).unwrap_or_default() {
-                            let _ = self.send(&p, Duration::from_millis(100));
-                            std::thread::sleep(GAP);
+                        let restored = set_packets(f, key, old)
+                            .and_then(|packets| packets.iter().try_for_each(|p| self.send_set(p)));
+                        if let Err(re) = restored {
+                            e = anyhow::anyhow!(
+                                "{e:#}; restoring the previous value also failed ({re:#}), the headset may hold part of the change"
+                            );
                         }
                     }
                     return Err(e);
                 }
-                std::thread::sleep(GAP);
             }
         }
         if key == SettingKey::MicSideTone {

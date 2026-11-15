@@ -64,7 +64,8 @@ use tracing::{info, warn};
 
 pub const VID: u16 = 0x1b1c;
 
-const KEEPALIVE: Duration = Duration::from_secs(20);
+/// Half of iCUE's 60 s Bragi ping interval (manifest `RequiredPingInterval`).
+const KEEPALIVE: Duration = Duration::from_secs(30);
 const BATTERY_POLL: Duration = Duration::from_secs(30);
 /// Consecutive failed polls before a device counts as gone (asleep, unplugged).
 const MAX_FAILURES: u32 = 3;
@@ -145,7 +146,7 @@ impl Caps {
     fn of(family: Family) -> Self {
         match family {
             Family::Nxp { leds, dpi } => Self {
-                lighting: true,
+                lighting: !matches!(leds, nxp::Leds::None),
                 dpi,
                 tuning: matches!(leds, nxp::Leds::Mouse(_)),
                 ..Self::default()
@@ -195,6 +196,7 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
                 bragi::SELF,
                 leds,
                 wireless,
+                models::combined_dpi(pid),
             );
             b.probe()?;
             (info, Box::new(b))
@@ -293,7 +295,13 @@ fn open_receiver(pid: u16, spec: &'static Spec, ctx: &DriverCtx) -> Opened {
         let Family::Bragi { leds, .. } = family else {
             continue;
         };
-        let mut b = bragi::Bragi::new(bragi::Link::open(&info, false)?, addr, leds, true);
+        let mut b = bragi::Bragi::new(
+            bragi::Link::open(&info, false)?,
+            addr,
+            leds,
+            true,
+            models::combined_dpi(settings_pid),
+        );
         if let Err(e) = b.probe() {
             warn!("{name} behind {pid:04x}: {e}");
             continue;
@@ -474,7 +482,7 @@ impl Peripheral {
             }
         }
         if o.sidetone == Offer::Yes {
-            let off = self.backend.stored(bragi::PROP_SIDETONE_OFF);
+            let off = self.backend.stored(bragi::PROP_SIDETONE_MUTED);
             let level = self.backend.stored(bragi::PROP_SIDETONE_LEVEL);
             if let Some(pct) = off
                 .zip(level)
@@ -796,7 +804,8 @@ impl Peripheral {
             }
             SettingKey::PmShutdown if self.caps.onboard.sleep == Offer::Yes => {
                 let min = value.as_int().unwrap_or(0).max(0) as u32;
-                self.backend.store(&headset::sleep(min))
+                self.backend
+                    .store(&headset::sleep(min, self.caps.onboard.sleep_powersave))
             }
             SettingKey::Dpi if self.onboard() => Ok(()),
             SettingKey::Dpi => self.backend.dpi(value.as_int().unwrap_or(0) as u16),
@@ -961,7 +970,7 @@ mod tests {
                 bragi::PROP_ANGLE_SNAP => Some(1),
                 bragi::PROP_MAX_POLLRATE => Some(4),
                 bragi::PROP_BRIGHTNESS => Some(0),
-                bragi::PROP_SIDETONE_OFF => Some(0),
+                bragi::PROP_SIDETONE_MUTED => Some(0),
                 bragi::PROP_SIDETONE_LEVEL => Some(400),
                 bragi::PROP_SLEEP_ENABLED => Some(1),
                 bragi::PROP_SLEEP_TIMEOUT => Some(1_800_000),
@@ -1267,7 +1276,6 @@ mod tests {
         let p = peripheral(log.clone(), caps, "bragi-blocked");
         let rate = control(&p, SettingKey::ReportRate);
         assert!(rate.read_only && rate.persistent && rate.blocked.is_some());
-        assert!(control(&p, SettingKey::PmShutdown).blocked.is_some());
         let _ = std::fs::remove_dir_all(&p.paths.root);
         // NXP: the profile save exists but is blocked.
         let caps = Caps::opened(models::spec(0x1b49).unwrap().family, 0x1b49, false);
@@ -1278,6 +1286,33 @@ mod tests {
             .controls()
             .iter()
             .all(|c| !c.persistent || c.blocked.is_some()));
+        let _ = std::fs::remove_dir_all(&p.paths.root);
+    }
+
+    #[test]
+    fn separate_powersave_mice_store_both_timeouts() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        // Dark Core RGB PRO: iCUE order 0x0d, 0x37, 0x0e.
+        let caps = Caps::opened(models::spec(0x1b80).unwrap().family, 0x1b80, true);
+        let mut p = peripheral(log.clone(), caps, "mouse-sleep");
+        let sleep = control(&p, SettingKey::PmShutdown);
+        assert!(sleep.persistent && sleep.blocked.is_none());
+        log.lock().unwrap().clear();
+        p.set(SettingKey::PmShutdown, SettingValue::Int(10))
+            .unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["store 0x0d 1", "store 0x37 600000", "store 0x0e 600000"]
+        );
+        let _ = std::fs::remove_dir_all(&p.paths.root);
+        // A wireless keyboard has no power-save timeout.
+        log.lock().unwrap().clear();
+        let caps = Caps::opened(models::spec(0x2b10).unwrap().family, 0x2b10, false);
+        let mut p = peripheral(log.clone(), caps, "kbd-sleep");
+        log.lock().unwrap().clear();
+        p.set(SettingKey::PmShutdown, SettingValue::Int(10))
+            .unwrap();
+        assert_eq!(*log.lock().unwrap(), ["store 0x0d 1", "store 0x0e 600000"]);
         let _ = std::fs::remove_dir_all(&p.paths.root);
     }
 

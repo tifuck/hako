@@ -102,6 +102,7 @@ pub(crate) fn kill_orphans() {
         if let Some(dir) = hako_core::default_socket_path().parent() {
             remove_orphan_confs(dir);
         }
+        restore_saved(Some(&saved_cards_path(&Naming::daemon())));
     }
 }
 
@@ -1045,24 +1046,27 @@ struct CardClaim {
     /// across a PipeWire restart).
     previous: Option<String>,
     error: Option<String>,
+    /// Giving `previous` back failed: why, and when it is tried again.
+    release_error: Option<(String, Instant)>,
 }
+
+/// How long a card whose input could not be given back waits for the next try.
+const RELEASE_RETRY: Duration = Duration::from_secs(10);
 
 /// Put the card's input selection back, unless the node is gone or on
 /// another card (its card number may be another device's by now).
-fn release_card(node: &str, claim: &CardClaim, present: bool, saved: Option<&Path>) {
+fn release_card(node: &str, claim: &CardClaim, present: bool, saved: Option<&Path>) -> Result<()> {
     let (Some(previous), true) = (&claim.previous, present) else {
-        return;
+        return Ok(());
     };
-    match set_input_source(&claim.card, previous) {
-        Ok(()) => {
-            info!(
-                "mixer: {node}: card {} input source back to {previous}",
-                claim.card
-            );
-            save_previous(saved, &claim.card, None);
-        }
-        Err(e) => warn!("mixer: {node}: restoring card {} input: {e:#}", claim.card),
-    }
+    set_input_source(&claim.card, previous)
+        .with_context(|| format!("restoring card {} input", claim.card))?;
+    info!(
+        "mixer: {node}: card {} input source back to {previous}",
+        claim.card
+    );
+    save_previous(saved, &claim.card, None);
+    Ok(())
 }
 
 /// The card's stable id (`/proc/asound/cardN/id`): its number can be
@@ -1080,6 +1084,35 @@ fn card_id(card: &str) -> Option<String> {
 #[cfg(test)]
 fn card_id(card: &str) -> Option<String> {
     Some(format!("test{card}"))
+}
+
+/// The number of the card whose [`card_id`] is `id`, if it is there.
+#[cfg(not(test))]
+fn card_number(id: &str) -> Option<String> {
+    std::fs::read_dir("/proc/asound")
+        .ok()?
+        .flatten()
+        .find_map(|entry| {
+            let card = entry
+                .file_name()
+                .to_str()?
+                .strip_prefix("card")?
+                .to_string();
+            (card_id(&card).as_deref() == Some(id)).then_some(card)
+        })
+}
+
+/// Unit tests: `test<N>` is card N, any other id is not there.
+#[cfg(test)]
+fn card_number(id: &str) -> Option<String> {
+    id.strip_prefix("test")
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map(str::to_string)
+}
+
+/// `MixerGraph::saved_cards` of a graph named `naming`.
+fn saved_cards_path(naming: &Naming) -> PathBuf {
+    hako_core::default_socket_path().with_file_name(format!("{}mixer-cards.json", naming.files))
 }
 
 /// Cards' "Input Source" before hako changed it, by card id, as `saved`
@@ -1127,6 +1160,27 @@ fn save_previous(saved: Option<&Path>, card: &str, previous: Option<&str>) {
     }
 }
 
+/// Give every card in `saved` its own input back, by card id: what a
+/// crashed run or a failed release left. Only while no claim holds one
+/// (startup, teardown); a card that is not there, or fails, stays listed.
+fn restore_saved(saved: Option<&Path>) {
+    let Some(saved) = saved else {
+        return;
+    };
+    for (id, previous) in saved_previous(saved) {
+        let Some(card) = card_number(&id) else {
+            continue;
+        };
+        match set_input_source(&card, &previous) {
+            Ok(()) => {
+                info!("mixer: card {card} ({id}) input source back to {previous}");
+                save_previous(Some(saved), &card, None);
+            }
+            Err(e) => warn!("mixer: restoring card {card} ({id}) input: {e:#}"),
+        }
+    }
+}
+
 /// Why `def` cannot be started: one of its nodes exists already (`taken`)
 /// or another strip of this build makes it too (`made`, filled as it goes).
 fn clash(def: &StripDef, taken: &[String], made: &mut BTreeSet<String>) -> Option<String> {
@@ -1150,7 +1204,7 @@ pub struct MixerGraph {
     strips: BTreeMap<StripKey, Strip>,
     links: HashMap<(End, End), OwnedLink>,
     /// Capture cards set for sources, by node name; one no source wants
-    /// stays until its node is there to give the card back.
+    /// stays until its card is given back (its node must be there).
     cards: BTreeMap<String, CardClaim>,
     /// The claimed cards' own inputs, for the next start after a crash
     /// (`None`: not kept).
@@ -1170,10 +1224,7 @@ impl MixerGraph {
     /// `latency`: `node.latency` of every node, in samples at 48 kHz.
     pub fn new(naming: Naming, latency: u32) -> Self {
         // Unit tests run next to the user's hakod: its runtime dir is not theirs.
-        let saved_cards = (!cfg!(test)).then(|| {
-            hako_core::default_socket_path()
-                .with_file_name(format!("{}mixer-cards.json", naming.files))
-        });
+        let saved_cards = (!cfg!(test)).then(|| saved_cards_path(&naming));
         Self {
             naming,
             latency,
@@ -1661,6 +1712,7 @@ impl MixerGraph {
             .filter(|node| !wanted.iter().any(|(n, ..)| n == *node))
             .cloned()
             .collect();
+        let mut problems = Vec::new();
         for node in gone {
             // Let go of while absent (a PipeWire restart, a profile switch):
             // kept until the node is back, to give its card back then.
@@ -1670,14 +1722,29 @@ impl MixerGraph {
                 }
                 continue;
             };
-            if let Some(claim) = self.cards.remove(&node) {
+            if let Some(mut claim) = self.cards.remove(&node) {
                 // Another node took the card meanwhile: it gives it back.
                 let shared = self.cards.values().any(|c| c.card == claim.card);
                 let there = *card == claim.card && !shared;
-                release_card(&node, &claim, there, self.saved_cards.as_deref());
+                // Kept until given back: the card is still on hako's input.
+                if let Some((e, at)) = &claim.release_error {
+                    if Instant::now() < *at {
+                        problems.push(problem(&claim.input, e.clone()));
+                        self.cards.insert(node, claim);
+                        continue;
+                    }
+                }
+                if let Err(e) = release_card(&node, &claim, there, self.saved_cards.as_deref()) {
+                    let e = format!("{e:#}");
+                    if claim.release_error.as_ref().map(|(old, _)| old) != Some(&e) {
+                        warn!("mixer: {node}: {e}");
+                    }
+                    problems.push(problem(&claim.input, e.clone()));
+                    claim.release_error = Some((e, Instant::now() + RELEASE_RETRY));
+                    self.cards.insert(node, claim);
+                }
             }
         }
-        let mut problems = Vec::new();
         for (node, input, want) in wanted {
             // Absent, or not an ALSA device: applied once it is there.
             let Some((id, card)) = present.get(node) else {
@@ -1770,6 +1837,7 @@ impl MixerGraph {
                     applied: want.clone(),
                     previous,
                     error,
+                    release_error: None,
                 },
             );
         }
@@ -1798,7 +1866,10 @@ impl MixerGraph {
             let there = cards
                 .as_ref()
                 .is_none_or(|cards| cards.get(&node) == Some(&claim.card));
-            release_card(&node, &claim, there, self.saved_cards.as_deref());
+            // Still saved: `restore_saved` tries it again by card id.
+            if let Err(e) = release_card(&node, &claim, there, self.saved_cards.as_deref()) {
+                warn!("mixer: {node}: {e:#}");
+            }
         }
     }
 
@@ -1807,6 +1878,7 @@ impl MixerGraph {
     /// input selection back.
     pub fn teardown(&mut self) {
         self.release_cards();
+        restore_saved(self.saved_cards.as_deref());
         self.release_apps();
         self.links.clear();
         let names: Vec<String> = self.node_names().iter().map(|n| n.to_string()).collect();
@@ -1828,6 +1900,7 @@ impl MixerGraph {
 impl Drop for MixerGraph {
     fn drop(&mut self) {
         self.release_cards();
+        restore_saved(self.saved_cards.as_deref());
         self.release_apps();
         self.links.clear();
         for strip in self.strips.values_mut() {
@@ -2238,6 +2311,71 @@ mod tests {
         next.sync_cards(&[], &at);
         assert_eq!(amixer_calls(), ["7 sset Input Source Front Mic"]);
         assert!(!saved.exists(), "given back: forgotten");
+    }
+
+    /// A card whose own input could not be given back stays claimed (a
+    /// problem of its input) and is tried again at the next heal.
+    #[test]
+    fn a_failed_card_release_is_retried() {
+        use crate::tests::{amixer_calls, SSET_FAILS};
+        let node = "hako-test-busy-line".to_string();
+        let want = vec![(
+            node.clone(),
+            "line-in".to_string(),
+            (Some("Line".to_string()), None),
+        )];
+        let at = HashMap::from([(node.clone(), (5, "7".to_string()))]);
+        let mut graph = MixerGraph::new(test_naming(), 256);
+        graph.sync_cards(&want, &at);
+        amixer_calls();
+        SSET_FAILS.set(true);
+        let problems = graph.sync_cards(&[], &at);
+        SSET_FAILS.set(false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].strip, "line-in");
+        assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
+        assert!(graph.cards.contains_key(&node));
+        // Not again before its retry time; still a problem.
+        let problems = graph.sync_cards(&[], &at);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(amixer_calls().is_empty());
+        graph
+            .cards
+            .get_mut(&node)
+            .unwrap()
+            .release_error
+            .as_mut()
+            .unwrap()
+            .1 = Instant::now();
+        let problems = graph.sync_cards(&[], &at);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(amixer_calls(), ["7 sset Input Source Rear Mic"]);
+        assert!(graph.cards.is_empty());
+    }
+
+    /// At startup and teardown every saved card that is there gets its own
+    /// input back; one that is not there, or fails, stays saved.
+    #[test]
+    fn saved_cards_are_given_back_by_card_id() {
+        use crate::tests::{amixer_calls, SSET_FAILS};
+        let saved = std::env::temp_dir().join(format!(
+            "hako-test-x-mixer-cards-restore-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&saved, r#"{"test7":"Front Mic","unplugged":"Line"}"#).unwrap();
+        amixer_calls();
+        SSET_FAILS.set(true);
+        restore_saved(Some(&saved));
+        SSET_FAILS.set(false);
+        assert_eq!(amixer_calls(), ["7 sset Input Source Front Mic"]);
+        assert_eq!(saved_previous(&saved).len(), 2, "failed: kept");
+        restore_saved(Some(&saved));
+        assert_eq!(amixer_calls(), ["7 sset Input Source Front Mic"]);
+        assert_eq!(
+            saved_previous(&saved),
+            BTreeMap::from([("unplugged".to_string(), "Line".to_string())])
+        );
+        let _ = std::fs::remove_file(&saved);
     }
 
     #[test]

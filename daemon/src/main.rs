@@ -176,7 +176,25 @@ async fn main() -> Result<()> {
     info!("shutting down");
     discovery.abort();
     let _ = discovery.await;
-    hub.shutdown().await;
+    // A second stop signal skips the waits left, not the audio restore.
+    let shutdown = hub.shutdown();
+    tokio::pin!(shutdown);
+    tokio::select! {
+        () = &mut shutdown => {}
+        _ = async {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+                _ = hangup.recv() => {}
+                _ = quit.recv() => {}
+            }
+        } => {
+            warn!("stop signal again: skipping the rest of the teardown");
+            if let Err(e) = hub.audio.reset_all() {
+                warn!("audio teardown: {e:#}");
+            }
+        }
+    }
     let _ = std::fs::remove_file(&socket);
     result
 }

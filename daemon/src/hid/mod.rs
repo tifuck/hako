@@ -35,7 +35,14 @@ pub fn enumerate_hidraw() -> Result<Vec<HidDeviceInfo>> {
         return Ok(out);
     }
     for ent in std::fs::read_dir(root)? {
-        let ent = ent?;
+        // One unreadable entry must not hide every other node.
+        let ent = match ent {
+            Ok(ent) => ent,
+            Err(e) => {
+                warn!("{}: {e:#}", root.display());
+                continue;
+            }
+        };
         let name = ent.file_name().to_string_lossy().into_owned();
         let dev = ent.path().join("device");
         let uevent = std::fs::read_to_string(dev.join("uevent")).unwrap_or_default();
@@ -135,6 +142,8 @@ pub struct HidrawDevice {
 /// `_IOC(_IOC_READ|_IOC_WRITE, 'H', nr, len)`: HIDIOC\[SG\]FEATURE (6/7),
 /// HIDIOCGINPUT (0x0a).
 pub fn hidioc(nr: u64, len: usize) -> libc::c_ulong {
+    // The size field is 14 bits: a longer buffer would build another ioctl.
+    assert!(len <= 0x3fff, "HID ioctl buffer of {len} bytes");
     (3u64 << 30) | ((len as u64) << 16) | (u64::from(b'H') << 8) | nr
 }
 
@@ -318,8 +327,8 @@ pub fn find_usb_device_path(vid: u16, pid: u16) -> Result<PathBuf> {
     if !root.exists() {
         bail!("no /sys/bus/usb/devices");
     }
-    for ent in std::fs::read_dir(root)? {
-        let ent = ent?;
+    // An unreadable entry is skipped like an unreadable idVendor below.
+    for ent in std::fs::read_dir(root)?.flatten() {
         let p = ent.path();
         let v = std::fs::read_to_string(p.join("idVendor")).unwrap_or_default();
         let d = std::fs::read_to_string(p.join("idProduct")).unwrap_or_default();

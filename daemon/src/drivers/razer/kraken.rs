@@ -38,7 +38,15 @@
 //! last frame is "off"; 35 ms after each, replies within 150 ms. Battery
 //! (0x21) is 0..=100, charging (0x2a) nonzero on the cable. The headset
 //! stores sidetone and auto-off (PR #2862: "settings persist in the
-//! device"), so those are listed blocked.
+//! device"), so those are written only with the onboard-writes opt-in.
+//! Synapse 4's `AudioMxicDevice` module (docs/vendor-re/razer.md, Q6) agrees
+//! on every byte: command header `[cmd, 0, payload len]` (a set has bit 7 of
+//! the command set), the same frame, remote mode `e1`, ack/reply `[cmd, 1,
+//! len]`; sidetone on/off `98`/`18`, volume `99`/`19` (0..=15), preset EQ
+//! group `9d`, preset `93`/`13`. The same module drives the Barracuda Pro
+//! (0539, 0583) and Barracuda 2.4 (053b, 0584), listed with the same adapter.
+//! EQ presets are applied group, then preset, then read back (Synapse
+//! retries the pair when a write does not latch).
 
 use super::protocol::Effect;
 use super::VID;
@@ -171,6 +179,24 @@ pub const MODELS: &[Model] = &[
         product_ids: &[BLACKSHARK_2023_PID],
         kind: DeviceKind::Headset,
         name: "Razer BlackShark V2 Pro (2023)",
+        usbfs: false,
+        multi: false,
+        open: open_blackshark_2023,
+    },
+    Model {
+        vendor_id: VID,
+        product_ids: &[0x0539, 0x0583],
+        kind: DeviceKind::Headset,
+        name: "Razer Barracuda Pro",
+        usbfs: false,
+        multi: false,
+        open: open_blackshark_2023,
+    },
+    Model {
+        vendor_id: VID,
+        product_ids: &[0x053b, 0x0584],
+        kind: DeviceKind::Headset,
+        name: "Razer Barracuda 2.4",
         usbfs: false,
         multi: false,
         open: open_blackshark_2023,
@@ -348,9 +374,16 @@ impl DeviceAdapter for KrakenAdapter {
         }
         let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value);
-        if let Err(e) = self.apply() {
+        if let Err(mut e) = self.apply() {
             self.settings = before;
-            self.last_error = Some(e.to_string());
+            // The colour may have gone out before the mode failed: send the
+            // old lighting back.
+            if let Err(re) = self.apply() {
+                e = anyhow!(
+                    "{e:#}; restoring the previous lighting also failed ({re:#}), the headset may show part of the change"
+                );
+            }
+            self.last_error = Some(format!("{e:#}"));
             return Err(e);
         }
         self.last_error = None;
@@ -720,6 +753,8 @@ impl DeviceAdapter for BlackSharkAdapter {
             }
             Err(e) => {
                 debug!("BlackShark battery: {e}");
+                self.linked = false;
+                self.percent = None;
                 self.last_error = Some(e.to_string());
             }
         }
@@ -740,8 +775,50 @@ const BS23_CHARGING: u8 = 0x2a;
 const BS23_SETTLE: Duration = Duration::from_millis(35);
 /// Per-attempt reply wait, below the ~0.3 s after which the link dozes.
 const BS23_REPLY: Duration = Duration::from_millis(150);
-const BS23_STORED: &str =
-    "the headset stores it; layout from one unmerged OpenRazer PR (#2862) and a tool based on it";
+const BS23_SIDETONE: u8 = 0x98;
+const BS23_SIDETONE_VOLUME: u8 = 0x99;
+const BS23_EQ_GROUP: u8 = 0x9d;
+const BS23_EQ_PRESET: u8 = 0x93;
+/// Get = set with bit 7 cleared.
+const fn bs23_get(set: u8) -> u8 {
+    set & 0x7f
+}
+/// Preset index -> EQ group (Synapse `useHardwareEqualizer`): standard = 1,
+/// esports = 2; the default preset 0 belongs to no group.
+const BS23_PRESETS: &[(i64, &str, Option<u8>)] = &[
+    (0, "Default", None),
+    (7, "Game", Some(1)),
+    (8, "Music", Some(1)),
+    (9, "Movie", Some(1)),
+    (250, "Apex Legends", Some(2)),
+    (251, "CS:GO", Some(2)),
+    (252, "Valorant", Some(2)),
+    (253, "Fortnite", Some(2)),
+    (254, "Call of Duty", Some(2)),
+];
+
+fn bs23_name(pid: u16) -> &'static str {
+    MODELS
+        .iter()
+        .find(|m| m.product_ids.contains(&pid))
+        .map_or("Razer headset", |m| m.name)
+}
+
+/// A set (cmd with bit 7 set): header `[cmd, 0, len]` then the payload.
+fn bs23_set(cmd: u8, payload: &[u8]) -> [u8; 64] {
+    let mut f = [0u8; 64];
+    let n = 3 + payload.len();
+    f[..3].copy_from_slice(&[BS_REPORT_ID, BS_FRAME_OUT, (5 + n) as u8]);
+    f[5..8].copy_from_slice(&[0x50, 0x41, 0x08]);
+    f[9..13].copy_from_slice(&[n as u8, cmd, 0x00, payload.len() as u8]);
+    f[13..13 + payload.len()].copy_from_slice(payload);
+    f
+}
+
+/// Sidetone level 0..=10 -> volume byte 1..=15 (Synapse: `floor(pct * 15 / 100)`).
+fn bs23_volume(level: i64) -> u8 {
+    (level.clamp(1, 10) * 15 / 10) as u8
+}
 
 /// A query (type 0x03) without payload.
 fn bs23_query(cmd: u8) -> [u8; 64] {
@@ -767,7 +844,7 @@ fn bs23_reply(report: &[u8], cmd: u8) -> Option<&[u8]> {
         .then(|| &report[15..report.len().min(15 + usize::from(report[14]))])
 }
 
-fn open_blackshark_2023(pid: u16, _ctx: &DriverCtx) -> Opened {
+fn open_blackshark_2023(pid: u16, ctx: &DriverCtx) -> Opened {
     let info = enumerate_hidraw()?
         .into_iter()
         .find(|d| {
@@ -788,11 +865,10 @@ fn open_blackshark_2023(pid: u16, _ctx: &DriverCtx) -> Opened {
         state: None,
         last_poll: None,
         last_error: None,
+        settings: hako_core::config::load_device_settings(&ctx.paths, VID, bs23_canonical(pid))?,
+        paths: ctx.paths.clone(),
     };
-    info!(
-        "Razer BlackShark V2 Pro (2023) open via {}",
-        info.path.display()
-    );
+    info!("{} open via {}", bs23_name(pid), info.path.display());
     Ok(vec![Box::new(a)])
 }
 
@@ -803,6 +879,16 @@ struct BlackShark2023Adapter {
     state: Option<(u8, bool)>,
     last_poll: Option<Instant>,
     last_error: Option<String>,
+    settings: SettingsMap,
+    paths: ConfigPaths,
+}
+
+/// The first PID of the model: it names the settings file.
+fn bs23_canonical(pid: u16) -> u16 {
+    MODELS
+        .iter()
+        .find(|m| m.product_ids.contains(&pid))
+        .map_or(pid, |m| m.product_ids[0])
 }
 
 impl BlackShark2023Adapter {
@@ -865,6 +951,85 @@ impl BlackShark2023Adapter {
         }
     }
 
+    /// Wait for the acknowledged reply to `cmd`; its payload.
+    fn await_payload(&mut self, cmd: u8) -> Option<Vec<u8>> {
+        let dev = self.dev.as_mut()?;
+        let start = Instant::now();
+        let mut buf = [0u8; 64];
+        loop {
+            let left = BS23_REPLY
+                .checked_sub(start.elapsed())
+                .filter(|d| !d.is_zero())?;
+            let n = dev.read_timeout(&mut buf, left).ok()?;
+            if let Some(data) = bs23_reply(&buf[..n], cmd) {
+                return Some(data.to_vec());
+            }
+        }
+    }
+
+    /// Write `payload` with `set` and read it back with the matching get,
+    /// inside one remote-mode session (always switched off again).
+    fn write_verified(&mut self, set: u8, payload: &[u8]) -> Result<()> {
+        self.dev
+            .as_mut()
+            .context("device not open")?
+            .drain(Duration::ZERO);
+        let result = self.write_in_remote(set, payload);
+        let off = self.remote(false);
+        result?;
+        off
+    }
+
+    fn write_in_remote(&mut self, set: u8, payload: &[u8]) -> Result<()> {
+        self.remote(true)?;
+        let get = bs23_get(set);
+        for _ in 0..ATTEMPTS {
+            self.remote(true)?;
+            self.send(&bs23_set(set, payload))?;
+            if self.await_payload(set).is_none() {
+                continue;
+            }
+            self.send(&bs23_query(get))?;
+            if let Some(back) = self.await_payload(get) {
+                if back.first() == payload.first() {
+                    return Ok(());
+                }
+                bail!("{get:#04x} reads back {back:02x?}, wrote {payload:02x?}");
+            }
+        }
+        bail!("the headset did not answer {set:#04x} (off or out of range)")
+    }
+
+    fn set_sidetone(&mut self, level: i64) -> Result<()> {
+        if level > 0 {
+            self.write_verified(BS23_SIDETONE_VOLUME, &[bs23_volume(level)])?;
+        }
+        self.write_verified(BS23_SIDETONE, &[u8::from(level > 0)])
+    }
+
+    fn set_eq_preset(&mut self, preset: i64) -> Result<()> {
+        let (_, _, group) = BS23_PRESETS
+            .iter()
+            .find(|(p, _, _)| *p == preset)
+            .with_context(|| format!("unknown EQ preset {preset}"))?;
+        let preset = u8::try_from(preset)?;
+        // Synapse writes group then preset and, when a write does not latch,
+        // repeats the pair.
+        let mut last = Ok(());
+        for _ in 0..2 {
+            last = (|| {
+                if let Some(g) = group {
+                    self.write_verified(BS23_EQ_GROUP, &[*g])?;
+                }
+                self.write_verified(BS23_EQ_PRESET, &[preset])
+            })();
+            if last.is_ok() {
+                break;
+            }
+        }
+        last
+    }
+
     fn read_state(&mut self) -> Result<Option<(u8, bool)>> {
         let Some(level) = self.query(BS23_BATTERY)? else {
             return Ok(None);
@@ -880,11 +1045,10 @@ impl DeviceAdapter for BlackShark2023Adapter {
     }
 
     fn snapshot(&self) -> DeviceSnapshot {
-        let stored = |meta: SettingMeta| meta.persistent().blocked(BS23_STORED);
         DeviceSnapshot {
             id: self.id.clone(),
             kind: DeviceKind::Headset,
-            name: "Razer BlackShark V2 Pro (2023)".into(),
+            name: bs23_name(self.id.product_id).into(),
             connected: self.dev.is_some(),
             batteries: vec![BatteryState {
                 label: "Battery".into(),
@@ -892,28 +1056,58 @@ impl DeviceAdapter for BlackShark2023Adapter {
                 charging: self.state.is_some_and(|(_, c)| c),
                 present: self.state.is_some(),
             }],
-            settings: SettingsMap::new(),
+            settings: self.settings.clone(),
             controls: vec![
-                stored(SettingMeta::slider(
-                    SettingKey::MicSideTone,
-                    "Mic monitoring",
-                    0.0,
-                    10.0,
-                    1.0,
-                )),
-                stored(
-                    SettingMeta::slider(SettingKey::PmShutdown, "Auto-off", 15.0, 60.0, 1.0)
-                        .unit("min"),
-                ),
+                // The headset stores both (PR #2862; Synapse writes the
+                // esports presets into it on purpose): opt-in writes.
+                SettingMeta::slider(SettingKey::MicSideTone, "Mic monitoring", 0.0, 10.0, 1.0)
+                    .persistent(),
+                SettingMeta::dropdown(
+                    SettingKey::EqPreset,
+                    "EQ preset",
+                    BS23_PRESETS
+                        .iter()
+                        .map(|(p, label, _)| SettingOption::int(*p, label))
+                        .collect(),
+                )
+                .persistent(),
+                SettingMeta::slider(SettingKey::PmShutdown, "Auto-off", 15.0, 60.0, 1.0)
+                    .unit("min")
+                    .persistent()
+                    .blocked("the auto-off byte layout is not decoded"),
             ],
             last_error: self.last_error.clone(),
         }
     }
 
-    fn set(&mut self, key: SettingKey, _value: SettingValue) -> Result<()> {
-        bail!(
-            "BlackShark V2 Pro (2023): {} is not available",
-            key.as_str()
+    fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+        let result = match key {
+            SettingKey::MicSideTone => self.set_sidetone(
+                value
+                    .as_float()
+                    .context("mic monitoring expects a number")?
+                    .round() as i64,
+            ),
+            SettingKey::EqPreset => {
+                self.set_eq_preset(value.as_int().context("EQ preset expects an index")?)
+            }
+            _ => bail!(
+                "{}: {} is not available",
+                bs23_name(self.id.product_id),
+                key.as_str()
+            ),
+        };
+        if let Err(e) = result {
+            self.last_error = Some(format!("{e:#}"));
+            return Err(e);
+        }
+        self.last_error = None;
+        merge_setting(&mut self.settings, key, value);
+        hako_core::config::save_device_settings(
+            &self.paths,
+            VID,
+            bs23_canonical(self.id.product_id),
+            &self.settings,
         )
     }
 
@@ -1067,7 +1261,38 @@ mod tests {
         assert_eq!(bs23_reply(&r, BS23_BATTERY).map(<[u8]>::len), Some(64 - 15));
         assert_eq!(bs23_reply(&r[..15], BS23_BATTERY), None, "too short");
 
-        // Headset-stored settings are listed, never offered.
+        // Sets (Synapse `AudioMxicDevice`): header `[cmd, 0, len]` + payload.
+        assert_eq!(
+            bs23_set(BS23_SIDETONE, &[1]),
+            padded(&[0x02, 0x80, 0x09, 0, 0, 0x50, 0x41, 0x08, 0, 0x04, 0x98, 0x00, 0x01, 0x01])
+        );
+        assert_eq!(
+            bs23_set(BS23_EQ_PRESET, &[250])[9..14],
+            [0x04, 0x93, 0x00, 0x01, 250]
+        );
+        assert_eq!(
+            [
+                BS23_SIDETONE,
+                BS23_SIDETONE_VOLUME,
+                BS23_EQ_GROUP,
+                BS23_EQ_PRESET
+            ]
+            .map(bs23_get),
+            [0x18, 0x19, 0x1d, 0x13]
+        );
+        assert_eq!(
+            (bs23_volume(1), bs23_volume(5), bs23_volume(10)),
+            (1, 7, 15)
+        );
+        // The reply to a set carries the set command.
+        let mut r = padded(&[0x02]);
+        r[12..16].copy_from_slice(&[BS23_SIDETONE, 0x01, 0x01, 0x01]);
+        assert_eq!(bs23_reply(&r, BS23_SIDETONE), Some(&[0x01][..]));
+        assert_eq!(bs23_name(0x0584), "Razer Barracuda 2.4");
+        assert_eq!(bs23_canonical(0x0583), 0x0539);
+
+        // Sidetone and EQ preset are headset-stored (opt-in); auto-off stays
+        // blocked (layout not decoded).
         let a = BlackShark2023Adapter {
             id: DeviceId {
                 vendor_id: VID,
@@ -1078,13 +1303,22 @@ mod tests {
             state: None,
             last_poll: None,
             last_error: None,
+            settings: SettingsMap::new(),
+            paths: ConfigPaths::xdg().unwrap(),
         };
         let snap = a.snapshot();
-        assert!(!snap.controls.is_empty());
+        assert_eq!(snap.controls.len(), 3);
         for m in &snap.controls {
-            assert!(m.persistent && m.blocked.is_some(), "{}", m.key.as_str());
-            assert!(m.validate(&SettingValue::Int(5)).is_err());
+            assert!(m.persistent, "{}", m.key.as_str());
+            assert_eq!(
+                m.blocked.is_some(),
+                m.key == SettingKey::PmShutdown,
+                "{}",
+                m.key.as_str()
+            );
         }
+        assert!(snap.controls[1].validate(&SettingValue::Int(252)).is_ok());
+        assert!(snap.controls[1].validate(&SettingValue::Int(255)).is_err());
         assert!(!snap.batteries[0].present);
     }
 

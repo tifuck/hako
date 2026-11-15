@@ -62,10 +62,18 @@ fn setters_emit_documented_sequences() {
 
 #[test]
 fn flight_voltage_to_percent() {
-    assert_eq!(flight_percent(3000), 5);
-    assert_eq!(flight_percent(3328), 5);
-    assert_eq!(flight_percent(3800), 55);
-    assert_eq!(flight_percent(3970), 100);
+    // NGENUITY: hi 0x0d (3328..3583 mV) is 5 %, anything below 1 %.
+    assert_eq!(flight_percent(3000), Some(1));
+    assert_eq!(flight_percent(3327), Some(1));
+    assert_eq!(flight_percent(3328), Some(5));
+    // The 25 % step starts at 0x0e95 = 3733 mV.
+    assert_eq!(flight_percent(3732), Some(20));
+    assert_eq!(flight_percent(3733), Some(25));
+    assert_eq!(flight_percent(3800), Some(55));
+    assert_eq!(flight_percent(3970), Some(100));
+    // 0 mV is no reading, not an empty battery.
+    assert_eq!(flight_percent(0), None);
+    assert!(parse(Flight, &[0x21, 0xff, 0x05, 0x00, 0x00]).is_empty());
     assert_eq!(
         parse(Flight, &[0x21, 0xff, 0x05, 0x0e, 0xd8]),
         vec![
@@ -74,9 +82,21 @@ fn flight_voltage_to_percent() {
             Event::Charging(false)
         ]
     );
-    // 0x1010 mV > 0x100b: charger voltage, no level.
+    // From 0x1014 mV: charger voltage, no level. 0x1013 is a full battery.
     assert_eq!(
-        parse(Flight, &[0x21, 0xff, 0x05, 0x10, 0x10]),
+        parse(Flight, &[0x21, 0xff, 0x05, 0x10, 0x14]),
+        vec![Event::Online(true), Event::Charging(true)]
+    );
+    assert_eq!(
+        parse(Flight, &[0x21, 0xff, 0x05, 0x10, 0x13]),
+        vec![
+            Event::Online(true),
+            Event::Battery(100),
+            Event::Charging(false)
+        ]
+    );
+    assert_eq!(
+        parse(Flight, &[0x21, 0xff, 0x05, 0x11, 0x00]),
         vec![Event::Online(true), Event::Charging(true)]
     );
     assert_eq!(parse(Flight, &[0x65, 0x04]), vec![Event::Muted(true)]);
@@ -137,6 +157,21 @@ fn parsers_read_documented_offsets() {
         ]
     );
     assert_eq!(parse(Alpha2, &[0x53, 0x01, 0]), vec![Event::Online(false)]);
+}
+
+#[test]
+fn only_a_parsed_reply_counts_as_an_answer() {
+    // Unrelated input traffic does not prove the headset answered.
+    assert!(!answers(Cloud3, &[vec![0x01, 0x00, 0x05, 0x00]]));
+    assert!(!answers(
+        Cloud3S,
+        &[pad(&[0x0c, 2, 3, 1, 0, 0x06, 0xff], 64)]
+    ));
+    assert!(!answers(Cloud2Hp, &[]));
+    assert!(answers(
+        Cloud3,
+        &[vec![0x01, 0x00], vec![0x66, 0x82, 0x01, 0, 0]]
+    ));
 }
 
 #[test]
@@ -278,7 +313,61 @@ fn sidetone_volume_and_mic_attached() {
         vec![Event::MicAttached(true)]
     );
     assert!(parse(Cloud3, &[0x66, 0x8c, 1, 0, 0]).is_empty());
-    assert!(set_packets(Cloud3, SettingKey::MicSideToneVolume, &SettingValue::Int(1)).is_err());
+    assert!(set_packets(
+        Cloud2Core,
+        SettingKey::MicSideToneVolume,
+        &SettingValue::Int(1)
+    )
+    .is_err());
+}
+
+#[test]
+fn cloud_iii_wireless_sidetone_volume_is_signed_minus_5_to_5() {
+    // NGENUITY CMDHSCloud3WirelessSetSidetoneVolume: clamp, signed byte.
+    let vol = |v| set_packets(Cloud3, SettingKey::MicSideToneVolume, &SettingValue::Int(v));
+    assert_eq!(vol(-5).unwrap(), vec![pad(&[0x66, 0x05, 0xfb], 62)]);
+    assert_eq!(vol(3).unwrap(), vec![pad(&[0x66, 0x05, 0x03], 62)]);
+    assert_eq!(vol(9).unwrap(), vec![pad(&[0x66, 0x05, 0x05], 62)]);
+    assert_eq!(vol(-9).unwrap(), vec![pad(&[0x66, 0x05, 0xfb], 62)]);
+    assert!(queries(Cloud3).contains(&packet(Cloud3, 0x88, 0)));
+    assert_eq!(
+        parse(Cloud3, &[0x66, 0x88, 0xfd, 0, 0]),
+        vec![Event::SideToneVolume(-3)]
+    );
+    assert_eq!(
+        parse(Cloud3, &[0x66, 0x05, 0x04, 0, 0]),
+        vec![Event::SideToneVolume(4)]
+    );
+    // Out-of-range bytes read as 0, like NGENUITY's Core decode.
+    assert_eq!(
+        parse(Cloud3, &[0x66, 0x88, 0x40, 0, 0]),
+        vec![Event::SideToneVolume(0)]
+    );
+    let c = controls(Cloud3);
+    let m = c
+        .iter()
+        .find(|m| m.key == SettingKey::MicSideToneVolume)
+        .unwrap();
+    assert!(m.validate(&SettingValue::Int(-5)).is_ok());
+    assert!(m.validate(&SettingValue::Int(6)).is_err());
+}
+
+#[test]
+fn setter_acks_follow_ngenuity_per_family() {
+    let ms = |m| Duration::from_millis(m);
+    // Cloud II Core: wait 50 ms for `66 <cmd>`.
+    assert_eq!(set_timing(&CLOUD_II_CORE).0, ms(50));
+    let req = packet(Cloud2Core, 0x03, 1);
+    assert!(echoes(Cloud2Core, &req, &[0x66, 0x03, 1, 0]));
+    assert!(!echoes(Cloud2Core, &req, &[0x66, 0x0a, 1, 0]));
+    assert!(!echoes(Cloud3, &req, &[0x66, 0x03, 1, 0]));
+    // Stinger 2: no read, 100 ms gap; the DTS Cloud II keeps its single read.
+    assert_eq!(set_timing(&CLOUD_STINGER_2), (Duration::ZERO, ms(100)));
+    assert_eq!(set_timing(&CLOUD_II_HP).0, ms(100));
+    // Fire and forget.
+    for spec in [&CLOUD_ALPHA, &CLOUD_III, &CLOUD_III_S, &CLOUD_FLIGHT] {
+        assert_eq!(set_timing(spec).0, Duration::ZERO, "{}", spec.name);
+    }
 }
 
 #[test]
@@ -317,6 +406,7 @@ fn sidetone_value_per_family() {
     assert_eq!(sidetone_value(Alpha, Some(true), Some(64)), Some(64));
     assert_eq!(sidetone_value(Alpha, Some(false), Some(64)), Some(0));
     assert_eq!(sidetone_value(Cloud2Core, Some(true), Some(-5)), Some(1));
+    // Cloud III Wireless keeps on/off here; its level is `MicSideToneVolume`.
     assert_eq!(sidetone_value(Cloud3, Some(true), None), Some(1));
     assert_eq!(sidetone_value(Cloud3, None, None), None);
 }

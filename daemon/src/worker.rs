@@ -551,13 +551,12 @@ fn check(
     gate.refresh(a);
     let mut snap = gate.view(a);
     if !snap.connected {
-        bail!(
-            "{} is not connected{}",
-            snap.name,
-            snap.last_error
-                .map(|e| format!(": {e}"))
-                .unwrap_or_default()
-        );
+        let why = snap
+            .last_error
+            .map(|e| format!(": {e}"))
+            .unwrap_or_default();
+        let e = format!("{} is not connected{why}", snap.name);
+        return Err(Refused::new("not_found", e).into());
     }
     // Every write would land in onboard memory without the owner's consent:
     // only leaving that mode (or deciding the opt-in) is let through.
@@ -1102,6 +1101,25 @@ mod tests {
         run(Box::new(a), gate, rx, shared, broadcast::channel(4).0);
         done.recv().unwrap();
         assert_eq!(batches.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    #[test]
+    fn a_write_to_a_device_not_connected_is_refused_as_not_found() {
+        let paths = temp_paths("offline");
+        let id = fake().id;
+        let error = anyhow!("gone");
+        let mut a = crate::drivers::PlaceholderAdapter::permission_denied(
+            id.clone(),
+            DeviceKind::Mouse,
+            "Fake",
+            &error,
+        );
+        let mut gate = Gate::load(paths.clone(), id.config_stem());
+        let e =
+            set_checked(&mut a, &mut gate, SettingKey::Dpi, SettingValue::Int(400)).unwrap_err();
+        assert_eq!(Refused::code(&e), "not_found", "{e:#}");
+        assert!(format!("{e:#}").contains("not connected"), "{e:#}");
         let _ = std::fs::remove_dir_all(paths.root);
     }
 

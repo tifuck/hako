@@ -125,7 +125,8 @@ pub fn check(repo: &str) -> Result<Option<Release>> {
         API_MAX,
     )
     .context("GitHub did not answer")?;
-    let v: serde_json::Value = serde_json::from_slice(&body)?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).context("GitHub's release answer is not JSON")?;
     release(&v, repo, env!("CARGO_PKG_VERSION"), deb_install())
 }
 
@@ -246,9 +247,7 @@ fn download_to(dir: &Path, key: &str, rel: &Release) -> Result<Ready> {
     let sums = fetch(&[&rel.sums_url], SUMS_MAX)?;
     fetch(&[&rel.sig_url], SUMS_MAX)
         .with_context(|| format!("v{} is not signed yet", rel.version))
-        .and_then(|sig| {
-            verify_signature(key, &sums, &sig).map_err(|e| Rejected(format!("{e:#}")).into())
-        })?;
+        .and_then(|sig| verify_signature(key, &sums, &sig))?;
     let sums = String::from_utf8(sums)?;
     let Some(want) = expected_sum(&sums, &rel.name) else {
         bail!(Rejected(format!(
@@ -257,9 +256,8 @@ fn download_to(dir: &Path, key: &str, rel: &Release) -> Result<Ready> {
         )));
     };
     let file = dir.join(&rel.name);
-    std::fs::File::create(&file)
-        .map_err(anyhow::Error::from)
-        .and_then(|mut out| copy_capped(curl(ASSET_MAX).arg(&rel.url), ASSET_MAX, &mut out))
+    fetch(&[&rel.url], ASSET_MAX)
+        .and_then(|body| Ok(std::fs::write(&file, body)?))
         .context("download failed")?;
     let got = String::from_utf8(run(Command::new("/usr/bin/sha256sum").arg(&file))?)?;
     if got.split_whitespace().next() != Some(want.as_str()) {
@@ -311,7 +309,12 @@ fn install_file(file: &Path, sum: &str, dir: &Path) -> Result<Option<String>> {
     // The download folder is the user's: anything running as them could swap
     // the file after `download` checked it. Root only gets these checked
     // bytes over stdin, never a path to read.
-    let data = std::fs::read(file)?;
+    let data = std::fs::read(file).with_context(|| {
+        format!(
+            "the downloaded update is gone ({}); check again",
+            file.display()
+        )
+    })?;
     if let Err(e) = check_sum(&data, sum) {
         // Spent: the next check downloads it again instead of retrying this.
         let _ = std::fs::remove_dir_all(dir);
@@ -402,7 +405,9 @@ pub fn restart(bin: &Path, warn: Option<String>) -> std::io::Error {
     cmd.exec()
 }
 
-/// `curl` refusing bodies over `max` bytes.
+/// `curl` refusing bodies over `max` bytes. A stalled transfer fails, a slow
+/// one may take its time. No `--retry`: curl cannot take back what a failed
+/// attempt already wrote to the pipe, so a retried body would follow it.
 fn curl(max: u64) -> Command {
     let mut c = Command::new("curl");
     c.args([
@@ -410,19 +415,33 @@ fn curl(max: u64) -> Command {
         "--proto",
         // Tests serve releases from `file://` URLs.
         if cfg!(test) { "=https,file" } else { "=https" },
-        "--retry",
-        "2",
+        "--connect-timeout",
+        "30",
+        "--speed-limit",
+        "1024",
+        "--speed-time",
+        "60",
         "--max-time",
-        "300",
+        "3600",
         "--max-filesize",
     ])
     .arg(max.to_string());
     c
 }
 
-/// `curl args`'s body, at most `max` bytes of it.
+/// `curl args`'s body, at most `max` bytes of it; a failed attempt is tried
+/// again twice, each time from scratch.
 fn fetch(args: &[&str], max: u64) -> Result<Vec<u8>> {
-    read_capped(curl(max).args(args), max)
+    let mut tries = 0;
+    loop {
+        match read_capped(curl(max).args(args), max) {
+            Err(_) if tries < 2 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_secs(tries));
+            }
+            res => return res,
+        }
+    }
 }
 
 /// Run to completion; stdout on success, stderr as the error.
@@ -496,8 +515,17 @@ fn run_input(cmd: &mut Command, input: &[u8]) -> Result<Vec<u8>> {
 /// pipes, never from a file another process of the user could swap between
 /// writing and checking it. bash only passes its arguments on (no PATH, no
 /// environment for `BASH_ENV` or exported functions).
+///
+/// Only a signature that does not verify is [`Rejected`]; a missing program
+/// is an ordinary error.
 fn verify_signature(key: &str, data: &[u8], sig: &[u8]) -> Result<()> {
-    let sig = std::str::from_utf8(sig).context("the release signature is not text")?;
+    for tool in ["/usr/bin/bash", "/usr/bin/ssh-keygen"] {
+        if !Path::new(tool).exists() {
+            bail!("cannot check the release signature: {tool} is missing (ssh-keygen comes with openssh-client)");
+        }
+    }
+    let sig = std::str::from_utf8(sig)
+        .map_err(|_| Rejected("the release signature is not text".into()))?;
     run_input(
         Command::new("/usr/bin/bash")
             .env_clear()
@@ -513,7 +541,7 @@ fn verify_signature(key: &str, data: &[u8], sig: &[u8]) -> Result<()> {
             .arg(sig),
         data,
     )
-    .context("release signature check failed (needs ssh-keygen from openssh-client)")?;
+    .map_err(|e| Rejected(format!("release signature check failed: {e:#}")))?;
     Ok(())
 }
 
@@ -774,6 +802,8 @@ mod tests {
             .collect::<Vec<_>>()
             .windows(2)
             .any(|a| a == ["--max-filesize", "5"]));
+        // A retry would append to the body a failed attempt left in the pipe.
+        assert!(!curl(5).get_args().any(|a| a == "--retry"));
     }
 
     #[test]
