@@ -920,7 +920,9 @@ impl HeadsetAdapter {
                     b.charging = false;
                 }
             }
-            Event::Battery(p) => (b.present, b.percent) = (true, Some(p.min(100))),
+            Event::Battery(p) if p <= 100 => (b.present, b.percent) = (true, Some(p)),
+            // Above 100: no reading (0xff and the like), not a full battery.
+            Event::Battery(_) => {}
             Event::Charging(c) => b.charging = c,
             Event::Muted(m) => merge_setting(
                 &mut self.settings,
@@ -1068,13 +1070,20 @@ impl DeviceAdapter for HeadsetAdapter {
         if f == Alpha2 {
             self.alpha2_set(key, &value)?;
         } else if f == AlphaS && key == SettingKey::MicSideTone {
-            self.send(&packet(AlphaS, ALPHA_S_STATUS, 0), REPLY_WAIT)?;
             let want = value.as_int().unwrap_or(0) != 0;
+            // The toggle is decided from a fresh status only, and checked after.
+            self.sidetone.0 = None;
+            self.send(&packet(AlphaS, ALPHA_S_STATUS, 0), REPLY_WAIT)?;
             match self.sidetone.0 {
                 Some(on) if on == want => {}
                 Some(_) => {
                     for p in set_packets(f, key, &value)? {
                         self.send(&p, REPLY_WAIT)?;
+                    }
+                    self.sidetone.0 = None;
+                    self.send(&packet(AlphaS, ALPHA_S_STATUS, 0), REPLY_WAIT)?;
+                    if self.sidetone.0 != Some(want) {
+                        bail!("the control box did not switch sidetone");
                     }
                 }
                 None => bail!("no status reply from the control box"),

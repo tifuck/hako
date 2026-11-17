@@ -26,6 +26,7 @@ use anyhow::{bail, ensure, Context, Result};
 use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, SettingsMap};
 use hako_core::config::merge_setting;
 use std::time::Duration;
+use tracing::warn;
 
 /// Identity reply `cid` of this family (`Config.ini` `CID=87`).
 pub const CID: u8 = 0x57;
@@ -196,7 +197,9 @@ pub fn with_mouse<L: Link, T>(
     );
     let r = f(link);
     if wireless {
-        let _ = online(link, Some(false));
+        if let Err(e) = online(link, Some(false)) {
+            warn!("could not release the mouse's host hold: {e:#}");
+        }
     }
     r
 }
@@ -374,6 +377,30 @@ impl Cid87 {
                     i + 1
                 );
                 write_checked(link, ADDR_DPI + 4 * i as u16, &dpi_record(int()?)?)
+            }
+        }
+    }
+
+    /// [`Self::write`], then [`Self::read_settings`] into `state`. When only
+    /// the re-read fails, `state` gets the written value and `stale` is set.
+    pub fn write_and_read(
+        &self,
+        link: &mut impl Link,
+        key: SettingKey,
+        value: &SettingValue,
+        state: &mut SettingsMap,
+        stale: &mut bool,
+    ) -> Result<()> {
+        self.write(link, key, value)?;
+        match self.read_settings(link) {
+            Ok(s) => {
+                *state = s;
+                Ok(())
+            }
+            Err(e) => {
+                merge_setting(state, key, value.clone());
+                *stale = true;
+                Err(e.context("written, but the settings were not read back"))
             }
         }
     }
@@ -667,6 +694,8 @@ mod tests {
         stuck: bool,
         writes: Vec<(u16, Vec<u8>)>,
         holds: Cell<u32>,
+        /// Reads answered before the mouse goes silent (`None`: all).
+        reads_left: Option<usize>,
     }
 
     impl Fake {
@@ -686,6 +715,7 @@ mod tests {
                 stuck: false,
                 writes: vec![],
                 holds: Cell::new(0),
+                reads_left: None,
             }
         }
     }
@@ -707,6 +737,11 @@ mod tests {
                 }
                 CMD_READ => {
                     assert!(len <= CHUNK);
+                    match &mut self.reads_left {
+                        Some(0) => return Ok(None),
+                        Some(n) => *n -= 1,
+                        None => {}
+                    }
                     body[4..4 + len].copy_from_slice(&self.mem[addr..addr + len]);
                 }
                 CMD_WRITE => {
@@ -866,6 +901,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.to_string().contains("read-back"), "{e}");
+    }
+
+    #[test]
+    fn a_write_whose_re_read_fails_keeps_the_written_value() {
+        let mut dev = Fake::new();
+        let mut state = X1.read_settings(&mut dev).unwrap();
+        let mut stale = false;
+        // The write's own check and read-back are answered, then nothing.
+        dev.reads_left = Some(2);
+        let e = X1
+            .write_and_read(
+                &mut dev,
+                SettingKey::ReportRate,
+                &SettingValue::Int(500),
+                &mut state,
+                &mut stale,
+            )
+            .unwrap_err();
+        assert!(e.to_string().contains("written"), "{e}");
+        assert_eq!(dev.writes, [(0, vec![2, 0x53])]);
+        assert!(stale);
+        assert_eq!(
+            state[SettingKey::ReportRate.as_str()],
+            SettingValue::Int(500)
+        );
+        assert_eq!(state[SettingKey::Debounce.as_str()], SettingValue::Int(5));
     }
 
     #[test]

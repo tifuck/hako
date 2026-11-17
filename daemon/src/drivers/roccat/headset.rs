@@ -153,6 +153,8 @@ impl Lights for Elo {
             (Family::Air, SettingKey::PmShutdown, Some(m @ 0..=60)) => m as u8,
             _ => bail!("{} is not supported", key.as_str()),
         };
+        // A report already queued is not the reply.
+        self.dev.drain(Duration::ZERO);
         self.dev.write(&inactive_report(minutes))?;
         // HeadsetControl reads one reply before pausing, and fails without one.
         let reply = read_until(&mut self.dev, Duration::from_millis(500), |_| true)?;

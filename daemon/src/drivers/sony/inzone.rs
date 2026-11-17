@@ -523,7 +523,8 @@ impl InzoneAdapter {
         Ok(())
     }
 
-    fn write(&mut self, key: K, value: &SettingValue) -> Result<()> {
+    /// Write `key`; returns the headset's acknowledgement.
+    fn write(&mut self, key: K, value: &SettingValue) -> Result<Event> {
         if key == K::NoiseCancelling {
             // Fresh block: the level and voice focus may have changed on the headset.
             self.ambient = None;
@@ -537,10 +538,8 @@ impl InzoneAdapter {
             }
             payload[1] = self.auto_off_last;
         }
-        if self.request(eid, SET, &payload)?.is_none() {
-            bail!("headset did not acknowledge {}", key.as_str());
-        }
-        Ok(())
+        self.request(eid, SET, &payload)?
+            .with_context(|| format!("headset did not acknowledge {}", key.as_str()))
     }
 }
 
@@ -563,8 +562,14 @@ impl DeviceAdapter for InzoneAdapter {
     }
 
     fn set(&mut self, key: K, value: SettingValue) -> Result<()> {
-        self.write(key, &value)?;
-        merge_setting(&mut self.settings, key, value);
+        let ack = self.write(key, &value)?;
+        // `request` applied the acknowledgement: what it shows wins.
+        let shown = decode(self.spec, ack.eid, &ack.payload)
+            .iter()
+            .any(|r| matches!(r, Reading::Setting(k, _) if *k == key));
+        if !shown {
+            merge_setting(&mut self.settings, key, value);
+        }
         hako_core::config::save_device_settings(
             &self.paths,
             super::SONY,
@@ -1033,6 +1038,57 @@ mod tests {
         assert!(a.poll().is_err());
         assert!(a.online, "not taken for out of range");
         assert!(a.request(EID_BATTERY, GET, &[]).is_err());
+    }
+
+    #[test]
+    fn the_acknowledged_value_is_shown_not_the_requested_one() {
+        /// Takes every volume SET as at most 20.
+        struct Caps(std::collections::VecDeque<Vec<u8>>);
+        impl Link for Caps {
+            fn write(&mut self, c: &[u8]) -> Result<()> {
+                let tid = u16::from_le_bytes([c[11], c[12]]);
+                let ack = event(c[9], NTFY, tid, &[0, c[14].min(20), 0xff]);
+                self.0.push_back(ack);
+                Ok(())
+            }
+            fn read_timeout(&mut self, buf: &mut [u8], _: Duration) -> Result<usize> {
+                let r = self.0.pop_front().context("timeout")?;
+                buf[..r.len()].copy_from_slice(&r);
+                Ok(r.len())
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("hako-inzone-caps-{}", std::process::id()));
+        let mut a = InzoneAdapter {
+            spec: &H9_II,
+            id: DeviceId {
+                vendor_id: super::super::SONY,
+                product_id: 0x0fa8,
+                instance: "test".into(),
+            },
+            dev: Some(Box::new(Caps(Default::default()))),
+            tid: 1,
+            settings: SettingsMap::new(),
+            batteries: vec![],
+            ambient: None,
+            auto_off_last: AUTO_OFF_LAST_DEFAULT,
+            online: true,
+            last_poll: None,
+            failures: 0,
+            last_error: None,
+            paths: ConfigPaths {
+                root: dir.clone(),
+                config_toml: dir.join("config.toml"),
+                devices_dir: dir.join("devices"),
+                profiles_dir: dir.join("profiles"),
+                remaps_dir: dir.join("remaps"),
+            },
+        };
+        a.set(K::Volume, SettingValue::Int(25)).unwrap();
+        assert_eq!(
+            hako_core::config::get_setting(&a.settings, K::Volume),
+            Some(&SettingValue::Int(20))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Read-only probe of a plugged-in dongle (GETs only).

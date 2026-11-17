@@ -331,7 +331,7 @@ fn a_warned_choice_waits_for_confirmation() {
     );
     let ctx = egui::Context::default();
     let pending = egui::Id::new(("hako_confirm", d.id.key(), meta.key.as_str()));
-    ctx.data_mut(|m| m.insert_temp(pending, 1usize));
+    ctx.data_mut(|m| m.insert_temp(pending, SettingValue::Int(1)));
     let mut out = Vec::new();
     let frame = |raw: egui::RawInput, out: &mut Vec<UiCommand>| {
         let _ = ctx.run(raw, |ctx| {
@@ -342,7 +342,10 @@ fn a_warned_choice_waits_for_confirmation() {
         frame(input(), &mut out);
     }
     assert!(out.is_empty(), "sent before confirming: {out:?}");
-    assert_eq!(ctx.data(|m| m.get_temp::<usize>(pending)), Some(1));
+    assert_eq!(
+        ctx.data(|m| m.get_temp::<SettingValue>(pending)),
+        Some(SettingValue::Int(1))
+    );
     // Escape dismisses the question: the pick is dropped, nothing sent.
     let mut esc = input();
     esc.events.push(egui::Event::Key {
@@ -355,7 +358,64 @@ fn a_warned_choice_waits_for_confirmation() {
     frame(esc, &mut out);
     frame(input(), &mut out);
     assert!(out.is_empty(), "sent after dismissing: {out:?}");
-    assert_eq!(ctx.data(|m| m.get_temp::<usize>(pending)), None);
+    assert_eq!(ctx.data(|m| m.get_temp::<SettingValue>(pending)), None);
+}
+
+/// A confirmed warning sends the option that was picked, also when the daemon has
+/// listed the options in another order since; one no longer offered drops the question.
+#[test]
+fn a_warned_choice_confirms_the_option_picked() {
+    use egui_kittest::kittest::Queryable;
+    let opt = |v: i64, label: &str| SettingOption {
+        value: SettingValue::Int(v),
+        label: label.into(),
+    };
+    let d = dev(
+        DeviceKind::Mouse,
+        Vec::new(),
+        map(&[(SettingKey::LiftOffDistance, SettingValue::Int(0))]),
+    );
+    let pending = egui::Id::new((
+        "hako_confirm",
+        d.id.key(),
+        SettingKey::LiftOffDistance.as_str(),
+    ));
+    let mut h = egui_kittest::Harness::builder()
+        .with_size([600.0, 400.0])
+        .build_ui_state(
+            |ui, (options, out): &mut (Vec<SettingOption>, Vec<UiCommand>)| {
+                let meta = SettingMeta::dropdown(
+                    SettingKey::LiftOffDistance,
+                    "Lift-off distance",
+                    options.clone(),
+                )
+                .warning("Changing it resets the surface calibration.");
+                controls::choice(ui, &d, &meta, out);
+            },
+            (vec![opt(0, "Low"), opt(1, "High")], Vec::new()),
+        );
+    let confirm = "I understand, change it";
+    h.ctx
+        .data_mut(|m| m.insert_temp(pending, SettingValue::Int(1)));
+    h.state_mut().0 = vec![opt(1, "High"), opt(0, "Low")];
+    h.run_steps(2);
+    h.get_by_label(confirm).click();
+    h.run_steps(2);
+    match std::mem::take(&mut h.state_mut().1).as_slice() {
+        [UiCommand::Set { value, .. }] => assert_eq!(*value, SettingValue::Int(1)),
+        other => panic!("{other:?}"),
+    }
+
+    h.ctx
+        .data_mut(|m| m.insert_temp(pending, SettingValue::Int(1)));
+    h.state_mut().0 = vec![opt(0, "Low")];
+    h.run_steps(2);
+    assert!(
+        h.query_by_label(confirm).is_none(),
+        "asked about a gone option"
+    );
+    assert!(h.state().1.is_empty(), "{:?}", h.state().1);
+    assert_eq!(h.ctx.data(|m| m.get_temp::<SettingValue>(pending)), None);
 }
 
 #[test]
@@ -1508,6 +1568,52 @@ fn mixer_app(mixer: Option<hako_core::mixer::MixerState>) -> HakoAppUi {
         app.mixer.receive(m);
     }
     app
+}
+
+/// Levels are drawn on the strip they were measured for: on the frame a strip goes, the
+/// levels asked for the old order do not shift onto its neighbours.
+#[test]
+fn meter_levels_follow_their_strip_when_the_order_changes() {
+    use crate::widgets::{to_dbfs, Ballistics};
+    let ctx = egui::Context::default();
+    let mut out = Vec::new();
+    let mut app = mixer_app(Some(sample_mixer()));
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    // What the client streams for those targets: voice loud, line-in quieter.
+    app.meter_levels = app
+        .meter_targets
+        .iter()
+        .map(|t| match t {
+            MeterTargetSpec::MixerInput { id } if id == "voice" => [0.5; 2],
+            MeterTargetSpec::MixerInput { id } if id == "line-in" => [0.25; 2],
+            _ => [0.0; 2],
+        })
+        .collect();
+    let mut m = sample_mixer();
+    m.file.live.inputs.retain(|i| i.id != "voice");
+    app.mixer.receive(m);
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+    let strip = mixer::Strip::Input("line-in".into());
+    let meter = egui::Id::new(("mixer_strip", &strip)).with("meter");
+    let (chans, _) = ctx
+        .data(|m| m.get_temp::<([Ballistics; 2], f64)>(meter))
+        .unwrap();
+    assert!((chans[0].level - to_dbfs(0.25)).abs() < 0.01, "{chans:?}");
+}
+
+/// Without devices while hakod is gone, the page says why, not "No devices" from the
+/// list kept from before.
+#[test]
+fn an_offline_daemon_is_explained_over_a_stale_empty_list() {
+    let mut st = sample_state();
+    st.devices.clear();
+    let h = drive(HakoAppUi {
+        state: Some(st),
+        daemon_error: Some("Daemon stopped".into()),
+        ..Default::default()
+    });
+    assert!(shown(&h, "Daemon stopped"));
+    assert!(!shown(&h, "No devices"));
 }
 
 #[test]

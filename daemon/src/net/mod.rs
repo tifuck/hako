@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use wire::{
     clean_name, expire, handshake, read_control, Beacon, Cipher, Control, Handshake, Identity,
-    Seen, FIRST_MESSAGE, MAX_AUDIO_PACKET, MAX_AUDIO_PLAIN, MAX_SAMPLES,
+    OtherProtocol, Seen, FIRST_MESSAGE, MAX_AUDIO_PACKET, MAX_AUDIO_PLAIN, MAX_SAMPLES,
 };
 
 const TICK: Duration = Duration::from_secs(1);
@@ -210,7 +210,8 @@ struct Entry {
 struct Redial {
     attempts: u32,
     next: Instant,
-    /// Shown on its row: it declined, or another machine answered.
+    /// Shown on its row: it declined, another machine answered, or it
+    /// speaks another protocol.
     problem: Option<String>,
 }
 
@@ -220,6 +221,8 @@ enum DialError {
     Declined(String),
     /// Another key answered than the one wanted.
     WrongKey(String),
+    /// It speaks another network protocol (`OtherProtocol`).
+    Protocol(String),
     Failed(String),
     /// The connection or handshake failed.
     Io(String),
@@ -227,7 +230,11 @@ enum DialError {
 
 impl std::fmt::Display for DialError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (Self::Declined(e) | Self::WrongKey(e) | Self::Failed(e) | Self::Io(e)) = self;
+        let (Self::Declined(e)
+        | Self::WrongKey(e)
+        | Self::Protocol(e)
+        | Self::Failed(e)
+        | Self::Io(e)) = self;
         f.write_str(e)
     }
 }
@@ -258,6 +265,10 @@ struct Inner {
     identity: Option<Identity>,
     /// Why Network is not working.
     problem: Option<String>,
+    /// Why a change to `net.toml` was not saved (until the next save).
+    save_problem: Option<String>,
+    /// Why the last beacon was not sent (until the next one is).
+    beacon_problem: Option<String>,
     live: Option<Live>,
     /// Pending and live sessions by peer key.
     sessions: HashMap<String, Entry>,
@@ -406,7 +417,7 @@ impl Shared {
                     return Err(PatchError::Invalid(format!("already connected to {name}")));
                 }
                 self.dial(addr, true, want.as_deref()).map_err(|e| match e {
-                    DialError::Io(e) => PatchError::Io(anyhow!(e)),
+                    DialError::Io(e) | DialError::Protocol(e) => PatchError::Io(anyhow!(e)),
                     e => PatchError::Invalid(e.to_string()),
                 })
             }
@@ -476,6 +487,7 @@ impl Shared {
         match saved {
             Ok((file, ())) => {
                 inner.file = file;
+                inner.save_problem = None;
                 Ok(())
             }
             Err(e) => Err(invalid.map_or(PatchError::Io(e), PatchError::Invalid)),
@@ -590,6 +602,7 @@ impl Shared {
         inner.nearby.clear();
         inner.stats.clear();
         inner.redial.clear();
+        inner.beacon_problem = None;
         drop(inner);
         self.publish();
     }
@@ -732,7 +745,7 @@ impl Shared {
         pair: bool,
         want: Option<&str>,
     ) -> Result<(), DialError> {
-        use DialError::{Declined, Failed, Io, WrongKey};
+        use DialError::{Declined, Failed, Io, Protocol, WrongKey};
         let (private, own, stop, hello) = {
             let inner = lock(&self.inner);
             let (Some(live), Some(identity)) = (&inner.live, &inner.identity) else {
@@ -745,7 +758,14 @@ impl Shared {
                 hello(&inner.file, live.port, pair),
             )
         };
-        let failed = |e: anyhow::Error| Io(format!("{addr}: {e:#}"));
+        let failed = |e: anyhow::Error| {
+            let text = format!("{addr}: {e:#}");
+            if e.is::<OtherProtocol>() {
+                Protocol(text)
+            } else {
+                Io(text)
+            }
+        };
         let stream =
             TcpStream::connect_timeout(&addr, HANDSHAKE).map_err(|e| Io(format!("{addr}: {e}")))?;
         prepare(&stream).map_err(|e| Io(format!("{addr}: {e}")))?;
@@ -914,7 +934,7 @@ impl Shared {
                     Err(e) if renamed => {
                         let e = format!("{}: new name not saved: {}", s.name, message(e));
                         warn!("net: {e}");
-                        inner.problem = Some(e);
+                        inner.save_problem = Some(e);
                     }
                     // Only the address: `seen_at` still has it this run.
                     Err(e) => warn!("net: {}: address not saved: {}", s.name, message(e)),
@@ -1026,7 +1046,7 @@ impl Shared {
         if let Err(e) = removed {
             let e = message(e);
             warn!("net: {} stays paired here: {e}", s.name);
-            lock(&self.inner).problem = Some(format!(
+            lock(&self.inner).save_problem = Some(format!(
                 "{} did not complete the pairing but stays paired here: {e}",
                 s.name
             ));
@@ -1036,7 +1056,11 @@ impl Shared {
     /// Read `s`'s control frames until it ends, then close it.
     fn read_loop(self: &Arc<Self>, s: &Arc<Session>, mut stream: TcpStream, mut last: u64) {
         let _ = stream.set_read_timeout(Some(READ_LIMIT));
-        while let Ok(msg) = read_control(&mut stream, &s.cipher, &mut last) {
+        let ended = loop {
+            let msg = match read_control(&mut stream, &s.cipher, &mut last) {
+                Ok(msg) => msg,
+                Err(e) => break Err(e),
+            };
             *lock(&s.heard) = Instant::now();
             match msg {
                 Control::Ping { t } => {
@@ -1085,11 +1109,18 @@ impl Shared {
                         warn!("net: {} could not complete the pairing", s.name);
                         self.unpin(s);
                     }
-                    break;
+                    break Ok("denied");
                 }
-                Control::Bye => break,
+                Control::Bye => break Ok("said goodbye"),
                 Control::Hello { .. } | Control::Busy => {}
             }
+        };
+        match ended {
+            // Not a network error (this side's own close is one): a frame
+            // that did not decrypt or parse.
+            Err(e) if !e.is::<std::io::Error>() => warn!("net: {}: {e:#}, disconnected", s.name),
+            Err(e) => debug!("net: {}: disconnected: {e:#}", s.name),
+            Ok(why) => debug!("net: {}: {why}", s.name),
         }
         self.close(s, Some(&Control::Bye));
     }
@@ -1205,17 +1236,18 @@ impl Shared {
             let stale: Vec<_> = inner
                 .sessions
                 .values()
-                .filter(|e| {
-                    now.duration_since(*lock(&e.session.heard)) > SILENCE
-                        || (e.stage != Stage::Live && now.duration_since(e.since) > PENDING)
-                })
-                .map(|e| {
+                .filter_map(|e| {
+                    let silent = now.duration_since(*lock(&e.session.heard)) > SILENCE;
+                    let expired = e.stage != Stage::Live && now.duration_since(e.since) > PENDING;
+                    if !silent && !expired {
+                        return None;
+                    }
                     // Not confirmed in time: the other side unpins.
                     let bye = match e.stage {
                         Stage::Confirm => Control::Denied,
                         _ => Control::Bye,
                     };
-                    (e.session.clone(), bye)
+                    Some((e.session.clone(), bye, silent))
                 })
                 .collect();
             inner
@@ -1259,14 +1291,24 @@ impl Shared {
                             key: identity.public.clone(),
                             port: live.port,
                         };
-                        (sock, beacon.encode(), (Ipv4Addr::BROADCAST, port))
+                        let to = SocketAddr::from((Ipv4Addr::BROADCAST, port));
+                        (sock, beacon.encode(), to)
                     })
                 }
                 _ => None,
             };
             (stale, sessions, dials, beacon)
         };
-        for (s, bye) in &stale {
+        for (s, bye, silent) in &stale {
+            if *silent {
+                warn!(
+                    "net: {}: silent for {} s, disconnected",
+                    s.name,
+                    SILENCE.as_secs()
+                );
+            } else {
+                debug!("net: {}: not answered in time", s.name);
+            }
             // ponytail: never waits (the tick serves every session), so a
             // Pong being written that instant costs a Confirm's `Denied` and
             // the other side keeps its pin until its reconnect is declined;
@@ -1285,17 +1327,29 @@ impl Shared {
             });
         }
         if let Some((sock, bytes, to)) = beacon {
-            if let Err(e) = sock.send_to(&bytes, to) {
-                debug!("net: beacon: {e}");
-            }
+            self.announce(&sock, &bytes, to);
         }
         self.publish();
     }
 
+    /// Send a beacon; a failure is shown until one goes out again.
+    fn announce(&self, sock: &UdpSocket, beacon: &[u8], to: SocketAddr) {
+        let sent = sock.send_to(beacon, to);
+        if let Err(e) = &sent {
+            debug!("net: beacon: {e}");
+        }
+        lock(&self.inner).beacon_problem = sent.err().map(|e| {
+            format!(
+                "discovery: this computer is not announced: {e} (Connect to address still works)"
+            )
+        });
+    }
+
     /// Reconnect to paired `key` at `addrs` in order (its beacon's address,
     /// then where it was last connected); the first that answers wins. A
-    /// decline or another machine answering is shown on its row; the first
-    /// failure since it was connected is a warning, later ones are not.
+    /// decline, another machine answering or another protocol is shown on
+    /// its row; the first failure since it was connected is a warning,
+    /// later ones are not.
     fn redial(self: &Arc<Self>, key: &str, addrs: &[SocketAddr]) {
         let mut failed: Option<DialError> = None;
         for &addr in addrs {
@@ -1304,11 +1358,16 @@ impl Shared {
                     failed = None;
                     break;
                 }
-                // A decline or impostor says more than a later timeout.
+                // A decline, impostor or other protocol says more than a
+                // later timeout.
                 Err(e)
                     if !matches!(
                         failed,
-                        Some(DialError::Declined(_) | DialError::WrongKey(_))
+                        Some(
+                            DialError::Declined(_)
+                                | DialError::WrongKey(_)
+                                | DialError::Protocol(_)
+                        )
                     ) =>
                 {
                     failed = Some(e);
@@ -1325,7 +1384,7 @@ impl Shared {
             DialError::Declined(e) => Some(format!(
                 "{e} the reconnect: it may have unpaired this computer (pair again)"
             )),
-            DialError::WrongKey(e) => Some(e.clone()),
+            DialError::WrongKey(e) | DialError::Protocol(e) => Some(e.clone()),
             DialError::Failed(_) | DialError::Io(_) => None,
         };
         if r.attempts == 1 {
@@ -1404,6 +1463,11 @@ impl Shared {
             })
             .collect();
         requests.sort_by(|a, b| a.id.cmp(&b.id));
+        let problems: Vec<_> = [&inner.problem, &inner.save_problem, &inner.beacon_problem]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
         NetState {
             enabled: inner.file.enabled,
             name: own_name(&inner.file),
@@ -1413,7 +1477,7 @@ impl Shared {
                 .map(|i| peer_id(&i.public))
                 .unwrap_or_default(),
             port: inner.file.port,
-            problem: inner.problem.clone(),
+            problem: (!problems.is_empty()).then(|| problems.join("; ")),
             peers,
             nearby,
             requests,
@@ -1618,14 +1682,14 @@ fn deliver(
 }
 
 /// A session's audio send path: seal each block and `sendto` it without
-/// blocking. Runs on PipeWire's data thread: its buffers are made here,
-/// once, and it takes no lock.
+/// blocking; true when the socket took it. Runs on PipeWire's data thread:
+/// its buffers are made here, once, and it takes no lock.
 /// `udp` is weak: the PipeWire thread may drop a closed port's callback
 /// late, and a live socket would keep Network's port taken.
 fn send_fn(cipher: Arc<Cipher>, udp: Weak<UdpSocket>, to: SocketAddr) -> SendFn {
     // The socket is IPv4 (bound to 0.0.0.0): so are its peers.
     let SocketAddr::V4(to) = to else {
-        return Box::new(|_, _| {});
+        return Box::new(|_, _| false);
     };
     let addr = libc::sockaddr_in {
         sin_family: libc::AF_INET as libc::sa_family_t,
@@ -1640,14 +1704,14 @@ fn send_fn(cipher: Arc<Cipher>, udp: Weak<UdpSocket>, to: SocketAddr) -> SendFn 
     Box::new(move |pos, samples| {
         let n = cipher.seal_audio(pos, samples, &mut plain, &mut packet);
         if n == 0 {
-            return;
+            return false;
         }
         let Some(udp) = udp.upgrade() else {
-            return;
+            return false;
         };
         // SAFETY: `packet` holds `n` bytes, `addr` is a valid sockaddr_in,
         // and `udp` keeps the socket open.
-        unsafe {
+        let sent = unsafe {
             libc::sendto(
                 udp.as_raw_fd(),
                 packet.as_ptr().cast(),
@@ -1655,8 +1719,9 @@ fn send_fn(cipher: Arc<Cipher>, udp: Weak<UdpSocket>, to: SocketAddr) -> SendFn 
                 libc::MSG_DONTWAIT,
                 (&raw const addr).cast(),
                 std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-            );
-        }
+            )
+        };
+        usize::try_from(sent).is_ok_and(|sent| sent == n)
     })
 }
 
@@ -1668,7 +1733,10 @@ fn load_identity(paths: &ConfigPaths) -> Result<Option<Identity>> {
         Ok(text) => {
             // Others could read it (copied, restored from a backup): kept,
             // and made owner-only again.
-            let mode = std::fs::metadata(&path).map_or(0, |m| m.permissions().mode());
+            let mode = std::fs::metadata(&path)
+                .with_context(|| format!("{}", path.display()))?
+                .permissions()
+                .mode();
             if mode & 0o077 != 0 {
                 warn!(
                     "{}: mode {:o}, making it owner-only (600)",
@@ -1683,6 +1751,10 @@ fn load_identity(paths: &ConfigPaths) -> Result<Option<Identity>> {
             Identity::parse(&text)
                 .map(Some)
                 .with_context(|| format!("{}", path.display()))
+        }
+        // A link to a missing file (a volume not mounted) is no new key.
+        Err(e) if e.kind() == ErrorKind::NotFound && std::fs::symlink_metadata(&path).is_ok() => {
+            bail!("{}: links to a missing file", path.display())
         }
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
@@ -1846,7 +1918,7 @@ fn idle(e: &std::io::Error) {
 fn message(e: PatchError) -> String {
     match e {
         PatchError::Invalid(e) => e,
-        PatchError::Io(e) => format!("{e:#}"),
+        PatchError::Io(e) | PatchError::Kept(e) => format!("{e:#}"),
     }
 }
 
@@ -2270,7 +2342,7 @@ mod tests {
             rx.local_addr().unwrap(),
         );
         let block = [1i16, -2, 3, -4];
-        send(960, &block);
+        assert!(send(960, &block));
         let mut buf = [0u8; 2048];
         let (n, from) = rx.recv_from(&mut buf).unwrap();
         assert_eq!(from, tx.local_addr().unwrap());
@@ -2292,6 +2364,10 @@ mod tests {
         assert!(got(from));
         assert!(!got(from), "replayed");
         assert_eq!(&samples[..4], &block);
+        // Nothing went out: not sent.
+        assert!(!send(0, &[1; MAX_SAMPLES + 2]), "too long");
+        drop(tx);
+        assert!(!send(1920, &block), "socket closed");
     }
 
     /// A session to a stand-in peer (keys from a real handshake), not
@@ -2333,6 +2409,8 @@ mod tests {
         }
         let (net, paths, _) = machine("rename");
         turn_on(&net);
+        let taken = "discovery port 47820: taken".to_string();
+        lock(&net.shared.inner).problem = Some(taken.clone());
         let (s, _peer) = session("Tower");
         net.shared
             .edit(|f| {
@@ -2355,7 +2433,111 @@ mod tests {
         assert!(matches!(live, Ok(false)));
         let state = net.state();
         assert!(state.peers[0].connected && state.peers[0].name == "Desk");
-        assert!(state.problem.is_some_and(|p| p.contains("not saved")));
+        let problem = state.problem.unwrap();
+        assert!(
+            problem.contains("not saved") && problem.contains(&taken),
+            "{problem}"
+        );
+        // Saved again: only the other problem is left.
+        let state = net
+            .patch(&[NetOp::SetName {
+                name: "Desk".into(),
+            }])
+            .unwrap();
+        assert_eq!(state.problem, Some(taken));
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_peer_on_another_protocol_says_so_on_its_row() {
+        let (net, paths, _) = machine("protocol");
+        turn_on(&net);
+        let key = "ee".repeat(32);
+        net.shared
+            .edit(|f| {
+                f.trust(Peer {
+                    id: peer_id(&key),
+                    name: "Newer".into(),
+                    key: key.clone(),
+                    jitter_ms: DEFAULT_JITTER_MS,
+                    address: None,
+                })
+            })
+            .unwrap();
+        // Answers the first handshake message as a newer hako would.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let newer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let private = Identity::generate().unwrap().private;
+            let mut hs = snow::Builder::new(wire::NOISE.parse().unwrap())
+                .local_private_key(&private)
+                .unwrap()
+                .build_responder()
+                .unwrap();
+            let mut first = [0u8; FIRST_MESSAGE];
+            stream.read_exact(&mut first).unwrap();
+            hs.read_message(&first[2..], &mut [0u8; 64]).unwrap();
+            let mut msg = [0u8; 1024];
+            let n = hs
+                .write_message(&[wire::PROTOCOL + 1; 33], &mut msg)
+                .unwrap();
+            stream.write_all(&(n as u16).to_be_bytes()).unwrap();
+            stream.write_all(&msg[..n]).unwrap();
+        });
+        lock(&net.shared.inner).redial.insert(
+            key.clone(),
+            Redial {
+                attempts: 1,
+                next: Instant::now() + MAX_REDIAL,
+                problem: None,
+            },
+        );
+        net.shared.redial(&key, &[addr]);
+        newer.join().unwrap();
+        let problem = net.state().peers[0].problem.clone();
+        assert!(
+            problem
+                .as_deref()
+                .is_some_and(|p| p.contains("update both computers")),
+            "{problem:?}"
+        );
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_beacon_not_sent_is_a_problem_until_one_is() {
+        let (net, paths, _) = machine("announce");
+        let to = |port| SocketAddr::from((Ipv4Addr::BROADCAST, port));
+        // Broadcasts need SO_BROADCAST.
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        net.shared.announce(&sock, b"beacon", to(9));
+        let problem = net.state().problem;
+        assert!(
+            problem
+                .as_deref()
+                .is_some_and(|p| p.contains("Connect to address still works")),
+            "{problem:?}"
+        );
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        net.shared
+            .announce(&sock, b"beacon", rx.local_addr().unwrap());
+        assert_eq!(net.state().problem, None);
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn a_key_link_to_a_missing_file_is_no_new_key() {
+        let (net, paths, _) = machine("key-link");
+        let gone = paths.root.join("gone.key");
+        std::os::unix::fs::symlink(&gone, identity_path(&paths)).unwrap();
+        let state = net.patch(&[NetOp::SetEnabled { on: true }]).unwrap();
+        let problem = state.problem.unwrap();
+        assert!(problem.contains("missing file"), "{problem}");
+        assert!(state.id.is_empty() && !gone.exists(), "a new key was made");
         net.shutdown();
         let _ = std::fs::remove_dir_all(&paths.root);
     }

@@ -61,9 +61,19 @@ trait Feature {
     fn set(&self, buf: &mut [u8]) -> Result<()>;
 }
 
+/// libratbag's shortest configuration block (`SINOWEALTH_CONFIG_SIZE_MIN`);
+/// command answers must be complete.
+const CONFIG_MIN: usize = 123;
+
 impl Feature for HidrawDevice {
     fn get(&self, buf: &mut [u8]) -> Result<()> {
-        self.get_feature(buf)
+        let n = self.get_feature_len(buf)?;
+        ensure!(
+            n >= buf.len().min(CONFIG_MIN),
+            "short reply ({n} of {} bytes)",
+            buf.len()
+        );
+        Ok(())
     }
     fn set(&self, buf: &mut [u8]) -> Result<()> {
         self.set_feature(buf)

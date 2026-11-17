@@ -1019,7 +1019,14 @@ async fn refresh(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> Re
             s.hub = Some(hub);
             s.error = None;
         }
-        Err(e) => s.error = Some(e),
+        // hakod answers, but the top bar only says it is offline: say why
+        // (e.g. it runs another version), once.
+        Err(e) => {
+            if s.error.as_deref() != Some(e.as_str()) {
+                s.notices.push((Tone::Error, e.clone()));
+            }
+            s.error = Some(e);
+        }
     }
     Ok(())
 }
@@ -1246,6 +1253,26 @@ mod tests {
         assert_eq!(s.error.as_deref(), Some("gone"));
         assert_eq!(s.notices.0.len(), 1);
         assert!(s.notices.0[0].1.contains("2 queued"), "{:?}", s.notices.0);
+    }
+
+    #[tokio::test]
+    async fn a_state_the_ui_cannot_read_is_told_once() {
+        let (mut ui, mut daemon) = UnixStream::pair().unwrap();
+        let state = Arc::new(Mutex::new(ClientState::default()));
+        for _ in 0..2 {
+            let answer = async {
+                let req = read_json_frame(&mut daemon).await.unwrap();
+                let resp = IpcResponse::ok(req["id"].clone(), serde_json::json!({ "devices": 1 }));
+                write_json_frame(&mut daemon, &resp).await.unwrap();
+            };
+            let (asked, ()) = tokio::join!(refresh(&mut ui, &state), answer);
+            asked.unwrap();
+        }
+        let s = state.lock().unwrap();
+        let error = s.error.clone().unwrap_or_default();
+        assert!(error.contains("cannot read"), "{error}");
+        assert_eq!(s.notices.0.len(), 1, "{:?}", s.notices.0);
+        assert_eq!(s.notices.0[0].1, error);
     }
 
     #[test]

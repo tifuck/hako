@@ -29,6 +29,8 @@ pub const TRIM_MIN_DB: f32 = -24.0;
 pub const TRIM_MAX_DB: f32 = 24.0;
 /// Longest label shown on a strip.
 pub const MAX_LABEL: usize = 32;
+/// Longest remembered device description (characters).
+pub const MAX_DESCRIPTION: usize = 255;
 
 /// Serialises every read-modify-write of `mixer.toml` in this process.
 static MIXER_LOCK: Mutex<()> = Mutex::new(());
@@ -494,7 +496,10 @@ impl Scene {
                 return Err(format!("duplicate output {:?}", o.id));
             }
             match &o.kind {
-                OutputKind::Hardware { sink, .. } => validate_node_name(sink)?,
+                OutputKind::Hardware { sink, description } => {
+                    validate_node_name(sink)?;
+                    validate_description(description)?;
+                }
                 OutputKind::Virtual { node_name } => {
                     validate_node_name(node_name)?;
                     if !created.insert(node_name.as_str()) {
@@ -531,6 +536,7 @@ impl Scene {
                     }
                     for s in sources {
                         validate_node_name(&s.node)?;
+                        validate_description(&s.description)?;
                         if !s.trim_db.is_finite()
                             || !(TRIM_MIN_DB..=TRIM_MAX_DB).contains(&s.trim_db)
                         {
@@ -680,6 +686,17 @@ pub fn validate_label(label: &str) -> Result<(), String> {
     {
         return Err(format!(
             "label must be 1..={MAX_LABEL} printable characters"
+        ));
+    }
+    Ok(())
+}
+
+/// A device's name as it was picked: shown only, but it must not grow the
+/// state past an IPC frame.
+fn validate_description(description: &str) -> Result<(), String> {
+    if description.chars().count() > MAX_DESCRIPTION {
+        return Err(format!(
+            "device description longer than {MAX_DESCRIPTION} characters"
         ));
     }
     Ok(())
@@ -1218,6 +1235,27 @@ mod tests {
         let mut ok = sample();
         ok.live.inputs[0].label = "ä".repeat(MAX_LABEL);
         ok.validate().unwrap();
+        // Device descriptions are bounded (they ride along in every state reply).
+        let description = |text: String| -> MixerFile {
+            let mut m = sample();
+            if let InputKind::Hardware { sources } = &mut m.live.inputs[0].kind {
+                sources[0].description = text.clone();
+            }
+            m.live.outputs[0].kind = OutputKind::Hardware {
+                sink: "alsa_output.usb-headset.analog-stereo".into(),
+                description: text,
+            };
+            m
+        };
+        description("Ü".repeat(MAX_DESCRIPTION)).validate().unwrap();
+        assert!(description("x".repeat(MAX_DESCRIPTION + 1))
+            .validate()
+            .is_err());
+        let mut bad = description(String::new());
+        if let InputKind::Hardware { sources } = &mut bad.live.inputs[0].kind {
+            sources[0].description = "x".repeat(MAX_DESCRIPTION + 1);
+        }
+        assert!(bad.validate().is_err(), "source description");
 
         // Limits: at the limit is fine, one more is not.
         let inputs = |n: usize| -> MixerFile {

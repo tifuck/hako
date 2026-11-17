@@ -224,6 +224,9 @@ impl MouseAdapter {
             if let Some(d) = reply_data(&buf[..n], cmd, index) {
                 return Ok(Some(d.to_vec()));
             }
+            if left.is_zero() {
+                return Ok(None);
+            }
         }
     }
 

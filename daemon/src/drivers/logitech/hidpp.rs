@@ -234,19 +234,27 @@ pub fn drain_noise(dev: &mut HidrawDevice) {
 }
 
 /// Write `pkt` and wait (bounded, 250 ms) for the reply echoing
-/// `dev_idx`/`feat`/`fn_swid`, skipping input reports and notifications.
+/// `dev_idx`/`feat`/`fn_swid`. Every other report read meanwhile (input,
+/// notifications, someone else's reply), queued ones included, goes to
+/// `other`.
 pub fn transact(
     dev: &mut HidrawDevice,
     pkt: &[u8],
     dev_idx: u8,
     feat: u8,
     fn_swid: u8,
+    other: &mut dyn FnMut(&[u8]),
 ) -> Result<[u8; 20]> {
     let fnid = fn_swid >> 4;
-    drain_noise(dev);
+    let mut buf = [0u8; 32];
+    for _ in 0..64 {
+        let Ok(n) = dev.read_timeout(&mut buf, Duration::from_millis(1)) else {
+            break;
+        };
+        other(&buf[..n]);
+    }
     dev.write(pkt)?;
     let deadline = Instant::now() + Duration::from_millis(250);
-    let mut buf = [0u8; 32];
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let n = match dev.read_timeout(&mut buf, remaining.min(Duration::from_millis(80))) {
@@ -256,9 +264,6 @@ pub fn transact(
             }
             Err(_) => continue,
         };
-        if n < 6 {
-            continue;
-        }
         match match_reply(&buf[..n], dev_idx, feat, fn_swid) {
             Reply::Ok => {
                 let mut out = [0u8; 20];
@@ -276,26 +281,26 @@ pub fn transact(
                 }
                 .into())
             }
-            // Mouse input, notification, or someone else's reply.
-            Reply::Other => {}
+            Reply::Other => other(&buf[..n]),
         }
     }
     bail!("HID++ timeout feat={feat:#x} fn={fnid}")
 }
 
 /// One HID++ 2.0 call: long request to `feat` index, function `fnid`,
-/// tagged with the next software id.
+/// tagged with the next software id; other reports go to `other`.
 pub fn request(
     dev: &mut HidrawDevice,
     dev_idx: u8,
     feat: u8,
     fnid: u8,
     params: &[u8],
+    other: &mut dyn FnMut(&[u8]),
 ) -> Result<[u8; 20]> {
     let mut tries = 0;
     loop {
         let pkt = with_swid(long_request(dev_idx, feat, fnid, params), next_swid());
-        match transact(dev, &pkt, dev_idx, feat, pkt[3]) {
+        match transact(dev, &pkt, dev_idx, feat, pkt[3], &mut *other) {
             Err(e)
                 if tries < BUSY_RETRIES
                     && e.downcast_ref::<Refused>().is_some_and(Refused::busy) =>
@@ -319,21 +324,35 @@ fn with_swid(mut pkt: [u8; 20], swid: u8) -> [u8; 20] {
 }
 
 /// Read receiver long register `reg` / `sub`; the reply must echo `sub`.
+/// HID++ 1.0 has no software id: a reply for another sub (another reader's
+/// request) is not ours, so the register is read again.
 pub fn read_long_register(
     dev: &mut HidrawDevice,
     reg: u8,
     sub: u8,
     short: bool,
+    other: &mut dyn FnMut(&[u8]),
 ) -> Result<[u8; 20]> {
-    let r = transact(dev, &register_read(reg, sub, short), DIRECT, 0x83, reg)?;
-    if r[4] != sub {
-        bail!(
-            "register {reg:#x} reply for sub {:#x}, wanted {sub:#x}",
-            r[4]
-        );
+    let mut got = sub;
+    for _ in 0..REGISTER_READS {
+        let r = transact(
+            dev,
+            &register_read(reg, sub, short),
+            DIRECT,
+            0x83,
+            reg,
+            &mut *other,
+        )?;
+        if r[4] == sub {
+            return Ok(r);
+        }
+        got = r[4];
     }
-    Ok(r)
+    bail!("register {reg:#x} reply for sub {got:#x}, wanted {sub:#x}")
 }
+
+/// Reads of a register answered for another sub before giving up.
+const REGISTER_READS: usize = 3;
 
 /// Minimal hex for error messages without adding a crate.
 pub fn hex(data: &[u8]) -> String {
@@ -1089,5 +1108,74 @@ mod tests {
             zone_effect_payload(2, 1, MouseEffectKind::Static, 1, 2, 3, "medium"),
             [2, 1, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0]
         );
+    }
+
+    /// A raw pty standing in for a receiver node: the driver opens the
+    /// returned path; the test reads its requests from and writes reports to
+    /// the master.
+    fn fake_node() -> (std::fs::File, std::path::PathBuf) {
+        use std::os::fd::FromRawFd;
+        unsafe {
+            let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(m >= 0 && libc::grantpt(m) == 0 && libc::unlockpt(m) == 0);
+            let mut name = [0 as libc::c_char; 64];
+            assert_eq!(libc::ptsname_r(m, name.as_mut_ptr(), name.len()), 0);
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(m, &mut t), 0);
+            libc::cfmakeraw(&mut t);
+            assert_eq!(libc::tcsetattr(m, libc::TCSANOW, &t), 0);
+            let path = std::ffi::CStr::from_ptr(name.as_ptr()).to_str().unwrap();
+            (std::fs::File::from_raw_fd(m), path.into())
+        }
+    }
+
+    #[test]
+    fn link_events_during_a_request_are_handed_over() {
+        use std::io::{Read, Write};
+        let (mut master, path) = fake_node();
+        let mut dev = HidrawDevice::open(&path).unwrap();
+        let receiver = std::thread::spawn(move || {
+            let mut req = [0u8; 20];
+            master.read_exact(&mut req).unwrap();
+            // Slot 2 connects while the request waits, then the answer comes.
+            master
+                .write_all(&[0x10, 2, 0x41, 0x04, 0x00, 0x54, 0x40])
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            master.write_all(&req).unwrap();
+            master
+        });
+        let mut events = Vec::new();
+        let r = request(&mut dev, 2, 0x05, 0x01, &[], &mut |f| {
+            events.extend(parse_event(f, 2, None))
+        });
+        let _master = receiver.join().unwrap();
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(events, [LinkEvent::Link { disconnect: false }]);
+    }
+
+    #[test]
+    fn a_register_reply_for_another_sub_is_read_again() {
+        use std::io::{Read, Write};
+        let (mut master, path) = fake_node();
+        let mut dev = HidrawDevice::open(&path).unwrap();
+        let receiver = std::thread::spawn(move || {
+            let mut req = [0u8; 7];
+            let mut reply = [0u8; 20];
+            // Another reader's slot 2 (sub 0x21) answer, then slot 1's.
+            for sub in [0x21, 0x20] {
+                // Fails once the driver closed its end.
+                if master.read_exact(&mut req).is_err() {
+                    break;
+                }
+                reply[..5].copy_from_slice(&[0x11, 0xff, 0x83, REG_RECEIVER_INFO, sub]);
+                master.write_all(&reply).unwrap();
+            }
+            master
+        });
+        let r = read_long_register(&mut dev, REG_RECEIVER_INFO, 0x20, true, &mut |_| {});
+        drop(dev);
+        let _master = receiver.join().unwrap();
+        assert_eq!(r.unwrap()[4], 0x20);
     }
 }

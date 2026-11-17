@@ -545,8 +545,9 @@ pub const KB_SAVE: &[u8] = &[0x50, 0x55];
 /// charging when byte 8 is 1 (G-Helper `AsusKeyboard.ReadBattery`).
 pub const KB_POWER: &[u8] = &[0x12, 0x01];
 
-pub fn kb_battery(resp: &Packet, at: usize) -> (u8, bool) {
-    (resp[at].min(100), resp[8] == 1)
+/// Percent (`None` above 100: no reading) and charging.
+pub fn kb_battery(resp: &Packet, at: usize) -> (Option<u8>, bool) {
+    ((resp[at] <= 100).then_some(resp[at]), resp[8] == 1)
 }
 
 // ── ROG headsets (report 0xCC) ──────────────────────────────────────────────
@@ -985,8 +986,10 @@ mod tests {
         );
         // G-Helper: 12 01 reply [6] = battery, [9] = charging (report id at 0).
         let r = unframe(0, &[0x12, 0x01, 0, 0, 0, 77, 0, 0, 1, 0, 55]).unwrap();
-        assert_eq!(kb_battery(&r, 5), (77, true));
-        assert_eq!(kb_battery(&r, 10), (55, true));
+        assert_eq!(kb_battery(&r, 5), (Some(77), true));
+        assert_eq!(kb_battery(&r, 10), (Some(55), true));
+        let r = unframe(0, &[0x12, 0x01, 0, 0, 0, 0xff]).unwrap();
+        assert_eq!(kb_battery(&r, 5), (None, false));
     }
 
     #[test]

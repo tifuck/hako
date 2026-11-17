@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use hako_audio::meters::MeterService;
 use hako_audio::net::NetAudio;
 use hako_audio::AudioService;
-use hako_core::catalog::{SettingKey, SettingMeta, SettingValue};
+use hako_core::catalog::{SettingKey, SettingMeta, SettingValue, SettingsMap};
 use hako_core::config::{
     delete_profile, list_profiles, load_app_config, load_profile, save_profile,
     settings_from_profile_device, update_app_config, validate_profile_name, AppConfig, ConfigPaths,
@@ -79,6 +79,9 @@ pub struct DaemonHub {
     discovering: Mutex<()>,
     /// Set by shutdown: a pass opens nothing more, requests change nothing.
     stopping: Arc<AtomicBool>,
+    /// The last background failure pushed, for `GetState`: no UI may have
+    /// been listening (the startup profile applies before one connects).
+    background_error: std::sync::Mutex<Option<String>>,
 }
 
 impl DaemonHub {
@@ -133,6 +136,7 @@ impl DaemonHub {
             rescanned: std::sync::Mutex::new(HashMap::new()),
             discovering: Mutex::new(()),
             stopping: Arc::default(),
+            background_error: std::sync::Mutex::new(None),
         }
     }
 
@@ -196,6 +200,14 @@ impl DaemonHub {
             .filter(|(_, s)| s.connected)
             .map(|(m, s)| (m, s.id))
             .collect();
+        // Disconnected on nodes still there (lost, crashed, failed to open):
+        // an open of their model takes the same device over.
+        let reopened: Vec<&'static Model> = self
+            .handles()
+            .iter()
+            .filter(|h| !h.snapshot().connected)
+            .map(|h| h.model)
+            .collect();
         let mut skip = crash_skips(&self.handles(), now);
         skip.extend(rescan_skips(&connected, &mut lock(&self.rescanned), now));
         {
@@ -212,11 +224,12 @@ impl DaemonHub {
             audio: self.audio.clone(),
             open: Vec::new(),
             vendor_id: 0,
+            reopen: false,
         };
 
         let (snapshot, stopping) = (present.clone(), self.stopping.clone());
         let (discovered, attempted) = tokio::task::spawn_blocking(move || {
-            discover_blocking(ctx, &skip, &connected, &snapshot, &stopping)
+            discover_blocking(ctx, &skip, &connected, &reopened, &snapshot, &stopping)
         })
         .await
         .unwrap_or_else(|e| {
@@ -281,6 +294,11 @@ impl DaemonHub {
             }
         }
 
+        // Shutdown stopped what was open without waiting for this pass.
+        if self.stopping.load(Ordering::Relaxed) {
+            stop_all(&handles).await;
+            return;
+        }
         let (handles, replaced, dropped) = supersede(&mut lock(&self.devices), handles);
         stop_all(&[replaced.as_slice(), &dropped].concat()).await;
         for h in replaced {
@@ -343,6 +361,7 @@ impl DaemonHub {
 
     /// A background failure no request is waiting for.
     fn push_error(&self, message: String) {
+        *lock(&self.background_error) = Some(message.clone());
         let _ = self.events.send(AdapterEvent::Error {
             device: None,
             message,
@@ -487,7 +506,9 @@ impl DaemonHub {
                 version: VERSION.into(),
                 uptime_secs: self.started.elapsed().as_secs(),
                 adapter_count: devices.len(),
-                last_error: config_error.or(profiles_error),
+                last_error: config_error
+                    .or(profiles_error)
+                    .or_else(|| lock(&self.background_error).clone()),
             },
             last_profile: cfg.last_profile,
             last_profile_modified: cfg.last_profile_modified,
@@ -572,7 +593,6 @@ impl DaemonHub {
             Method::Set => match serde_json::from_value::<SetParams>(req.params) {
                 Ok(p) => match self.set(p.device_id, p.key, p.value).await {
                     Ok(snap) => {
-                        self.mark_profile_modified(&[p.key], &snap.controls).await;
                         let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
                         IpcResponse::ok(id, snap)
                     }
@@ -581,17 +601,13 @@ impl DaemonHub {
                 Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::SetMany => match serde_json::from_value::<SetManyParams>(req.params) {
-                Ok(p) => {
-                    let keys: Vec<SettingKey> = p.values.iter().map(|(k, _)| *k).collect();
-                    match self.set_many(p.device_id, p.values).await {
-                        Ok(snap) => {
-                            self.mark_profile_modified(&keys, &snap.controls).await;
-                            let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
-                            IpcResponse::ok(id, snap)
-                        }
-                        Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
+                Ok(p) => match self.set_many(p.device_id, p.values).await {
+                    Ok(snap) => {
+                        let _ = self.events.send(AdapterEvent::Updated(snap.clone()));
+                        IpcResponse::ok(id, snap)
                     }
-                }
+                    Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
+                },
                 Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
             Method::ListProfiles => {
@@ -614,7 +630,7 @@ impl DaemonHub {
             Method::ApplyProfile => match serde_json::from_value::<ProfileNameParams>(req.params) {
                 Ok(p) => match self.apply_profile(&p.name, false).await {
                     Ok(()) => IpcResponse::ok(id, serde_json::json!({"applied": p.name})),
-                    Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
+                    Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
                 },
                 Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
@@ -629,7 +645,7 @@ impl DaemonHub {
                 match serde_json::from_value::<ProfileNameParams>(req.params) {
                     Ok(p) => match self.delete_profile(&p.name) {
                         Ok(()) => IpcResponse::ok(id, serde_json::json!({"deleted": p.name})),
-                        Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
+                        Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
                     },
                     Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
                 }
@@ -746,7 +762,9 @@ impl DaemonHub {
                     match tokio::task::spawn_blocking(move || mixer.patch(&p.ops)).await {
                         Ok(Ok(state)) => IpcResponse::ok(id, state),
                         Ok(Err(PatchError::Invalid(e))) => IpcResponse::err(id, "invalid_value", e),
-                        Ok(Err(PatchError::Io(e))) => IpcResponse::err(id, "io", format!("{e:#}")),
+                        Ok(Err(PatchError::Io(e) | PatchError::Kept(e))) => {
+                            IpcResponse::err(id, "io", format!("{e:#}"))
+                        }
                         Err(e) => IpcResponse::err(id, "io", format!("mixer task: {e}")),
                     }
                 }
@@ -760,7 +778,9 @@ impl DaemonHub {
                     match tokio::task::spawn_blocking(move || net.patch(&p.ops)).await {
                         Ok(Ok(state)) => IpcResponse::ok(id, state),
                         Ok(Err(PatchError::Invalid(e))) => IpcResponse::err(id, "invalid_value", e),
-                        Ok(Err(PatchError::Io(e))) => IpcResponse::err(id, "io", format!("{e:#}")),
+                        Ok(Err(PatchError::Io(e) | PatchError::Kept(e))) => {
+                            IpcResponse::err(id, "io", format!("{e:#}"))
+                        }
                         Err(e) => IpcResponse::err(id, "io", format!("net task: {e}")),
                     }
                 }
@@ -776,10 +796,36 @@ impl DaemonHub {
         value: SettingValue,
     ) -> Result<hako_core::DeviceSnapshot> {
         let handle = lock(&self.devices).get(&device_id.key()).cloned();
-        handle
-            .ok_or_else(|| Refused::new("not_found", "device offline"))?
-            .set(key, value)
-            .await
+        let handle = handle.ok_or_else(|| Refused::new("not_found", "device offline"))?;
+        let before = handle.snapshot().settings;
+        let result = handle.set(key, value).await;
+        self.mark_written(&handle, &[key], &before, &result).await;
+        result
+    }
+
+    /// [`Self::mark_profile_modified`] after a user's write of `keys` that
+    /// landed, even part-way or after its reply timed out (a failed write may
+    /// still have changed the device).
+    async fn mark_written(
+        &self,
+        handle: &DeviceHandle,
+        keys: &[SettingKey],
+        before: &SettingsMap,
+        result: &Result<hako_core::DeviceSnapshot>,
+    ) {
+        let now = handle.snapshot();
+        let landed = match result {
+            Ok(_) => true,
+            Err(e) => {
+                Refused::code(e) == "busy"
+                    || keys
+                        .iter()
+                        .any(|k| before.get(k.as_str()) != now.settings.get(k.as_str()))
+            }
+        };
+        if landed {
+            self.mark_profile_modified(keys, &now.controls).await;
+        }
     }
 
     /// A user's change to a setting profiles apply: the live state is no
@@ -801,6 +847,10 @@ impl DaemonHub {
             Ok(())
         }) {
             warn!("the profile could not be marked modified: {e:#}");
+            self.push_error(format!(
+                "The last profile could not be marked modified, so the next start applies \
+                 it over this change: {e:#}"
+            ));
         }
     }
 
@@ -810,10 +860,12 @@ impl DaemonHub {
         values: Vec<(SettingKey, SettingValue)>,
     ) -> Result<hako_core::DeviceSnapshot> {
         let handle = lock(&self.devices).get(&device_id.key()).cloned();
-        handle
-            .ok_or_else(|| Refused::new("not_found", "device offline"))?
-            .set_many(values)
-            .await
+        let handle = handle.ok_or_else(|| Refused::new("not_found", "device offline"))?;
+        let keys: Vec<SettingKey> = values.iter().map(|(k, _)| *k).collect();
+        let before = handle.snapshot().settings;
+        let result = handle.set_many(values).await;
+        self.mark_written(&handle, &keys, &before, &result).await;
+        result
     }
 
     /// `startup`: the automatic re-apply at daemon start, which skips devices
@@ -822,7 +874,16 @@ impl DaemonHub {
     /// layout (`mixer.toml` has the live one).
     async fn apply_profile(&self, name: &str, startup: bool) -> Result<()> {
         let _one_at_a_time = self.profiles.lock().await;
-        let profile = load_profile(&self.paths, name)?;
+        let profile = match load_profile(&self.paths, name) {
+            Err(e)
+                if e.root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Err(Refused::new("not_found", format!("no profile {name:?}")).into());
+            }
+            loaded => loaded?,
+        };
         let mut failures = Vec::new();
         // Something was written: a partial apply is still this profile's.
         let mut landed = false;
@@ -895,6 +956,10 @@ impl DaemonHub {
                 Ok(Ok(_)) => landed = true,
                 Ok(Err(PatchError::Invalid(e))) => failures.push(format!("mixer layout: {e}")),
                 Ok(Err(PatchError::Io(e))) => failures.push(format!("mixer layout: {e:#}")),
+                Ok(Err(PatchError::Kept(e))) => {
+                    landed = true;
+                    failures.push(format!("mixer layout: {e:#}"));
+                }
                 Err(e) => failures.push(format!("mixer task: {e}")),
             }
         }
@@ -917,14 +982,18 @@ impl DaemonHub {
             }
             return Err(error);
         }
-        set_last_profile(&self.paths, name)?;
+        set_last_profile(&self.paths, name).with_context(|| {
+            format!("applied {name:?}, but it could not be recorded as the last profile")
+        })?;
         info!("applied profile {name}");
         Ok(())
     }
 
     /// Delete a profile and forget it as the one applied at start.
     fn delete_profile(&self, name: &str) -> Result<()> {
-        anyhow::ensure!(delete_profile(&self.paths, name)?, "no profile {name:?}");
+        if !delete_profile(&self.paths, name)? {
+            return Err(Refused::new("not_found", format!("no profile {name:?}")).into());
+        }
         update_app_config(&self.paths, |cfg| {
             if cfg.last_profile.as_deref() == Some(name) {
                 cfg.last_profile = None;
@@ -1160,8 +1229,9 @@ fn retry_key(m: &Model) -> (u16, u16) {
     (m.vendor_id, m.product_ids[0])
 }
 
-/// Models of handles whose driver crashed their worker, still backing off:
-/// a crash is reopened with backoff too.
+/// Models of handles whose driver crashed their worker or that lost their
+/// device while its nodes stayed, still backing off: those are reopened with
+/// backoff too.
 fn crash_skips(handles: &[DeviceHandle], now: Instant) -> Vec<&'static Model> {
     handles
         .iter()
@@ -1281,12 +1351,14 @@ fn all_models(present: &Present) -> impl Iterator<Item = &'static Model> + '_ {
 /// Blocking discovery body (called from spawn_blocking): open every present
 /// model not in `skip`; failures become placeholders. Also returns every
 /// model tried, whether it yielded a device, and its open error. `connected`
-/// lists the open devices a rescanned `multi` model must not return again.
+/// lists the open devices a rescanned `multi` model must not return again,
+/// `reopened` the models whose disconnected handle an open takes over.
 /// Once `stopping` is set, no further model is opened.
 fn discover_blocking(
     mut ctx: DriverCtx,
     skip: &[&'static Model],
     connected: &[(&'static Model, DeviceId)],
+    reopened: &[&'static Model],
     present: &Present,
     stopping: &AtomicBool,
 ) -> (Opened, Attempted) {
@@ -1313,6 +1385,7 @@ fn discover_blocking(
             .map(|(_, id)| id.clone())
             .collect();
         let rescan = !ctx.open.is_empty();
+        ctx.reopen = reopened.iter().any(|m| m.same(model));
         // A driver bug fails only its own model (with backoff), not the pass.
         let opened = catch_unwind(AssertUnwindSafe(|| (model.open)(pid, &ctx)))
             .unwrap_or_else(|_| Err(anyhow::anyhow!("driver crashed while opening")));
@@ -1323,7 +1396,11 @@ fn discover_blocking(
                 attempted.push((model, rescan || !adapters.is_empty(), None));
                 out.extend(adapters.into_iter().map(|a| (model, a)));
             }
-            Err(e) if rescan => warn!("{} rescan: {e:#}", model.name),
+            // Its open devices stay; the next rescan backs off.
+            Err(e) if rescan => {
+                warn!("{} rescan: {e:#}", model.name);
+                attempted.push((model, false, Some(format!("{e:#}"))));
+            }
             Err(e) => {
                 warn!("{}: {e:#}", model.name);
                 let placeholder = PlaceholderAdapter::permission_denied(
@@ -1455,6 +1532,7 @@ pub(crate) mod tests {
             rescanned: Default::default(),
             discovering: Mutex::new(()),
             stopping: Arc::default(),
+            background_error: Default::default(),
             paths,
         }
     }
@@ -1718,8 +1796,9 @@ pub(crate) mod tests {
             audio: hub.audio.clone(),
             open: Vec::new(),
             vendor_id: 0,
+            reopen: false,
         };
-        let (opened, attempted) = discover_blocking(ctx, &[], &[], &present, &hub.stopping);
+        let (opened, attempted) = discover_blocking(ctx, &[], &[], &[], &present, &hub.stopping);
         assert!(opened.is_empty() && attempted.is_empty());
         drop(pass);
         close(hub);
@@ -2013,6 +2092,98 @@ pub(crate) mod tests {
         hub.delete_profile("p").unwrap();
         assert!(!modified(), "forgotten");
         stop_all(&[h]).await;
+        close(hub);
+    }
+
+    /// Plain, but it keeps what it is set to and every write then fails
+    /// (sent, not saved).
+    struct Unsaved(DeviceId, SettingsMap);
+
+    impl DeviceAdapter for Unsaved {
+        fn id(&self) -> &DeviceId {
+            &self.0
+        }
+        fn snapshot(&self) -> hako_core::DeviceSnapshot {
+            hako_core::DeviceSnapshot {
+                settings: self.1.clone(),
+                ..Plain(self.0.clone()).snapshot()
+            }
+        }
+        fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+            self.1.insert(key.as_str().into(), value);
+            anyhow::bail!("applied, but not saved")
+        }
+        fn tick(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn shutdown(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_that_changed_the_device_marks_the_profile_modified() {
+        let hub = hub("profile-failed-write");
+        let model = fake_model(0x6a75);
+        let id = fake_id(model, "x");
+        let unsaved = Unsaved(id.clone(), [("dpi".into(), SettingValue::Int(400))].into());
+        let h = DeviceHandle::spawn(
+            model,
+            Box::new(unsaved),
+            hub.events.clone(),
+            Vec::new(),
+            hub.paths.clone(),
+        )
+        .unwrap();
+        lock(&hub.devices).insert(id.key(), h.clone());
+        hub.save_profile("p").await.unwrap();
+        let modified = || load_app_config(&hub.paths).unwrap().last_profile_modified;
+        let set = |dpi: i64| IpcRequest {
+            id: serde_json::json!(1),
+            method: Method::Set,
+            params: serde_json::to_value(SetParams {
+                device_id: id.clone(),
+                key: SettingKey::Dpi,
+                value: SettingValue::Int(dpi),
+            })
+            .unwrap(),
+        };
+
+        // Refused before it reached the device: nothing changed.
+        let refused = hub.handle(set(5)).await.error.unwrap();
+        assert_eq!(refused.code, "invalid_value");
+        assert!(!modified());
+        let failed = hub.handle(set(500)).await.error.unwrap();
+        assert_eq!(failed.code, "io");
+        assert!(modified(), "the device has the new value");
+        stop_all(&[h]).await;
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn a_failed_startup_profile_is_kept_for_a_ui_that_connects_later() {
+        let hub = hub("startup-error");
+        update_app_config(&hub.paths, |cfg| {
+            cfg.last_profile = Some("gone".into());
+            Ok(())
+        })
+        .unwrap();
+        hub.maybe_apply_last_profile().await;
+        let e = hub.hub_state().await.health.last_error.unwrap();
+        assert!(e.contains("Startup profile gone"), "{e}");
+        close(hub);
+    }
+
+    #[tokio::test]
+    async fn a_missing_profile_is_not_found() {
+        let hub = hub("profile-missing");
+        let call = |method| IpcRequest {
+            id: serde_json::json!(1),
+            method,
+            params: serde_json::json!({"name": "gone"}),
+        };
+        for method in [Method::ApplyProfile, Method::DeleteProfile] {
+            let got = hub.handle(call(method)).await;
+            assert_eq!(got.error.unwrap().code, "not_found", "{method:?}");
+        }
         close(hub);
     }
 

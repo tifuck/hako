@@ -51,6 +51,9 @@ const PING_EVERY: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// How often an incomplete probe is retried while the device answers.
 const PROBE_RETRY: Duration = Duration::from_secs(30);
+/// Unanswered requests in a row after which the probe stops asking (the
+/// rest of it fails at once and is retried with the probe).
+const PROBE_MISSES: u8 = 3;
 /// DPI slider when the device's list cannot be read.
 const DPI_FALLBACK: (u16, u16, u16) = (100, 25600, 50);
 /// 0x2202 lift-off byte values (0 = no LOD control); the device rejects 0
@@ -215,6 +218,8 @@ pub struct HidppAdapter {
     last_ping: Instant,
     last_sync: Instant,
     last_probe: Instant,
+    /// While probing: unanswered requests in a row.
+    probe_misses: Option<u8>,
     /// Link events read from the node, waiting for the next tick.
     events: Vec<hidpp::LinkEvent>,
 }
@@ -268,6 +273,7 @@ impl HidppAdapter {
             last_ping: Instant::now(),
             last_sync: Instant::now(),
             last_probe: Instant::now(),
+            probe_misses: None,
             events: Vec::new(),
         };
         if a.ping() {
@@ -281,10 +287,22 @@ impl HidppAdapter {
     }
 
     fn call(&mut self, feat: u8, fnid: u8, params: &[u8]) -> Result<[u8; 20]> {
-        // A request drains the queue: keep the link events in it first.
-        self.poll_events();
+        if self.probe_misses.is_some_and(|n| n >= PROBE_MISSES) {
+            bail!("no answer to {PROBE_MISSES} requests in a row");
+        }
+        // Link events read while the request waits are kept for `tick`.
+        let (index, wireless, events) = (self.index, self.feat.wireless, &mut self.events);
         let dev = self.dev.as_mut().context("device closed")?;
-        hidpp::request(dev, self.index, feat, fnid, params)
+        let r = hidpp::request(dev, index, feat, fnid, params, &mut |f| {
+            events.extend(hidpp::parse_event(f, index, wireless))
+        });
+        if let Some(n) = &mut self.probe_misses {
+            *n = match &r {
+                Err(e) if hidpp::unanswered(e) => n.saturating_add(1),
+                _ => 0,
+            };
+        }
+        r
     }
 
     /// Move the link events (receiver 0x40 / 0x41, 0x1D4B) among the queued
@@ -326,11 +344,13 @@ impl HidppAdapter {
     /// Receiver slots: false once the pairing register names another device
     /// or none. A failed read (receiver busy) proves nothing, so it passes.
     fn still_paired(&mut self) -> bool {
+        let (index, wireless, events) = (self.index, self.feat.wireless, &mut self.events);
         let (Some((bolt, short)), Some(dev)) = (self.pairing, self.dev.as_mut()) else {
             return true;
         };
-        let sub = hidpp::pairing_sub(bolt, self.index);
-        match hidpp::read_long_register(dev, hidpp::REG_RECEIVER_INFO, sub, short) {
+        let sub = hidpp::pairing_sub(bolt, index);
+        let keep = &mut |f: &[u8]| events.extend(hidpp::parse_event(f, index, wireless));
+        match hidpp::read_long_register(dev, hidpp::REG_RECEIVER_INFO, sub, short, keep) {
             Ok(r) => {
                 hidpp::parse_pairing(bolt, &r).map(|(wpid, _)| wpid) == Some(self.id.product_id)
             }
@@ -345,7 +365,10 @@ impl HidppAdapter {
         self.lod = None;
         if !self.probed {
             self.last_probe = Instant::now();
-            match self.probe() {
+            self.probe_misses = Some(0);
+            let probed = self.probe();
+            self.probe_misses = None;
+            match probed {
                 Ok(()) => {
                     self.probed = true;
                     self.last_error = None;
@@ -440,6 +463,7 @@ impl HidppAdapter {
         self.read_name(&mut missed);
         self.read_caps(&mut missed);
         if !missed.is_empty() {
+            missed.dedup();
             bail!("incomplete probe ({})", missed.join("; "));
         }
         Ok(())
@@ -813,11 +837,14 @@ impl HidppAdapter {
                     self.call(pm, 0x06, &[0x05])?;
                 }
                 self.call(idx, 0x05, &[0x01, 0x03, 0x04])?;
+                self.led_claimed = true;
             } else {
-                // 0x8070 SetSWControl fn 8 [software]; absent on version 0.
-                let _ = self.call(idx, 0x08, &[0x01, 0x00]);
+                // 0x8070 SetSWControl fn 8 [software]; absent on version 0
+                // (refused). One that got no answer is sent again next time.
+                self.led_claimed = !self
+                    .call(idx, 0x08, &[0x01, 0x00])
+                    .is_err_and(|e| hidpp::unanswered(&e));
             }
-            self.led_claimed = true;
         }
         for (zone, slot) in targets {
             if rgb {
@@ -1183,6 +1210,55 @@ mod tests {
         );
         assert!(meta.validate(&SettingValue::Int(30)).is_ok());
         assert!(meta.validate(&SettingValue::Int(3)).is_err());
+    }
+
+    /// The adapter on a plain file as its node: every request lands in it as
+    /// 20 bytes and none is ever answered.
+    fn silent(root: &std::path::Path) -> HidppAdapter {
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let node = root.join("hidraw");
+        std::fs::write(&node, []).unwrap();
+        let dev = HidrawDevice::open(&node).unwrap();
+        HidppAdapter::new(paths, dev, Link::Direct, 0xc08b, DeviceKind::Mouse, None).unwrap()
+    }
+
+    #[test]
+    fn a_probe_stops_asking_a_device_that_went_silent() {
+        let root = std::env::temp_dir().join(format!("hako-hidpp-silent-{}", std::process::id()));
+        let mut a = silent(&root);
+        let sent = || std::fs::metadata(root.join("hidraw")).unwrap().len();
+        a.probe_misses = Some(PROBE_MISSES - 1);
+        let before = sent();
+        assert!(a.call(0x00, 0x00, &[]).is_err());
+        assert_eq!(sent(), before + 20);
+        assert!(a.call(0x00, 0x00, &[]).is_err());
+        assert_eq!(sent(), before + 20, "asked after {PROBE_MISSES} misses");
+        // Outside the probe every request goes out.
+        a.probe_misses = None;
+        assert!(a.call(0x00, 0x00, &[]).is_err());
+        assert_eq!(sent(), before + 40);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_unanswered_zone_claim_is_sent_again() {
+        let root = std::env::temp_dir().join(format!("hako-hidpp-claim-{}", std::process::id()));
+        let mut a = silent(&root);
+        a.feat.led = Some((5, hidpp::FEAT_COLOR_LED));
+        a.zones = vec![LedZone {
+            index: 0,
+            slots: HashMap::from([(MouseEffectKind::Static.effect_id(), 1)]),
+        }];
+        assert!(a.apply_lighting().is_err());
+        assert!(!a.led_claimed);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

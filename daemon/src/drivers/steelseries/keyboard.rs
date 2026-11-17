@@ -49,8 +49,10 @@ use tracing::{info, warn};
 const LINK_POLL: Duration = Duration::from_secs(3);
 const LINK_REPLY: Duration = Duration::from_millis(200);
 /// Status reads in a row without any answer before the dongle counts as not
-/// answering them.
+/// answering them; it is then asked every `LINK_RETRY` only.
 const LINK_MISSES: u8 = 3;
+const LINK_RETRY: Duration = Duration::from_secs(60);
+const NO_LINK_ANSWER: &str = "the dongle does not answer link status reads";
 /// Echo of a dongle answer that could not reach the keyboard.
 const DONGLE_UNREACHED: u8 = 0x40;
 
@@ -273,6 +275,30 @@ fn scale([r, g, b]: [u8; 3], pct: u8) -> [u8; 3] {
     [s(r), s(g), s(b)]
 }
 
+/// Shown when a board whose protocol depends on its firmware does not say
+/// which it runs.
+const UNKNOWN_FIRMWARE: &str =
+    "no answer to the firmware version read: lighting assumes firmware before 1.19.7";
+/// Firmware version reads before the board counts as not answering them.
+const VERSION_READS: usize = 3;
+
+/// The board's firmware version (`00 90`); `None` if it never answers.
+fn read_version(dev: &mut HidrawDevice) -> Result<Option<(u32, u32, u32)>> {
+    let version = |r: &[u8]| parse_version(r.strip_prefix(&[0x90]).unwrap_or(r));
+    for _ in 0..VERSION_READS {
+        let reply = request(
+            dev,
+            &pad(&[0x00, 0x90], 65),
+            |r| version(r).is_some(),
+            Duration::from_millis(100),
+        )?;
+        if let Some(v) = reply.and_then(|r| version(&r)) {
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
 /// `major.minor.patch` from the firmware reply (ASCII, maybe prefixed).
 fn parse_version(reply: &[u8]) -> Option<(u32, u32, u32)> {
     let text = String::from_utf8_lossy(reply);
@@ -384,19 +410,17 @@ impl KeyboardAdapter {
         let wireless = spec.wireless.contains(&pid);
         let info = find_hidraw(VID, pid, Some(if wireless { 3 } else { spec.interface }))?;
         let mut dev = HidrawDevice::open(&info.path)?;
+        let mut unknown_firmware = false;
         let gen = match spec.proto {
             _ if wireless => Gen::Three,
             KbProto::PerKey {
                 gen, fw_gen3: true, ..
             } => {
-                let version = |r: &[u8]| parse_version(r.strip_prefix(&[0x90]).unwrap_or(r));
-                let v = request(
-                    &mut dev,
-                    &pad(&[0x00, 0x90], 65),
-                    |r| version(r).is_some(),
-                    Duration::from_millis(100),
-                )?
-                .and_then(|r| version(&r));
+                let v = read_version(&mut dev)?;
+                unknown_firmware = v.is_none();
+                if unknown_firmware {
+                    warn!("{name}: {UNKNOWN_FIRMWARE}");
+                }
                 if v >= Some((1, 19, 7)) {
                     Gen::Three
                 } else {
@@ -430,7 +454,7 @@ impl KeyboardAdapter {
             dev: Some(dev),
             actuation,
             settings,
-            last_error: None,
+            last_error: unknown_firmware.then(|| UNKNOWN_FIRMWARE.into()),
             paths,
             linked: None,
             battery: BatteryState {
@@ -506,9 +530,21 @@ impl KeyboardAdapter {
         .and_then(|r| parse_link(&r));
         let Some(now) = link else {
             self.link_misses = self.link_misses.saturating_add(1);
+            if self.link_misses == LINK_MISSES {
+                self.battery = BatteryState {
+                    percent: None,
+                    charging: false,
+                    present: false,
+                    ..self.battery.clone()
+                };
+                self.last_error = Some(NO_LINK_ANSWER.into());
+            }
             return Ok(());
         };
         self.link_misses = 0;
+        if self.last_error.as_deref() == Some(NO_LINK_ANSWER) {
+            self.last_error = None;
+        }
         let was = self.linked.replace(now);
         if now {
             let dev = self.dev.as_mut().context("no device")?;
@@ -654,11 +690,12 @@ impl DeviceAdapter for KeyboardAdapter {
     }
 
     fn tick(&mut self) -> Result<()> {
-        if self.wireless
-            && self.dev.is_some()
-            && self.link_misses < LINK_MISSES
-            && self.last_link_poll.elapsed() >= LINK_POLL
-        {
+        let every = if self.link_misses < LINK_MISSES {
+            LINK_POLL
+        } else {
+            LINK_RETRY
+        };
+        if self.wireless && self.dev.is_some() && self.last_link_poll.elapsed() >= every {
             self.poll_link()?;
         }
         Ok(())
@@ -811,6 +848,80 @@ mod tests {
         // The dongle's "keyboard unreachable" echo, and other reports.
         assert_eq!(parse_battery(&[0x40, 21]), None);
         assert_eq!(parse_battery(&[0xbc, 1]), None);
+    }
+
+    /// A plain file as the node: every request lands in it, none is answered.
+    fn silent_node(root: &std::path::Path) -> HidrawDevice {
+        std::fs::create_dir_all(root).unwrap();
+        let node = root.join("hidraw");
+        std::fs::write(&node, []).unwrap();
+        HidrawDevice::open(&node).unwrap()
+    }
+
+    #[test]
+    fn a_silent_dongle_shows_no_battery_and_is_asked_again_later() {
+        static SPEC: KeyboardSpec = KeyboardSpec {
+            interface: 3,
+            wireless: &[0x1640],
+            proto: KbProto::TenZone,
+            actuation: false,
+        };
+        let root = std::env::temp_dir().join(format!("hako-apex-link-{}", std::process::id()));
+        let mut a = KeyboardAdapter {
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: 0x1640,
+                instance: "fake".into(),
+            },
+            name: "Apex",
+            spec: &SPEC,
+            wireless: true,
+            gen: Gen::Three,
+            initialized: false,
+            dev: Some(silent_node(&root)),
+            actuation: None,
+            settings: SettingsMap::new(),
+            last_error: None,
+            paths: ConfigPaths {
+                config_toml: root.join("config.toml"),
+                devices_dir: root.join("devices"),
+                profiles_dir: root.join("profiles"),
+                remaps_dir: root.join("remaps"),
+                root: root.clone(),
+            },
+            linked: Some(true),
+            battery: BatteryState {
+                label: "Keyboard".into(),
+                percent: Some(80),
+                charging: true,
+                present: true,
+            },
+            last_link_poll: Instant::now(),
+            link_misses: LINK_MISSES - 1,
+        };
+        let sent = || std::fs::metadata(root.join("hidraw")).unwrap().len();
+        a.poll_link().unwrap();
+        assert_eq!((a.battery.percent, a.battery.present), (None, false));
+        assert_eq!(a.last_error.as_deref(), Some(NO_LINK_ANSWER));
+        // Not every LINK_POLL any more, but again after LINK_RETRY.
+        let before = sent();
+        a.last_link_poll = Instant::now() - LINK_POLL;
+        a.tick().unwrap();
+        assert_eq!(sent(), before);
+        a.last_link_poll = Instant::now() - LINK_RETRY;
+        a.tick().unwrap();
+        assert_eq!(sent(), before + 65);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_unanswered_firmware_read_is_asked_again() {
+        let root = std::env::temp_dir().join(format!("hako-apex-fw-{}", std::process::id()));
+        let mut dev = silent_node(&root);
+        assert_eq!(read_version(&mut dev).unwrap(), None);
+        let sent = std::fs::metadata(root.join("hidraw")).unwrap().len();
+        assert_eq!(sent, 3 * 65, "asked three times");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

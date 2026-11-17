@@ -207,6 +207,11 @@ fn aux_effect_chain_rejects_invalid_ids_duplicates_and_length() {
     chain.effects[0].id = "not safe".into();
     assert!(chain.validate().is_err());
 
+    chain.effects[0].id = "x".repeat(hako_core::ipc::MAX_AUX_EFFECT_ID);
+    assert!(chain.validate().is_ok());
+    chain.effects[0].id.push('x');
+    assert!(chain.validate().is_err());
+
     chain.effects[0].id = "compressor".into();
     assert!(chain.validate().is_err());
 

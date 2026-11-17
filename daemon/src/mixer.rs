@@ -45,6 +45,8 @@ const RESTART_FIRST: Duration = Duration::from_secs(1);
 const RESTART_MAX: Duration = Duration::from_secs(30);
 /// An engine that ran this long since its last crash starts over at `RESTART_FIRST`.
 const RECOVERED_AFTER: Duration = Duration::from_secs(60);
+/// A failed `AudioService::mixer_default` is tried again after this.
+const DEFAULT_RETRY: Duration = Duration::from_secs(5);
 
 enum Cmd {
     Apply(MixerFile, Option<mpsc::Sender<()>>),
@@ -132,6 +134,8 @@ impl Shared {
 pub enum PatchError {
     Invalid(String),
     Io(anyhow::Error),
+    /// The file has the change, but the graph did not confirm it (`io` too).
+    Kept(anyhow::Error),
 }
 
 pub struct MixerService {
@@ -165,6 +169,7 @@ impl MixerService {
             handed_over: false,
             suppressed: false,
             game: None,
+            game_failed: None,
             latency,
             listing_failed: None,
             audio: audio.clone(),
@@ -311,7 +316,7 @@ impl MixerService {
             cache.file = Some(next.clone());
             // Sent under the lock: the actor sees edits in file order.
             if self.tx.send(Cmd::Apply(next.clone(), Some(reply))).is_err() {
-                return Err(PatchError::Io(anyhow::anyhow!(
+                return Err(PatchError::Kept(anyhow::anyhow!(
                     "the change is kept, but the mixer engine is not running (restart hakod)"
                 )));
             }
@@ -322,12 +327,12 @@ impl MixerService {
                 file,
                 status: lock(&self.shared.status).clone(),
             }),
-            Err(RecvTimeoutError::Timeout) => Err(PatchError::Io(anyhow::anyhow!(
+            Err(RecvTimeoutError::Timeout) => Err(PatchError::Kept(anyhow::anyhow!(
                 "the change is kept, but the mixer did not follow within {} s (it is still \
                  being applied)",
                 APPLY_WAIT.as_secs()
             ))),
-            Err(RecvTimeoutError::Disconnected) => Err(PatchError::Io(anyhow::anyhow!(
+            Err(RecvTimeoutError::Disconnected) => Err(PatchError::Kept(anyhow::anyhow!(
                 "the change is kept, but the mixer engine crashed applying it (it restarts on \
                  its own)"
             ))),
@@ -631,6 +636,33 @@ fn supervise(mut actor: Actor, rx: mpsc::Receiver<Cmd>) {
     }
 }
 
+/// Tell `mixer_default` whether a `Hako_Game` input is up, unless it was
+/// `told` that already; after a failure, again once `DEFAULT_RETRY` has
+/// passed. A failure's error is returned when it is new (pushed once).
+fn tell_default(
+    told: &mut Option<bool>,
+    failed: &mut Option<(String, Instant)>,
+    game: bool,
+    mixer_default: impl FnOnce(bool) -> Result<()>,
+) -> Option<String> {
+    if *told == Some(game) || failed.as_ref().is_some_and(|(_, at)| Instant::now() < *at) {
+        return None;
+    }
+    match mixer_default(game) {
+        Ok(()) => {
+            *told = Some(game);
+            *failed = None;
+            None
+        }
+        Err(e) => {
+            let error = format!("{e:#}");
+            let new = failed.as_ref().is_none_or(|(old, _)| *old != error);
+            *failed = Some((error.clone(), Instant::now() + DEFAULT_RETRY));
+            new.then_some(error)
+        }
+    }
+}
+
 /// The last of the dial reports queued right behind `dial` (one sync for a
 /// burst), and the command after them, handled next.
 fn latest_dial(mut dial: (f32, f32), rx: &mpsc::Receiver<Cmd>) -> ((f32, f32), Option<Cmd>) {
@@ -654,6 +686,8 @@ struct Actor {
     suppressed: bool,
     /// Last told `AudioService::mixer_default` (a `Hako_Game` input is up).
     game: Option<bool>,
+    /// Telling it failed: why (pushed once), and when it is tried again.
+    game_failed: Option<(String, Instant)>,
     /// `node.latency` in samples, for a graph rebuilt after a crash.
     latency: u32,
     /// The last failed device / app listing's error, logged once.
@@ -733,11 +767,16 @@ impl Actor {
     fn recover(&mut self, wait: Duration) {
         // Gone before ChatMix comes back (same sink names). Its teardown runs
         // on state that just panicked: a panic there keeps nothing handed over.
-        let old = std::mem::replace(
+        let mut old = std::mem::replace(
             &mut self.graph,
             MixerGraph::new(Naming::daemon(), self.latency),
         );
-        if catch_unwind(AssertUnwindSafe(|| drop(old))).is_err() {
+        if catch_unwind(AssertUnwindSafe(|| {
+            old.teardown();
+            drop(old);
+        }))
+        .is_err()
+        {
             error!("mixer engine: tearing down the crashed graph failed");
         }
         self.game = None;
@@ -800,11 +839,15 @@ impl Actor {
                     .meter_node(&(Side::Input, i.id.clone()))
                     .is_some()
         });
-        if self.game != Some(game) {
-            self.game = Some(game);
-            if let Err(e) = self.audio.mixer_default(game) {
-                warn!("mixer default sink: {e:#}");
-            }
+        let told = tell_default(&mut self.game, &mut self.game_failed, game, |game| {
+            self.audio.mixer_default(game)
+        });
+        if let Some(error) = told {
+            warn!("mixer default sink: {error}");
+            let _ = self.shared.events.send(AdapterEvent::Error {
+                device: None,
+                message: format!("Mixer: default output: {error}"),
+            });
         }
     }
 
@@ -907,6 +950,35 @@ mod tests {
                 mono: false,
             },
         }
+    }
+
+    /// A failed default-output claim is tried again once `DEFAULT_RETRY`
+    /// has passed, its error pushed once; a successful one is not repeated.
+    #[test]
+    fn a_failed_default_output_is_tried_again_later() {
+        let (mut told, mut failed) = (None, None);
+        let calls = std::cell::Cell::new(0);
+        let fails = |_: bool| -> Result<()> {
+            calls.set(calls.get() + 1);
+            anyhow::bail!("no default metadata")
+        };
+        let error = tell_default(&mut told, &mut failed, true, fails);
+        assert_eq!(error.as_deref(), Some("no default metadata"));
+        assert_eq!(told, None, "not told: tried again");
+        assert_eq!(tell_default(&mut told, &mut failed, true, fails), None);
+        assert_eq!(calls.get(), 1, "not before its time");
+        failed.as_mut().unwrap().1 = Instant::now();
+        assert_eq!(tell_default(&mut told, &mut failed, true, fails), None);
+        assert_eq!(
+            calls.get(),
+            2,
+            "due: tried again, the same error not pushed"
+        );
+        failed.as_mut().unwrap().1 = Instant::now();
+        assert_eq!(tell_default(&mut told, &mut failed, true, |_| Ok(())), None);
+        assert_eq!((told, failed.is_none()), (Some(true), true));
+        assert_eq!(tell_default(&mut told, &mut failed, true, fails), None);
+        assert_eq!(calls.get(), 2, "told: not again");
     }
 
     /// A burst of dial reports is one sync with the last; whatever came
@@ -1318,11 +1390,16 @@ mod tests {
             shared: mixer.shared.clone(),
             audio: mixer.audio.clone(),
         };
-        let mute = MixerOp::SetOutputMute {
+        let mute = |mute| MixerOp::SetOutputMute {
             output: "B1".into(),
-            mute: true,
+            mute,
         };
-        assert!(matches!(dead.patch(&[mute]), Err(PatchError::Io(_))));
+        // Written, not confirmed: kept (a profile's layout has landed).
+        assert!(matches!(
+            dead.patch(&[mute(true)]),
+            Err(PatchError::Kept(_))
+        ));
+        assert!(load_mixer(&paths).unwrap().live.outputs[0].mute);
         assert!(dead.reset().is_ok(), "no engine: nothing left to tear down");
 
         // An engine that drops the kill-switch's reply did not confirm it.
@@ -1339,6 +1416,10 @@ mod tests {
         };
         let e = wedged.reset().unwrap_err();
         assert!(format!("{e:#}").contains("crashed while stopping"), "{e:#}");
+        assert!(matches!(
+            wedged.patch(&[mute(false)]),
+            Err(PatchError::Kept(_))
+        ));
         mixer.shutdown();
         let _ = std::fs::remove_dir_all(&paths.root);
     }

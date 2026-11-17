@@ -75,7 +75,8 @@ struct DefaultState {
     pending: Option<(String, Restore, Instant)>,
 }
 
-/// How long a failed default-output restore waits before it is tried again.
+/// How long a failed default-output claim or restore waits before it is
+/// tried again.
 const RESTORE_RETRY: Duration = Duration::from_secs(10);
 
 impl DefaultState {
@@ -168,6 +169,9 @@ struct AudioState {
     dial: Option<(f32, f32)>,
     /// The mixer runs a `Hako_Game` sink (the default-sink preference's target).
     mixer_game: bool,
+    /// ChatMix's default-sink claim failed: when it is tried again
+    /// (`retry_claim`), while it is still wanted.
+    claim_retry: Option<Instant>,
 }
 
 /// What status reads see: refreshed each time the audio lock is released,
@@ -239,6 +243,7 @@ impl AudioService {
                 parked_sink: None,
                 dial: None,
                 mixer_game: false,
+                claim_retry: None,
             }),
             status: Mutex::new(Status::default()),
             on_error: OnceLock::new(),
@@ -316,7 +321,7 @@ impl AudioService {
         state.mixer_game = game;
         let held = state.defaults.held() == Some(CHATMIX_GAME);
         let result = if game && state.chatmix_set_default && !held {
-            claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
+            claim_chatmix_default(&mut state)
         } else if !game && held {
             release_default(&mut state.defaults, DefaultOwner::ChatMix)
         } else {
@@ -344,11 +349,10 @@ impl AudioService {
     }
 
     fn state(&self) -> StateGuard<'_> {
-        let state = self.state.lock().unwrap_or_else(|poisoned| {
-            let mut state = poisoned.into_inner();
-            state.chatmix_error = Some("audio state mutex was poisoned; recovered state".into());
-            state
-        });
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| self.recovered(poisoned));
         let mut guard = StateGuard {
             state,
             status: &self.status,
@@ -357,16 +361,33 @@ impl AudioService {
         guard
     }
 
+    /// The state a panic left behind, used as it is; said once.
+    fn recovered<'a>(
+        &'a self,
+        poisoned: PoisonError<MutexGuard<'a, AudioState>>,
+    ) -> MutexGuard<'a, AudioState> {
+        let mut state = poisoned.into_inner();
+        state.chatmix_error = Some("audio state mutex was poisoned; recovered state".into());
+        self.state.clear_poison();
+        state
+    }
+
     /// The last published status, refreshed first when no audio work runs
-    /// (a child may have exited since).
+    /// (a child may have exited since), after the due retries.
     fn status(&self) -> Status {
-        match self.state.try_lock() {
-            Ok(state) => drop(StateGuard {
+        let state = match self.state.try_lock() {
+            Ok(state) => Some(state),
+            Err(TryLockError::Poisoned(poisoned)) => Some(self.recovered(poisoned)),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(state) = state {
+            let mut state = StateGuard {
                 state,
                 status: &self.status,
-            }),
-            Err(TryLockError::Poisoned(_)) => drop(self.state()),
-            Err(TryLockError::WouldBlock) => {}
+            };
+            retry_restore(&mut state.defaults);
+            retry_claim(&mut state);
+            self.report(&mut state);
         }
         self.status
             .lock()
@@ -430,7 +451,7 @@ impl AudioService {
     /// Whether ChatMix owns the default sink; applied live when it is up.
     pub fn set_chatmix_default(&self, on: bool) -> Result<()> {
         let mut state = self.state();
-        if state.chatmix_set_default == on {
+        if state.chatmix_set_default == on && state.claim_retry.is_none() {
             return Ok(());
         }
         state.chatmix_set_default = on;
@@ -440,7 +461,7 @@ impl AudioService {
             return Ok(());
         }
         let result = if on {
-            claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
+            claim_chatmix_default(&mut state)
         } else {
             release_default(&mut state.defaults, DefaultOwner::ChatMix)
         };
@@ -472,7 +493,10 @@ impl AudioService {
         }
         let result = set_chatmix_volumes_now(game, chat);
         state.chatmix.volumes = result.is_ok().then_some((game, chat));
-        record_result(&mut state.chatmix_error, &result);
+        // A failed default-sink claim stays the error until a retry lands.
+        if result.is_err() || state.claim_retry.is_none() {
+            record_result(&mut state.chatmix_error, &result);
+        }
         self.report(&mut state);
         result
     }
@@ -645,10 +669,39 @@ fn start_chatmix_locked(state: &mut AudioState, sink: &str) -> Result<()> {
     }
     info!("ChatMix sinks ready -> {sink}");
     if state.chatmix_set_default {
-        claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME)
-            .context("ChatMix default output")?;
+        claim_chatmix_default(state).context("ChatMix default output")?;
     }
     Ok(())
+}
+
+/// `claim_default` for ChatMix's `Hako_Game`; a failed claim is tried again
+/// (`retry_claim`) while it is wanted.
+fn claim_chatmix_default(state: &mut AudioState) -> Result<()> {
+    let claimed = claim_default(&mut state.defaults, DefaultOwner::ChatMix, CHATMIX_GAME);
+    state.claim_retry = claimed.is_err().then(|| Instant::now() + RESTORE_RETRY);
+    claimed
+}
+
+/// Try again a ChatMix default-sink claim that failed, while ChatMix (or the
+/// mixer's `Hako_Game`) is up and the preference still wants it.
+fn retry_claim(state: &mut AudioState) {
+    let Some(at) = state.claim_retry else {
+        return;
+    };
+    if Instant::now() < at {
+        return;
+    }
+    let up = if state.handed_over {
+        state.mixer_game
+    } else {
+        state.chatmix.active()
+    };
+    if !(up && state.chatmix_set_default) {
+        state.claim_retry = None;
+        return;
+    }
+    let claimed = claim_chatmix_default(state).context("ChatMix default output");
+    record_result(&mut state.chatmix_error, &claimed);
 }
 
 /// Fresh loopbacks play at unity: give them the dial's volumes, if reported.
@@ -908,32 +961,22 @@ fn persist_original(original: Option<&str>) {
     let Some(path) = original_file() else {
         return;
     };
+    let write = |name: &str| -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        hako_core::config::write_atomic(&path, name)
+    };
     let result = match original {
-        Some(name) => write_atomic(&path, name),
+        Some(name) => write(name),
         None => match std::fs::remove_file(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            result => result,
+            result => result.map_err(Into::into),
         },
     };
     if let Err(e) = result {
-        warn!("{}: {e}", path.display());
+        warn!("{}: {e:#}", path.display());
     }
-}
-
-fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, path)
 }
 
 /// The user picked another output while `ours` was the default. When `ours`
@@ -2902,6 +2945,58 @@ mod tests {
         drop(busy);
         // Nothing is up, so a new latency rebuilds nothing.
         assert!(audio.set_latency(128).is_ok());
+    }
+
+    #[test]
+    fn a_poisoned_audio_lock_is_said_once() {
+        let audio = AudioService::new();
+        std::thread::scope(|s| {
+            let _ = s
+                .spawn(|| {
+                    let _held = audio.state.lock();
+                    panic!("poisoned on purpose");
+                })
+                .join();
+        });
+        // A status read recovers it (and does not wait on its own lock).
+        assert!(!audio.healthy());
+        assert!(!audio.state.is_poisoned());
+        // The next call's own result replaces it for good.
+        audio.destroy_chatmix().unwrap();
+        assert!(audio.healthy());
+    }
+
+    #[test]
+    fn a_failed_default_claim_is_retried_while_wanted() {
+        let audio = AudioService::new();
+        let later = Instant::now() + RESTORE_RETRY;
+        {
+            let mut state = audio.state();
+            state.claim_retry = Some(later);
+            // Not due yet: no PipeWire call.
+            retry_claim(&mut state);
+            assert_eq!(state.claim_retry, Some(later));
+            // Due, but neither ChatMix nor the mixer's `Hako_Game` is up.
+            state.claim_retry = Some(Instant::now());
+            retry_claim(&mut state);
+            assert_eq!(state.claim_retry, None);
+
+            // The mixer's `Hako_Game` is up and its claim failed.
+            state.handed_over = true;
+            state.mixer_game = true;
+            state.claim_retry = Some(later);
+            // Held, so that the user's own pick ends it without a PipeWire call.
+            state
+                .defaults
+                .claim(DefaultOwner::ChatMix, CHATMIX_GAME.into(), None);
+        }
+        // Turning the preference on again tries it at once, not a no-op.
+        CONFIGURED.with(|c| *c.borrow_mut() = Some("hdmi".into()));
+        audio.set_chatmix_default(true).unwrap();
+        CONFIGURED.with(|c| *c.borrow_mut() = None);
+        let mut state = audio.state();
+        assert_eq!(state.claim_retry, None);
+        state.defaults.restore();
     }
 
     #[test]

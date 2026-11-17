@@ -248,7 +248,7 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
                 info.uniq
             },
         },
-        dev: Some(dev),
+        dev: Some(Box::new(dev)),
         settings: SettingsMap::new(),
         last_error: None,
     };
@@ -262,12 +262,41 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
     Ok(vec![Box::new(a)])
 }
 
+/// Report transport, so the protocol logic can be tested without hardware.
+trait Link: Send {
+    fn set_feature(&self, buf: &mut [u8]) -> Result<()>;
+    fn get_feature_len(&self, buf: &mut [u8]) -> Result<usize>;
+    fn write(&mut self, report: &[u8]) -> Result<()>;
+}
+
+impl Link for HidrawDevice {
+    fn set_feature(&self, buf: &mut [u8]) -> Result<()> {
+        HidrawDevice::set_feature(self, buf)
+    }
+
+    fn get_feature_len(&self, buf: &mut [u8]) -> Result<usize> {
+        HidrawDevice::get_feature_len(self, buf)
+    }
+
+    fn write(&mut self, report: &[u8]) -> Result<()> {
+        HidrawDevice::write(self, report)
+    }
+}
+
+/// A feature read that fills all of `buf`: the zeros of a short one would
+/// read as style 0 (off).
+fn get_full(dev: &dyn Link, buf: &mut [u8]) -> Result<()> {
+    let n = dev.get_feature_len(buf)?;
+    ensure!(n >= buf.len(), "short reply ({n} of {} bytes)", buf.len());
+    Ok(())
+}
+
 struct Lighting {
     name: &'static str,
     kind: DeviceKind,
     proto: Proto,
     id: DeviceId,
-    dev: Option<HidrawDevice>,
+    dev: Option<Box<dyn Link>>,
     settings: SettingsMap,
     last_error: Option<String>,
 }
@@ -275,11 +304,11 @@ struct Lighting {
 impl Lighting {
     /// GM11 command: feature write, then the answer every command gets.
     fn gm11_xfer(&self, c: &gm11::Cmd) -> Result<[u8; 9]> {
-        let dev = self.dev.as_ref().context("not connected")?;
+        let dev = self.dev.as_deref().context("not connected")?;
         let mut out = *c;
         dev.set_feature(&mut out)?;
         let mut reply = [0u8; 9];
-        dev.get_feature(&mut reply)?;
+        get_full(dev, &mut reply)?;
         Ok(reply)
     }
 
@@ -288,12 +317,12 @@ impl Lighting {
     }
 
     fn gk30_read(&self) -> Result<[u8; 8]> {
-        let dev = self.dev.as_ref().context("not connected")?;
+        let dev = self.dev.as_deref().context("not connected")?;
         let mut req = gk30::READ_REQUEST;
         dev.set_feature(&mut req)?;
         let mut r = [0u8; 8];
         r[0] = 0x07;
-        dev.get_feature(&mut r)?;
+        get_full(dev, &mut r)?;
         Ok(r)
     }
 
@@ -372,7 +401,8 @@ impl Lighting {
         match self.proto {
             Proto::Passive => bail!("{} has no lighting controls", self.name),
             Proto::Gk30 => {
-                let mut r = gk30::write(e, gk30::nearest(rgb), speed, bright);
+                let colour = gk30::nearest(rgb);
+                let mut r = gk30::write(e, colour, speed, bright);
                 let dev = self.dev.as_ref().context("not connected")?;
                 dev.set_feature(&mut r)?;
                 let back = gk30::parse(&self.gk30_read()?);
@@ -381,6 +411,21 @@ impl Lighting {
                     "the keyboard reports style {:#04x} instead of {:#04x}",
                     back.style,
                     e.style
+                );
+                ensure!(
+                    e.style == 0 || back.brightness == bright,
+                    "the keyboard reports brightness {} instead of {bright}",
+                    back.brightness
+                );
+                ensure!(
+                    !e.speed || back.speed == speed,
+                    "the keyboard reports speed {} instead of {speed}",
+                    back.speed
+                );
+                ensure!(
+                    !e.color || back.colour == colour,
+                    "the keyboard reports colour {} instead of {colour}",
+                    back.colour
                 );
             }
             Proto::Gm11 => {
@@ -428,8 +473,12 @@ impl DeviceAdapter for Lighting {
         let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value);
         if let Err(e) = self.apply() {
+            // Part of the look may be stored on the device: show what it holds.
             self.settings = before;
-            let e = anyhow!("{e:#}");
+            let e = match self.read_state() {
+                Ok(()) => anyhow!("{e:#}"),
+                Err(r) => anyhow!("{e:#}; reading the device's look back failed too: {r:#}"),
+            };
             self.last_error = Some(format!("{e:#}"));
             return Err(e);
         }
@@ -524,5 +573,80 @@ mod tests {
         assert!(a.set(SettingKey::Brightness, SettingValue::Int(1)).is_err());
         assert_eq!(a.settings, before);
         assert!(a.last_error.is_some());
+    }
+
+    /// GK30 double: `07 fd` reports `state`; a write is stored with the
+    /// brightness capped at `max_brightness`; a read returns `len` bytes.
+    struct FakeGk30 {
+        state: std::sync::Mutex<[u8; 8]>,
+        max_brightness: u8,
+        len: usize,
+    }
+
+    impl Link for FakeGk30 {
+        fn set_feature(&self, buf: &mut [u8]) -> Result<()> {
+            if buf[1] == 0xff {
+                let mut s = self.state.lock().unwrap();
+                s[1..5].copy_from_slice(&buf[2..6]);
+                s[5] = buf[6].min(self.max_brightness);
+            }
+            Ok(())
+        }
+        fn get_feature_len(&self, buf: &mut [u8]) -> Result<usize> {
+            buf[..self.len].copy_from_slice(&self.state.lock().unwrap()[..self.len]);
+            Ok(self.len)
+        }
+        fn write(&mut self, _report: &[u8]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn keyboard(fake: FakeGk30) -> Lighting {
+        let mut a = Lighting {
+            name: "t",
+            kind: DeviceKind::Keyboard,
+            proto: Proto::Gk30,
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: 0x0b30,
+                instance: "t".into(),
+            },
+            dev: Some(Box::new(fake)),
+            settings: SettingsMap::new(),
+            last_error: None,
+        };
+        defaults(Proto::Gk30, &mut a.settings);
+        a
+    }
+
+    #[test]
+    fn a_write_the_keyboard_did_not_take_shows_what_it_holds() {
+        // Static red at brightness 1; the keyboard stores at most 2.
+        let mut a = keyboard(FakeGk30 {
+            state: [0x07, 0x10, 0, 0, 0, 1, 0, 0].into(),
+            max_brightness: 2,
+            len: 8,
+        });
+        a.read_state().unwrap();
+        let e = a
+            .set(SettingKey::Brightness, SettingValue::Int(3))
+            .unwrap_err();
+        assert!(e.to_string().contains("brightness 2"), "{e}");
+        assert_eq!(
+            get_setting(&a.settings, SettingKey::Brightness),
+            Some(&SettingValue::Int(2))
+        );
+        a.set(SettingKey::Brightness, SettingValue::Int(2)).unwrap();
+    }
+
+    #[test]
+    fn a_short_reply_is_not_read_as_off() {
+        let a = keyboard(FakeGk30 {
+            state: [0x07, 0x10, 0, 0, 0, 3, 0, 0].into(),
+            max_brightness: 3,
+            len: 3,
+        });
+        let e = a.gk30_read().unwrap_err();
+        assert!(e.to_string().contains("short reply"), "{e}");
     }
 }

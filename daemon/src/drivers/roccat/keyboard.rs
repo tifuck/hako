@@ -21,7 +21,7 @@ use super::{
 };
 use crate::drivers::{DriverCtx, Opened};
 use crate::hid::HidrawDevice;
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use hako_core::catalog::SettingMeta;
 use hako_core::device::DeviceKind;
 use std::time::Duration;
@@ -289,8 +289,10 @@ pub(super) fn open(spec: &'static Spec<Family>, pid: u16, ctx: &DriverCtx) -> Op
 fn firmware(ctrl: &HidrawDevice, v2: bool) -> Result<u8> {
     let mut buf = if v2 { vec![0u8; 9] } else { vec![0u8; 8] };
     buf[0] = if v2 { 0x09 } else { 0x0f };
-    ctrl.get_feature(&mut buf)
+    let n = ctrl
+        .get_feature_len(&mut buf)
         .context("read the firmware version")?;
+    ensure!(n > 2, "short firmware version reply ({n} bytes)");
     Ok(buf[2])
 }
 

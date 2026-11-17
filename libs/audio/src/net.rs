@@ -34,9 +34,9 @@ pub const NET_MAX_FRAMES: usize = 240;
 
 /// Gets each block played into a peer's sink (interleaved stereo i16 at
 /// `NET_RATE`, at most `NET_MAX_FRAMES` frames) and the frame position of
-/// its first frame. Runs on PipeWire's data thread: never block or allocate.
-/// Blocks of digital silence are not handed over.
-pub type SendFn = Box<dyn FnMut(u64, &[i16]) + Send>;
+/// its first frame; true when it went out. Runs on PipeWire's data thread:
+/// never block or allocate. Blocks of digital silence are not handed over.
+pub type SendFn = Box<dyn FnMut(u64, &[i16]) -> bool + Send>;
 
 const FRAMES_PER_MS: usize = NET_RATE as usize / 1000;
 /// Bytes per S16LE stereo frame.
@@ -236,8 +236,8 @@ fn target_frames(jitter_ms: u32) -> usize {
 
 /// Hand `bytes` (S16LE stereo) to `send` in blocks of at most
 /// `NET_MAX_FRAMES` frames, skipping digital silence; `pos` advances by
-/// every frame. True when anything was sent.
-fn send_blocks(pos: &mut u64, bytes: &[u8], mut send: impl FnMut(u64, &[i16])) -> bool {
+/// every frame. True when anything went out.
+fn send_blocks(pos: &mut u64, bytes: &[u8], mut send: impl FnMut(u64, &[i16]) -> bool) -> bool {
     let mut sent = false;
     let mut block = [0i16; NET_MAX_FRAMES * NET_CHANNELS];
     for chunk in bytes.as_chunks::<STRIDE>().0.chunks(NET_MAX_FRAMES) {
@@ -249,8 +249,7 @@ fn send_blocks(pos: &mut u64, bytes: &[u8], mut send: impl FnMut(u64, &[i16])) -
             *sample = i16::from_le_bytes(*b);
         }
         if samples.iter().any(|&s| s != 0) {
-            send(*pos, samples);
-            sent = true;
+            sent |= send(*pos, samples);
         }
         *pos += chunk.len() as u64;
     }
@@ -1148,7 +1147,10 @@ mod tests {
         let bytes: Vec<u8> = frames.iter().flat_map(|s| s.to_le_bytes()).collect();
         let mut pos = 1_000;
         let mut got = Vec::new();
-        assert!(send_blocks(&mut pos, &bytes, |p, b| got.push((p, b.to_vec()))));
+        assert!(send_blocks(&mut pos, &bytes, |p, b| {
+            got.push((p, b.to_vec()));
+            true
+        }));
         assert_eq!(pos, 1_600);
         let starts: Vec<_> = got.iter().map(|(p, b)| (*p, b.len() / 2)).collect();
         assert_eq!(starts, [(1_000, 240), (1_480, 120)]);
@@ -1158,6 +1160,14 @@ mod tests {
             "silence sent"
         )));
         assert_eq!(pos, 1_616);
+        // Blocks the socket did not take were not sent.
+        assert!(!send_blocks(&mut pos, &bytes, |_, _| false));
+        assert_eq!(pos, 2_216);
+        for took in [false, true] {
+            let s = State::new(2, Box::new(move |_, _| took));
+            s.capture(&bytes);
+            assert_eq!(s.recent(&s.sent), took, "sending");
+        }
     }
 
     #[test]
@@ -1166,7 +1176,7 @@ mod tests {
             worker: Arc::default(),
             generation: u64::MAX,
             id: 1,
-            state: Arc::new(State::new(20, Box::new(|_, _| {}))),
+            state: Arc::new(State::new(20, Box::new(|_, _| true))),
         });
         assert!(port.problem().is_some(), "no thread");
         let starting = lock(&port.worker);
@@ -1207,7 +1217,7 @@ mod tests {
     #[test]
     fn bursts_keep_a_small_target_without_dropouts() {
         for (burst, quantum) in [(1024, 256), (1024, 1024), (NET_MAX_FRAMES, 1024)] {
-            let s = State::new(2, Box::new(|_, _| {}));
+            let s = State::new(2, Box::new(|_, _| true));
             let mut drift = Drift::default();
             let (mut sent, mut carry) = (0u64, 0.0);
             let mut out = vec![0u8; 2 * quantum * STRIDE];
@@ -1310,6 +1320,7 @@ mod tests {
                             if block.iter().any(|&s| s.unsigned_abs() > 8_000) {
                                 sent.fetch_add(1, Ordering::Relaxed);
                             }
+                            true
                         }
                     }),
                 )

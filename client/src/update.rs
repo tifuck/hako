@@ -58,6 +58,19 @@ pub fn rejected(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Rejected>().is_some()
 }
 
+/// A program that ran and exited non-zero (its stderr), unlike one that
+/// could not be started or fed.
+#[derive(Debug)]
+struct Failed(String);
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Failed {}
+
 /// A published release newer than this build.
 #[derive(Clone, Debug)]
 pub struct Release {
@@ -246,7 +259,12 @@ fn download_to(dir: &Path, key: &str, rel: &Release) -> Result<Ready> {
     let mut discard = Discard { dir, keep: false };
     let sums = fetch(&[&rel.sums_url], SUMS_MAX)?;
     fetch(&[&rel.sig_url], SUMS_MAX)
-        .with_context(|| format!("v{} is not signed yet", rel.version))
+        .with_context(|| {
+            format!(
+                "cannot fetch the signature of v{} (it may not be signed yet)",
+                rel.version
+            )
+        })
         .and_then(|sig| verify_signature(key, &sums, &sig))?;
     let sums = String::from_utf8(sums)?;
     let Some(want) = expected_sum(&sums, &rel.name) else {
@@ -501,7 +519,7 @@ fn run_input(cmd: &mut Command, input: &[u8]) -> Result<Vec<u8>> {
     });
     let out = out?;
     if !out.status.success() {
-        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(Failed(String::from_utf8_lossy(&out.stderr).trim().into()));
     }
     // A child that exits early must not pass as having read all of `input`.
     wrote
@@ -517,11 +535,16 @@ fn run_input(cmd: &mut Command, input: &[u8]) -> Result<Vec<u8>> {
 /// environment for `BASH_ENV` or exported functions).
 ///
 /// Only a signature that does not verify is [`Rejected`]; a missing program
-/// is an ordinary error.
+/// or one that could not be run is an ordinary error.
 fn verify_signature(key: &str, data: &[u8], sig: &[u8]) -> Result<()> {
-    for tool in ["/usr/bin/bash", "/usr/bin/ssh-keygen"] {
+    for (tool, package) in [
+        ("/usr/bin/bash", "bash"),
+        ("/usr/bin/ssh-keygen", "openssh-client"),
+    ] {
         if !Path::new(tool).exists() {
-            bail!("cannot check the release signature: {tool} is missing (ssh-keygen comes with openssh-client)");
+            bail!(
+                "cannot check the release signature: {tool} is missing (it comes with {package})"
+            );
         }
     }
     let sig = std::str::from_utf8(sig)
@@ -541,7 +564,10 @@ fn verify_signature(key: &str, data: &[u8], sig: &[u8]) -> Result<()> {
             .arg(sig),
         data,
     )
-    .map_err(|e| Rejected(format!("release signature check failed: {e:#}")))?;
+    .map_err(|e| match e.downcast::<Failed>() {
+        Ok(f) => Rejected(format!("release signature check failed: {f}")).into(),
+        Err(e) => e.context("cannot check the release signature"),
+    })?;
     Ok(())
 }
 
@@ -759,6 +785,16 @@ mod tests {
         let wrong_ns = sign(&good, "other", listed.as_bytes());
         rejected_with(serve("namespace", &listed, wrong_ns, None), "signature");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn only_a_signature_check_that_ran_rejects_a_release() {
+        let e = verify_signature(SIGNING_KEY, b"abc  hako.deb\n", b"not a signature").unwrap_err();
+        assert!(rejected(&e), "{e:#}");
+        // A program that could not be started says nothing about the release.
+        let e = run(&mut Command::new("/nonexistent/hako-test")).unwrap_err();
+        assert!(!e.is::<Failed>(), "{e:#}");
+        assert!(run(&mut Command::new("false")).unwrap_err().is::<Failed>());
     }
 
     #[test]

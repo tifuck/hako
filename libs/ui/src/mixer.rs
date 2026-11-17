@@ -419,13 +419,14 @@ impl HakoAppUi {
             // ponytail: also strips scrolled out of view (at most 24, under
             // MAX_METER_TARGETS); filter by the clip rect if the daemon's
             // per-meter cost ever shows.
-            let base = self.meter_targets.len();
             self.meter_targets.extend(order.iter().map(Strip::meter));
+            // By target: strips may have come or gone since the levels were asked for.
             let levels = |s: &Strip| {
-                order
+                let target = s.meter();
+                self.metered
                     .iter()
-                    .position(|o| o == s)
-                    .and_then(|k| self.meter_levels.get(base + k).copied())
+                    .position(|t| *t == target)
+                    .and_then(|k| self.meter_levels.get(k).copied())
                     .unwrap_or_default()
             };
             let mut clicked = None;

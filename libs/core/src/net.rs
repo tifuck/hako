@@ -65,6 +65,10 @@ pub struct NetFile {
     pub port: u16,
     #[serde(default)]
     pub peers: Vec<Peer>,
+    /// Keys this version does not know (a newer one's, a hand edit): kept
+    /// when the file is rewritten.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 fn default_port() -> u16 {
@@ -79,6 +83,7 @@ impl Default for NetFile {
             name: String::new(),
             port: DEFAULT_PORT,
             peers: Vec::new(),
+            extra: toml::Table::new(),
         }
     }
 }
@@ -502,6 +507,10 @@ mod tests {
         assert_eq!(toml::from_str::<NetFile>(&text).unwrap(), f);
         let old: NetFile = toml::from_str("version = 1\n").unwrap();
         assert_eq!(old, NetFile::default());
+        // A newer version's keys are written back as they were.
+        let newer: NetFile = toml::from_str("version = 1\nrelay = \"x\"\n").unwrap();
+        let text = toml::to_string_pretty(&newer).unwrap();
+        assert!(text.contains("relay = \"x\""), "{text}");
 
         let patch = PatchNetParams {
             ops: vec![NetOp::Respond {

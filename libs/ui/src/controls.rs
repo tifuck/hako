@@ -344,10 +344,11 @@ pub fn choice(ui: &mut Ui, d: &DeviceSnapshot, meta: &SettingMeta, out: &mut Vec
     let pending = egui::Id::new(("hako_confirm", d.id.key(), meta.key.as_str()));
     // A choice with a warning needs an explicit confirmation, like a toggle.
     let mut pick = |ui: &mut Ui, i: usize| {
+        let value = meta.options[i].value.clone();
         if meta.warning.is_some() {
-            ui.ctx().data_mut(|m| m.insert_temp(pending, i));
+            ui.ctx().data_mut(|m| m.insert_temp(pending, value));
         } else {
-            set(out, d, meta.key, meta.options[i].value.clone());
+            set(out, d, meta.key, value);
         }
     };
     let total_chars: usize = meta.options.iter().map(|o| o.label.len()).sum();
@@ -390,12 +391,17 @@ fn confirm_choice(
     pending: egui::Id,
     out: &mut Vec<UiCommand>,
 ) {
-    let (Some(warning), Some(i)) = (
+    let (Some(warning), Some(value)) = (
         &meta.warning,
-        ui.ctx().data(|m| m.get_temp::<usize>(pending)),
+        ui.ctx().data(|m| m.get_temp::<SettingValue>(pending)),
     ) else {
         return;
     };
+    // The daemon's options may have changed since the pick.
+    if !meta.options.iter().any(|o| o.value == value) {
+        ui.ctx().data_mut(|m| m.remove::<SettingValue>(pending));
+        return;
+    }
     let answer = widgets::confirm(
         ui.ctx(),
         pending.with("modal"),
@@ -404,12 +410,10 @@ fn confirm_choice(
         "I understand, change it",
     );
     if answer == Some(true) {
-        if let Some(opt) = meta.options.get(i) {
-            set(out, d, meta.key, opt.value.clone());
-        }
+        set(out, d, meta.key, value);
     }
     if answer.is_some() {
-        ui.ctx().data_mut(|m| m.remove_temp::<usize>(pending));
+        ui.ctx().data_mut(|m| m.remove::<SettingValue>(pending));
     }
 }
 

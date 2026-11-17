@@ -137,10 +137,10 @@ impl DeviceHandle {
                     snap.last_error = Some("driver crashed; reopening".into());
                     let _ = ev.send(AdapterEvent::Updated(snap.clone()));
                     let mut crashed = CRASHED.lock().unwrap_or_else(|p| p.into_inner());
-                    let (n, at) = crashed
+                    let (n, at, _) = crashed
                         .get_or_insert_with(HashMap::new)
                         .entry(snap.id.key())
-                        .or_insert((0, Instant::now()));
+                        .or_insert((0, Instant::now(), None));
                     *n += 1;
                     *at = Instant::now();
                     if *n == 1 {
@@ -217,19 +217,46 @@ impl DeviceHandle {
 
 const STOPPED: &str = "device worker stopped";
 
-/// Driver crashes per device key (count, last one), until a reopened worker
-/// has run for `RECOVERED_AFTER`: a driver that crashes soon after every
-/// reopen is reported once, and reopened with backoff (`crashes`).
-static CRASHED: Mutex<Option<HashMap<String, (u32, Instant)>>> = Mutex::new(None);
+/// (consecutive driver crashes or lost devices, the last one, tick error
+/// last pushed).
+type Downs = (u32, Instant, Option<String>);
 
-/// Consecutive driver crashes of the device with key `key`, and the last one.
+/// Driver crashes and lost devices (`lost`) per device key, until a reopened
+/// worker has stayed connected for `RECOVERED_AFTER`: a driver that crashes
+/// soon after every reopen is reported once, a device lost again and again
+/// has its error pushed once, and both are reopened with backoff (`crashes`).
+static CRASHED: Mutex<Option<HashMap<String, Downs>>> = Mutex::new(None);
+
+/// Consecutive driver crashes or losses of the device with key `key`, and
+/// the last one.
 pub fn crashes(key: &str) -> Option<(u32, Instant)> {
     CRASHED
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .as_ref()?
         .get(key)
-        .copied()
+        .map(|&(n, at, _)| (n, at))
+}
+
+/// Backoff steps a lost device climbs at most (12 s apart): it may only be
+/// asleep, and wakes up to be reopened (a crash keeps climbing).
+const LOST_STEPS: u32 = 3;
+
+/// The adapter of the device with key `key` lost its device while its worker
+/// ran (asleep, not answering; the hub sees an unplug by its nodes): counted
+/// like a crash, with the tick error its worker last pushed.
+fn lost(key: &str, reported: Option<String>) {
+    let mut crashed = CRASHED.lock().unwrap_or_else(|p| p.into_inner());
+    let entry = crashed
+        .get_or_insert_with(HashMap::new)
+        .entry(key.to_string())
+        .or_insert((0, Instant::now(), None));
+    let n = if entry.0 < LOST_STEPS {
+        entry.0 + 1
+    } else {
+        entry.0
+    };
+    *entry = (n, Instant::now(), reported);
 }
 
 /// The worker's state before it takes requests: the opt-in loaded and
@@ -301,9 +328,19 @@ impl Gate {
     }
 
     /// The adapter's snapshot, plus the opt-in toggle when any control it
-    /// offers writes onboard memory.
+    /// offers writes onboard memory, and why its changes are refused while it
+    /// is stuck in save-to-device mode without the opt-in.
     fn view(&self, a: &dyn DeviceAdapter) -> DeviceSnapshot {
         let mut s = a.snapshot();
+        let saving =
+            s.settings.get(SettingKey::SaveToDevice.as_str()) == Some(&SettingValue::Bool(true));
+        if !self.allowed && saving {
+            s.last_error.get_or_insert_with(|| {
+                "in save-to-device mode without \"Allow saving to device memory\": changes are \
+                 refused until it leaves it"
+                    .into()
+            });
+        }
         if s.controls
             .iter()
             .any(|c| c.persistent && c.blocked.is_none())
@@ -387,10 +424,17 @@ fn run(
         let _ = reply.send(result.map(|()| snap));
     };
     let mut next_tick = Instant::now() + adapter.tick_interval();
-    // Tick error last pushed as an `Error` event, and when a tick last failed.
-    let mut reported = None;
+    let key = adapter.id().key();
+    // Tick error last pushed as an `Error` event (to start with, the one a
+    // lost or crashed predecessor pushed), and when a tick last failed.
+    let mut reported = CRASHED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .and_then(|crashed| crashed.get(&key)?.2.clone());
     let mut failed = Instant::now();
-    let started = Instant::now();
+    let mut was_connected = shared.lock().unwrap_or_else(|p| p.into_inner()).connected;
+    let mut connected_since = Instant::now();
     let mut crash_cleared = false;
     loop {
         match rx.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
@@ -425,12 +469,15 @@ fn run(
                 gate.refresh(adapter.as_mut());
                 let ticked = adapter.tick();
                 let snap = gate.view(adapter.as_ref());
-                if !crash_cleared && started.elapsed() >= RECOVERED_AFTER {
+                if !snap.connected {
+                    connected_since = Instant::now();
+                }
+                if !crash_cleared && connected_since.elapsed() >= RECOVERED_AFTER {
                     crash_cleared = true;
                     if let Some(crashed) =
                         CRASHED.lock().unwrap_or_else(|p| p.into_inner()).as_mut()
                     {
-                        crashed.remove(&snap.id.key());
+                        crashed.remove(&key);
                     }
                 }
                 match ticked {
@@ -452,6 +499,12 @@ fn run(
                     }
                     Ok(()) => {}
                 }
+                // Counted before it is published (a write that lost the
+                // device: at the next tick), so the hub's reopen backs off.
+                if was_connected && !snap.connected {
+                    lost(&key, reported.clone());
+                }
+                was_connected = snap.connected;
                 if let Some(snap) = publish(snap) {
                     let _ = events.send(AdapterEvent::Updated(snap));
                 }
@@ -721,6 +774,9 @@ mod tests {
         assert!(format!("{e:#}").contains("saved, but"), "{e:#}");
         assert!(!Gate::load(paths.clone(), stem).allowed);
         assert!(a.saving);
+        // The device says so, with nobody listening for events.
+        let why = gate.view(&a).last_error.unwrap();
+        assert!(why.contains("save-to-device mode"), "{why}");
 
         // So nothing more is written (to onboard memory) without consent.
         assert!(set_checked(&mut a, &mut gate, Dpi, SettingValue::Int(400)).is_err());
@@ -735,6 +791,7 @@ mod tests {
         set_checked(&mut a, &mut gate, Dpi, SettingValue::Int(400)).unwrap();
         assert!(!a.saving);
         assert_eq!(a.writes, [SaveToDevice, Dpi]);
+        assert_eq!(gate.view(&a).last_error, None);
         let _ = std::fs::remove_dir_all(paths.root);
     }
 
@@ -816,6 +873,79 @@ mod tests {
         assert!(!h.snapshot().connected);
         assert_eq!(crashes(&key).map(|(n, _)| n), Some(1));
         let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    /// Connected until its first tick, which fails: the device stopped
+    /// answering, its node stays.
+    struct Lost {
+        fake: Fake,
+        connected: bool,
+    }
+
+    impl DeviceAdapter for Lost {
+        fn id(&self) -> &DeviceId {
+            self.fake.id()
+        }
+        fn snapshot(&self) -> DeviceSnapshot {
+            DeviceSnapshot {
+                connected: self.connected,
+                ..self.fake.snapshot()
+            }
+        }
+        fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
+            self.fake.set(key, value)
+        }
+        fn tick(&mut self) -> Result<()> {
+            self.connected = false;
+            bail!("no answer")
+        }
+        fn shutdown(&mut self) {}
+        fn tick_interval(&self) -> Duration {
+            Duration::from_millis(10)
+        }
+    }
+
+    #[test]
+    fn a_device_lost_after_every_reopen_backs_off_and_is_reported_once() {
+        let paths = temp_paths("lost");
+        let model = crate::drivers::models().next().unwrap();
+        let (events, mut sub) = broadcast::channel(64);
+        let lost = || {
+            let mut fake = fake();
+            fake.id.instance = "lost".into();
+            Box::new(Lost {
+                fake,
+                connected: true,
+            })
+        };
+        let key = lost().id().key();
+        for n in 1..=2 {
+            let h =
+                DeviceHandle::spawn(model, lost(), events.clone(), vec![], paths.clone()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while crashes(&key).map(|(n, _)| n) != Some(n) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(crashes(&key).map(|(n, _)| n), Some(n));
+            assert!(!h.snapshot().connected);
+            // Replaced by its reopen: the worker lets go.
+            drop(h);
+        }
+        let mut errors = 0;
+        while let Ok(ev) = sub.try_recv() {
+            errors += usize::from(matches!(ev, AdapterEvent::Error { .. }));
+        }
+        assert_eq!(errors, 1, "the reopened device pushed the same error again");
+        let _ = std::fs::remove_dir_all(paths.root);
+    }
+
+    #[test]
+    fn a_device_lost_again_and_again_stops_climbing_the_backoff() {
+        let key = "test:lost-again";
+        for _ in 0..6 {
+            lost(key, None);
+        }
+        assert_eq!(crashes(key).map(|(n, _)| n), Some(LOST_STEPS));
     }
 
     #[test]

@@ -157,6 +157,8 @@ async fn main() -> Result<()> {
 
         // Devices tick on their own worker threads; this only finds new ones.
         let mut interval = tokio::time::interval(DISCOVERY_PERIOD);
+        // A pass that outlasted the period is not followed by catch-up passes.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             pass(hub_disc.clone()).await;

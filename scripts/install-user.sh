@@ -35,7 +35,8 @@ update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 DEST="$HOME/.local/bin"
 FILES=("$LIBDIR/libhako_fx.so" "$DEST/hakod" "$DEST/hako")
 staged() { echo "$(dirname "$1")/.$(basename "$1").$2"; }
-trap 'for f in "${FILES[@]}"; do rm -f "$(staged "$f" new)" "$(staged "$f" old)"; done' EXIT
+keep_old=""
+trap 'for f in "${FILES[@]}"; do rm -f "$(staged "$f" new)"; [ -n "$keep_old" ] || rm -f "$(staged "$f" old)"; done' EXIT
 install -m 644 "$FX" "$(staged "$LIBDIR/libhako_fx.so" new)"
 for b in hakod hako; do
   install -m 755 "$BIN/$b" "$(staged "$DEST/$b" new)"
@@ -49,11 +50,19 @@ for f in "${FILES[@]}"; do
     for r in "${replaced[@]}"; do
       old="$(staged "$r" old)"
       if [ -e "$old" ] || [ -L "$old" ]; then
-        mv -f "$old" "$r"
+        mv -f "$old" "$r" || keep_old=1
       else
-        rm -f "$r"
+        rm -f "$r" || keep_old=1
       fi
     done
+    if [ -n "$keep_old" ]; then
+      echo "Could not install $(basename "$f"), nor put all previous files back. Copies of them:" >&2
+      for r in "${FILES[@]}"; do
+        old="$(staged "$r" old)"
+        if [ -e "$old" ] || [ -L "$old" ]; then echo "  $old (was $r)" >&2; fi
+      done
+      exit 1
+    fi
     echo "Could not install $(basename "$f"); the previous files were kept." >&2
     exit 1
   fi

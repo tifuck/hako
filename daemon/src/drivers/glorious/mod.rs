@@ -309,7 +309,10 @@ impl SinoMouse {
             return;
         };
         let mut buf = [0u8; 64];
-        while let Ok(n) = dev.read_timeout(&mut buf, Duration::ZERO) {
+        for _ in 0..64 {
+            let Ok(n) = dev.read_timeout(&mut buf, Duration::ZERO) else {
+                break;
+            };
             if let Some(up) = parse_link(&buf[..n]) {
                 self.linked = Some(up);
                 if up {

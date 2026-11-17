@@ -44,6 +44,10 @@ pub struct AppConfig {
     /// Audio latency preset (`crate::AUDIO_LATENCIES`).
     #[serde(default = "default_audio_latency")]
     pub audio_latency: String,
+    /// Keys this version does not know (a newer one's, a hand edit): kept
+    /// when the file is rewritten.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 impl Default for AppConfig {
@@ -59,6 +63,7 @@ impl Default for AppConfig {
             theme: String::new(),
             check_updates: true,
             audio_latency: default_audio_latency(),
+            extra: toml::Table::new(),
         }
     }
 }
@@ -215,7 +220,7 @@ pub fn update_app_config<T>(
 /// Owner-only temp file, fsynced, then renamed over `path`: a crash never
 /// leaves a truncated file and concurrent writers never share a temp file.
 /// A symlink (dotfile managers) stays one: the file it points to is replaced.
-pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
+pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let resolved = fs::read_link(path).ok().map(|target| {
         fs::canonicalize(path).unwrap_or_else(|_| match path.parent() {
@@ -573,6 +578,37 @@ mod tests {
         fs::write(remap_config_path(&paths, 1, 2), "bindings = [").unwrap();
         let err = load_remap_bindings(&paths, 1, 2).unwrap_err();
         assert!(format!("{err:#}").contains("0001_0002.toml"), "{err:#}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn keys_of_a_newer_version_survive_a_rewrite() {
+        let root = std::env::temp_dir().join(format!("hako-cfg-newer-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root: root.clone(),
+        };
+        paths.ensure().unwrap();
+        fs::write(
+            &paths.config_toml,
+            "version = 1\nfuture_flag = true\n[future]\nlevel = 3\n",
+        )
+        .unwrap();
+        update_app_config(&paths, |c| {
+            c.theme = "dark".into();
+            Ok(())
+        })
+        .unwrap();
+        let text = fs::read_to_string(&paths.config_toml).unwrap();
+        let back: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(back["future_flag"].as_bool(), Some(true), "{text}");
+        assert_eq!(back["future"]["level"].as_integer(), Some(3), "{text}");
+        assert_eq!(back["theme"].as_str(), Some("dark"), "{text}");
+        assert_eq!(load_app_config(&paths).unwrap().theme, "dark");
         let _ = fs::remove_dir_all(root);
     }
 

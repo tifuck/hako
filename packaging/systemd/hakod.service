@@ -1,6 +1,6 @@
 [Unit]
 Description=hako device daemon
-After=pipewire.service pipewire-pulse.service
+After=pipewire.service pipewire-pulse.service wireplumber.service
 Wants=pipewire.service
 # Enabled globally by the .deb: never for system accounts (e.g. the login
 # screen's greeter user).

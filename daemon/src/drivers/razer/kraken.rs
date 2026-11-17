@@ -1030,6 +1030,25 @@ impl BlackShark2023Adapter {
         last
     }
 
+    fn write(&mut self, key: SettingKey, value: &SettingValue) -> Result<()> {
+        match key {
+            SettingKey::MicSideTone => self.set_sidetone(
+                value
+                    .as_float()
+                    .context("mic monitoring expects a number")?
+                    .round() as i64,
+            ),
+            SettingKey::EqPreset => {
+                self.set_eq_preset(value.as_int().context("EQ preset expects an index")?)
+            }
+            _ => bail!(
+                "{}: {} is not available",
+                bs23_name(self.id.product_id),
+                key.as_str()
+            ),
+        }
+    }
+
     fn read_state(&mut self) -> Result<Option<(u8, bool)>> {
         let Some(level) = self.query(BS23_BATTERY)? else {
             return Ok(None);
@@ -1081,23 +1100,17 @@ impl DeviceAdapter for BlackShark2023Adapter {
     }
 
     fn set(&mut self, key: SettingKey, value: SettingValue) -> Result<()> {
-        let result = match key {
-            SettingKey::MicSideTone => self.set_sidetone(
-                value
-                    .as_float()
-                    .context("mic monitoring expects a number")?
-                    .round() as i64,
-            ),
-            SettingKey::EqPreset => {
-                self.set_eq_preset(value.as_int().context("EQ preset expects an index")?)
+        if let Err(mut e) = self.write(key, &value) {
+            // Sidetone (volume, then on / off) and the EQ (group, then
+            // preset) are two stored writes that may have stopped midway:
+            // send the old value back so the headset matches.
+            if let Some(old) = get_setting(&self.settings, key).cloned() {
+                if let Err(re) = self.write(key, &old) {
+                    e = anyhow!(
+                        "{e:#}; restoring the previous value also failed ({re:#}), the headset may hold part of the change"
+                    );
+                }
             }
-            _ => bail!(
-                "{}: {} is not available",
-                bs23_name(self.id.product_id),
-                key.as_str()
-            ),
-        };
-        if let Err(e) = result {
             self.last_error = Some(format!("{e:#}"));
             return Err(e);
         }
@@ -1320,6 +1333,51 @@ mod tests {
         assert!(snap.controls[1].validate(&SettingValue::Int(252)).is_ok());
         assert!(snap.controls[1].validate(&SettingValue::Int(255)).is_err());
         assert!(!snap.batteries[0].present);
+    }
+
+    /// A failed write sends the old value back. The node is a plain file:
+    /// every frame lands in it, nothing is answered.
+    #[test]
+    fn a_failed_blackshark_2023_write_sends_the_old_value_back() {
+        let root = std::env::temp_dir().join(format!("hako-bs23-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let node = root.join("hidraw");
+        std::fs::write(&node, []).unwrap();
+        let mut settings = SettingsMap::new();
+        merge_setting(&mut settings, SettingKey::MicSideTone, SettingValue::Int(3));
+        let mut a = BlackShark2023Adapter {
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: BLACKSHARK_2023_PID,
+                instance: "test".into(),
+            },
+            dev: Some(HidrawDevice::open(&node).unwrap()),
+            state: None,
+            last_poll: None,
+            last_error: None,
+            settings,
+            paths: ConfigPaths::xdg().unwrap(),
+        };
+        let e = a
+            .set(SettingKey::MicSideTone, SettingValue::Int(5))
+            .unwrap_err();
+        assert!(
+            format!("{e:#}").contains("restoring the previous value"),
+            "{e:#}"
+        );
+        let volumes: Vec<u8> = std::fs::read(&node)
+            .unwrap()
+            .chunks(64)
+            .filter(|f| f[10] == BS23_SIDETONE_VOLUME)
+            .map(|f| f[13])
+            .collect();
+        assert_eq!(volumes.first(), Some(&bs23_volume(5)));
+        assert_eq!(volumes.last(), Some(&bs23_volume(3)));
+        assert_eq!(
+            get_setting(&a.settings, SettingKey::MicSideTone),
+            Some(&SettingValue::Int(3))
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -228,8 +228,11 @@ trait Feature {
 }
 
 impl Feature for HidrawDevice {
+    /// A short reply is an error (libratbag's ROCCAT drivers refuse one too).
     fn get(&self, buf: &mut [u8]) -> Result<()> {
-        self.get_feature(buf)
+        let n = self.get_feature_len(buf)?;
+        ensure!(n >= buf.len(), "short reply ({n} of {} bytes)", buf.len());
+        Ok(())
     }
     fn set(&self, buf: &mut [u8]) -> Result<()> {
         self.set_feature(buf)

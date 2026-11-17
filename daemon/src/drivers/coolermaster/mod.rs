@@ -488,7 +488,7 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
                 info.uniq
             },
         },
-        dev: Some(dev),
+        dev: Some(Box::new(dev)),
         settings,
         last_error: None,
         paths: ctx.paths.clone(),
@@ -506,6 +506,22 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
     Ok(vec![Box::new(a)])
 }
 
+/// Report transport, so the exchanges can be tested without hardware.
+trait Link: Send {
+    fn write(&mut self, report: &[u8]) -> Result<()>;
+    fn read_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize>;
+}
+
+impl Link for HidrawDevice {
+    fn write(&mut self, report: &[u8]) -> Result<()> {
+        HidrawDevice::write(self, report)
+    }
+
+    fn read_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize> {
+        HidrawDevice::read_timeout(self, buf, timeout)
+    }
+}
+
 struct Lighting {
     name: &'static str,
     kind: DeviceKind,
@@ -513,7 +529,7 @@ struct Lighting {
     /// Names the settings file.
     canonical: u16,
     id: DeviceId,
-    dev: Option<HidrawDevice>,
+    dev: Option<Box<dyn Link>>,
     settings: SettingsMap,
     last_error: Option<String>,
     paths: ConfigPaths,
@@ -552,9 +568,9 @@ impl Lighting {
                 let left = end.saturating_duration_since(Instant::now());
                 match dev.read_timeout(&mut buf, left) {
                     Ok(n) if is_ack(&buf[..n], want) => break,
-                    Ok(_) => {}
+                    Ok(_) if !left.is_zero() => {}
                     Err(e) if e.downcast_ref::<std::io::Error>().is_some() => return Err(e),
-                    Err(_) => bail!(
+                    _ => bail!(
                         "no reply to {:02x} {:02x} within {} ms",
                         r[1],
                         r[2],
@@ -568,11 +584,30 @@ impl Lighting {
 
     /// Send the look; with `save`, followed by the family's save sequence.
     fn apply(&mut self, save: bool) -> Result<()> {
-        let mut packets = self.family.packets(&Look::new(self.family, &self.settings));
+        let packets = self.family.packets(&Look::new(self.family, &self.settings));
+        self.send(&packets)?;
         if save {
-            packets.extend(self.family.save_packets());
+            self.save()?;
         }
-        self.send(&packets)
+        Ok(())
+    }
+
+    /// The family's save sequence. Config mode (`41 01`) is left again
+    /// (`41 00`) whatever failed after entering it.
+    fn save(&mut self) -> Result<()> {
+        let packets = self.family.save_packets();
+        for (i, p) in packets.iter().enumerate() {
+            let Err(e) = self.send(std::slice::from_ref(p)) else {
+                continue;
+            };
+            if packets.len() == 3 && i < 2 {
+                if let Err(l) = self.send(&packets[2..]) {
+                    warn!("{}: leave config mode: {l:#}", self.name);
+                }
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn persist(&self) -> Result<()> {
@@ -626,9 +661,10 @@ impl DeviceAdapter for Lighting {
         let before = self.settings.clone();
         merge_setting(&mut self.settings, key, value);
         if let Err(e) = self.apply(save) {
-            // Some of the reports may have gone out: send the old look again.
+            // Some of the reports (the save too) may have gone out: send the
+            // old look again the same way.
             self.settings = before;
-            let e = match self.apply(false) {
+            let e = match self.apply(save) {
                 Ok(()) => e,
                 Err(r) => anyhow!("{e:#}; restoring the previous look failed too: {r:#}"),
             };
@@ -890,6 +926,82 @@ mod tests {
         assert!(e.to_string().contains("failed too"), "{e}");
         assert_eq!(a.settings, settings);
         assert!(a.last_error.is_some());
+        assert!(!dir.exists(), "nothing saved");
+    }
+
+    /// Echoes every report except `[1..3] == drop`; `sent` records them.
+    struct Fake {
+        drop: [u8; 2],
+        sent: std::sync::Arc<std::sync::Mutex<Vec<[u8; 2]>>>,
+        replies: std::collections::VecDeque<Report>,
+    }
+
+    impl Link for Fake {
+        fn write(&mut self, report: &[u8]) -> Result<()> {
+            let r: Report = report.try_into()?;
+            self.sent.lock().unwrap().push([r[1], r[2]]);
+            if r[1..3] != self.drop {
+                self.replies.push_back(r);
+            }
+            Ok(())
+        }
+        fn read_timeout(&mut self, buf: &mut [u8], _timeout: Duration) -> Result<usize> {
+            let r = self.replies.pop_front().context("timeout")?;
+            buf[..64].copy_from_slice(&r[1..]);
+            Ok(64)
+        }
+    }
+
+    #[test]
+    fn a_failed_save_leaves_config_mode_and_restores_by_saving() {
+        let dir = std::env::temp_dir().join(format!("hako-cm-save-{}", std::process::id()));
+        let mut settings = SettingsMap::new();
+        defaults(&mut settings);
+        merge_setting(
+            &mut settings,
+            SettingKey::SaveToDevice,
+            SettingValue::Bool(true),
+        );
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut a = Lighting {
+            name: "Test",
+            kind: DeviceKind::Mouse,
+            family: Family::Mm711,
+            canonical: 0x0101,
+            id: DeviceId {
+                vendor_id: VID,
+                product_id: 0x0101,
+                instance: "t".into(),
+            },
+            dev: Some(Box::new(Fake {
+                drop: [0x50, 0x55],
+                sent: sent.clone(),
+                replies: Default::default(),
+            })),
+            settings: settings.clone(),
+            last_error: None,
+            acked: true,
+            paths: ConfigPaths {
+                root: dir.clone(),
+                config_toml: dir.join("config.toml"),
+                devices_dir: dir.join("devices"),
+                profiles_dir: dir.join("profiles"),
+                remaps_dir: dir.join("remaps"),
+            },
+        };
+        assert!(a
+            .set(SettingKey::Brightness, SettingValue::Int(10))
+            .is_err());
+        assert_eq!(a.settings, settings);
+        let sent = sent.lock().unwrap();
+        let saves: Vec<usize> = (0..sent.len())
+            .filter(|&i| sent[i] == [0x50, 0x55])
+            .collect();
+        // The change, then the restore: each save is followed by `41 00`.
+        assert_eq!(saves.len(), 2, "{sent:02x?}");
+        for i in saves {
+            assert_eq!(sent.get(i + 1), Some(&[0x41, 0x00]), "{sent:02x?}");
+        }
         assert!(!dir.exists(), "nothing saved");
     }
 

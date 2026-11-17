@@ -40,6 +40,7 @@ pub(super) fn open(pid: u16, ctx: &DriverCtx) -> Opened {
         pid,
         ctx.audio.clone(),
         ctx.paths.clone(),
+        ctx.reopen,
     )?)])
 }
 
@@ -71,7 +72,12 @@ pub struct SteelSeriesAdapter {
 }
 
 impl SteelSeriesAdapter {
-    pub fn try_open(pid: u16, audio: Arc<AudioService>, paths: ConfigPaths) -> Result<Self> {
+    pub fn try_open(
+        pid: u16,
+        audio: Arc<AudioService>,
+        paths: ConfigPaths,
+        reopen: bool,
+    ) -> Result<Self> {
         // The utility HID collection that answers the 0x06 opcode set (status /
         // battery / ChatMix / setters) enumerates as bInterfaceNumber 4 on the
         // 12e5 GameDAC (the reference's libusb "interface 7" maps here); 7 is
@@ -129,8 +135,11 @@ impl SteelSeriesAdapter {
             paths,
         };
         adapter.try_init();
-        // A (re)connected headset ends a kill-switch reset.
-        adapter.audio.resume_chatmix();
+        // A (re)connected headset ends a kill-switch reset; reopening the one
+        // still there (it stopped answering) does not.
+        if !reopen {
+            adapter.audio.resume_chatmix();
+        }
         if let Err(error) = adapter.audio.ensure_chatmix(CHATMIX_SINKS) {
             warn!("chatmix: {error}");
         }

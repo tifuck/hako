@@ -52,6 +52,10 @@ pub struct DriverCtx {
     pub open: Vec<DeviceId>,
     /// The model's vendor (lets one `open` serve several vendors).
     pub vendor_id: u16,
+    /// The model has a disconnected handle on nodes still present (its device
+    /// was lost, its driver crashed or its open failed): this open takes the
+    /// same device over, it was not plugged in anew.
+    pub reopen: bool,
 }
 
 /// One supported product. `product_ids` lists every PID the same physical

@@ -117,6 +117,8 @@ pub struct HakoAppUi {
     pub meter_targets: Vec<MeterTargetSpec>,
     /// Latest peaks for `meter_targets`, in order (linear, L/R).
     pub meter_levels: Vec<[f32; 2]>,
+    /// The targets `meter_levels` are for: `meter_targets` as the frame began.
+    pub metered: Vec<MeterTargetSpec>,
 }
 
 impl Default for HakoAppUi {
@@ -139,6 +141,7 @@ impl Default for HakoAppUi {
             pending: false,
             meter_targets: Vec::new(),
             meter_levels: Vec::new(),
+            metered: Vec::new(),
         }
     }
 }
@@ -159,6 +162,7 @@ impl HakoAppUi {
         theme::set(self.settings.as_ref().map_or("", |s| s.theme.as_str()));
         theme::apply(ctx);
         controls::set_pending(ctx, self.pending);
+        std::mem::swap(&mut self.metered, &mut self.meter_targets);
         self.meter_targets.clear();
         self.mixer.sync(ctx.dragged_id().is_some());
         self.net_frame(ctx.dragged_id().is_some());
@@ -1333,15 +1337,16 @@ fn tab_bar(ui: &mut egui::Ui, id: egui::Id, tabs: &[&str], active: usize) -> Opt
 fn empty_state(ui: &mut egui::Ui, connected: bool, daemon_error: &Option<String>) {
     ui.vertical_centered(|ui| {
         ui.add_space(theme::SPACE_XL * 2.5);
-        brand::pip(ui, 88.0, !connected);
+        brand::pip(ui, 88.0, !connected || daemon_error.is_some());
         ui.add_space(theme::SPACE_MD);
+        // A device list kept from before hakod went away says nothing about now.
         let (title, body) = match daemon_error {
-            Some(e) if !connected => ("Waiting for the daemon", e.as_str()),
-            _ if connected => (
+            Some(e) => ("Waiting for the daemon", e.as_str()),
+            None if connected => (
                 "No devices",
                 "Plug in a supported keyboard, mouse, or headset.",
             ),
-            _ => ("Connecting…", "Loading devices from hakod."),
+            None => ("Connecting…", "Loading devices from hakod."),
         };
         ui.label(egui::RichText::new(title).heading().color(pal().text));
         ui.add_space(theme::SPACE_SM);

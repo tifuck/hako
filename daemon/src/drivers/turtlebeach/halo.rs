@@ -126,6 +126,12 @@ impl Link for HidrawDevice {
 /// One settings read; None = no reply in time. Other reports (the base also
 /// pushes events) are skipped.
 fn read_settings(link: &mut dyn Link) -> Result<Option<Settings>> {
+    // A late reply to an earlier read is not this one's.
+    for _ in 0..READS_MAX {
+        if link.recv(Duration::ZERO)?.is_none() {
+            break;
+        }
+    }
     link.send(&get_settings_request())?;
     let deadline = Instant::now() + REPLY_WAIT;
     for _ in 0..READS_MAX {
@@ -293,14 +299,18 @@ mod tests {
         r
     }
 
+    /// Queues the next batch of `answers` on every request.
     struct Fake {
         sent: Vec<Vec<u8>>,
         queue: VecDeque<Vec<u8>>,
+        answers: VecDeque<Vec<Vec<u8>>>,
     }
 
     impl Link for Fake {
         fn send(&mut self, report: &[u8]) -> Result<()> {
             self.sent.push(report.to_vec());
+            self.queue
+                .extend(self.answers.pop_front().unwrap_or_default());
             Ok(())
         }
 
@@ -340,9 +350,11 @@ mod tests {
     fn events_are_skipped_and_state_is_kept() {
         let mut event = vec![0u8; SIZE];
         event[0] = 0xe6;
+        // A late answer to an earlier read is queued before the request.
         let fake = Fake {
             sent: vec![],
-            queue: VecDeque::from([event, reply(64, 0)]),
+            queue: VecDeque::from([reply(10, 0)]),
+            answers: VecDeque::from([vec![event, reply(64, 0)]]),
         };
         let mut a = HaloAdapter {
             id: DeviceId {

@@ -33,21 +33,27 @@ patterns=(
 )
 # On a dev machine also look for who and where we are (CI runners are anonymous).
 if [ -z "${CI:-}" ]; then
-  patterns+=("$HOME" "${USER:-$(id -un)}@" "@$(hostname)")
+  user="${USER:-$(id -un)}"
+  patterns+=("$HOME" "$user@" "@$(hostname)")
   host="$(hostname)"
   [ ${#host} -ge 3 ] && patterns+=("\\b${host}\\b")
-  [ ${#USER} -ge 5 ] && patterns+=("\\b${USER}\\b")
+  [ ${#user} -ge 5 ] && patterns+=("\\b${user}\\b")
   for email in "$(git config --global user.email || true)" "$(git config user.email || true)"; do
     [ -n "$email" ] && [[ "$email" != *noreply* ]] && patterns+=("$email")
   done
 fi
 
+# grep exits 1 for no match; 2 (unreadable file, bad pattern) means the
+# tree was not fully scanned, even if it also found matches.
 for p in "${patterns[@]}"; do
-  if out=$(grep -rnIE --exclude-dir=.git --exclude-dir=target --exclude-dir=.publish --exclude-dir=vendor-re \
-    --exclude=check-public.sh -e "$p" . 2>/dev/null); then
+  rc=0
+  out=$(grep -rnIE --exclude-dir=.git --exclude-dir=target --exclude-dir=.publish --exclude-dir=vendor-re \
+    --exclude=check-public.sh -e "$p" .) || rc=$?
+  if [ -n "$out" ]; then
     hit "matches /$p/:"
     echo "$out" | cut -c1-200 | head -20
   fi
+  [ "$rc" -le 1 ] || hit "grep failed (exit $rc) scanning for /$p/"
 done
 
 [ "$fail" = 0 ] && echo "check-public: clean"

@@ -582,13 +582,23 @@ impl MaxwellAdapter {
                 let state = self
                     .read_param(PARAM_SIDETONE_ON)?
                     .context("no sidetone state from the headset")?;
+                let mut result = Ok(());
                 if (state != 0) != on {
-                    self.write_param(PARAM_SIDETONE_ON, &[u8::from(on)])?;
+                    result = self.write_param(PARAM_SIDETONE_ON, &[u8::from(on)]);
                 }
-                if on {
-                    self.write_key(KEY_SIDETONE, level)?;
+                if on && result.is_ok() {
+                    result = self.write_key(KEY_SIDETONE, level);
                 }
-                Ok(())
+                let Err(e) = result else {
+                    return Ok(());
+                };
+                // The switch or the level may have gone out: show the headset's.
+                match self.read_sidetone() {
+                    Ok(()) => Err(e),
+                    Err(r) => Err(anyhow::anyhow!(
+                        "{e:#}; reading the sidetone back failed too: {r:#}"
+                    )),
+                }
             }
         }
     }
@@ -925,14 +935,14 @@ mod tests {
         params: std::collections::HashMap<u8, u8>,
         sent: Sent,
         replies: std::collections::VecDeque<[u8; SIZE]>,
-        /// The next read of this key fails (a dropped link).
+        /// The next read or write of this key fails (a dropped link).
         fail_key: Option<u8>,
     }
 
     impl Link for FakeHeadset {
         fn send(&mut self, r: &[u8]) -> Result<()> {
             let body = fragment(r)[4..].to_vec();
-            if (body[0], body[1]) == (0x01, 0x09) && self.fail_key == Some(body[2]) {
+            if body[1] == 0x09 && self.fail_key == Some(body[2]) {
                 self.fail_key = None;
                 anyhow::bail!("link dropped");
             }
@@ -1092,6 +1102,29 @@ mod tests {
         a.poll().unwrap();
         assert!(a.battery.present);
         assert_eq!(a.sidetone_max, 31);
+        assert_eq!(
+            get_setting(&a.settings, K::MicSideTone),
+            Some(&SettingValue::Int(9))
+        );
+    }
+
+    #[test]
+    fn a_failed_sidetone_level_write_shows_the_headsets_sidetone() {
+        let (mut a, sent) = headset(&MAXWELL, SettingsMap::new(), 0);
+        a.poll().unwrap();
+        assert_eq!(
+            get_setting(&a.settings, K::MicSideTone),
+            Some(&SettingValue::Int(0))
+        );
+        a.link = Some(Box::new(FakeHeadset {
+            keys: [(KEY_SIDETONE, 9), (KEY_SIDETONE_MAX, 31)].into(),
+            params: [(PARAM_SIDETONE_ON, 0)].into(),
+            sent,
+            replies: Default::default(),
+            fail_key: Some(KEY_SIDETONE),
+        }));
+        // Switched on, then the level write fails: on at its stored level.
+        assert!(a.set(K::MicSideTone, SettingValue::Int(5)).is_err());
         assert_eq!(
             get_setting(&a.settings, K::MicSideTone),
             Some(&SettingValue::Int(9))

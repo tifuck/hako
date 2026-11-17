@@ -71,8 +71,11 @@ struct Inner {
 struct Engines {
     /// `None` if the model failed to load; RNNoise stands in.
     dfn: Option<DfTract>,
-    /// `dfn` panicked and was dropped; fresh engines leave it out too.
+    /// `dfn` failed (panicked or returned an error) and was taken out; fresh engines leave it
+    /// out too.
     dfn_failed: bool,
+    /// The `dfn` that failed, freed with these engines rather than on the audio thread.
+    failed_dfn: Option<DfTract>,
     dfn_reduction: f32,
     rnn: Box<DenoiseState<'static>>,
     rnn_frame: [f32; HOP],
@@ -246,6 +249,7 @@ impl Engines {
         Box::new(Self {
             dfn,
             dfn_failed: false,
+            failed_dfn: None,
             dfn_reduction: 100.0,
             rnn: DenoiseState::new(),
             rnn_frame: [0.0; HOP],
@@ -282,10 +286,11 @@ impl Engines {
                 ) {
                     (Ok(noisy), Ok(enh)) => {
                         match catch_unwind(AssertUnwindSafe(|| df.process(noisy, enh))) {
-                            Ok(result) => result.is_ok(),
-                            // Not retried every hop: RNNoise takes over, as when it failed to load.
-                            Err(_) => {
-                                self.dfn = None;
+                            Ok(Ok(_)) => true,
+                            // Not retried every hop (an error can leave its buffers half
+                            // updated): RNNoise takes over, as when it failed to load.
+                            Ok(Err(_)) | Err(_) => {
+                                self.failed_dfn = self.dfn.take();
                                 self.dfn_failed = true;
                                 false
                             }
@@ -297,7 +302,7 @@ impl Engines {
                     out.copy_from_slice(dry(history, DELAY));
                 }
             }
-            // The DeepFilterNet that panicked, until RNNoise has taken over.
+            // The DeepFilterNet that failed, until RNNoise has taken over.
             (Model::DeepFilter, None) => out.copy_from_slice(dry(history, DELAY)),
             (Model::RnNoise, _) => {
                 let input = dry(history, DELAY - RNN_DELAY);
@@ -323,7 +328,11 @@ impl Engines {
 /// (the crate's defaults, -10 / 30 / 20 dB, take about 6 dB off speech in moderate noise).
 fn load_deep_filter() -> Option<DfTract> {
     let params = RuntimeParams::default().with_thresholds(-15.0, 35.0, 35.0);
-    DfTract::new(DfParams::default(), &params).ok()
+    DfTract::new(DfParams::default(), &params)
+        .inspect_err(|e| {
+            eprintln!("hako denoise: DeepFilterNet 3 failed to load, RNNoise stands in: {e:#}")
+        })
+        .ok()
 }
 
 /// The hop of `history` `delay` samples before the newest.
@@ -591,6 +600,31 @@ mod tests {
         prepare();
         fx.reset();
         assert!(fx.inner.as_ref().unwrap().engines.dfn.is_none());
+    }
+
+    /// A DeepFilterNet that returns an error is not run again (its buffers may be half
+    /// updated): RNNoise takes over, and the failed model leaves with the engines `reset`
+    /// replaces, so it is freed by `prepare`, not on the audio thread.
+    #[test]
+    fn a_failing_deep_filter_hands_over_to_rnnoise() {
+        let mut fx = Denoise::new(RATE);
+        let prepare = fx.reset_preparer().unwrap();
+        let df = fx.inner.as_mut().unwrap().engines.dfn.as_mut().unwrap();
+        // A spectrum buffer of the wrong shape: `process` returns an error.
+        df.spec_buf = Default::default();
+        let (input, deep) = (noise(3 * HOP, 0.3), controls(100.0, Model::DeepFilter));
+        run(&mut fx, deep, &input[..HOP], HOP);
+        let engines = &fx.inner.as_ref().unwrap().engines;
+        assert!(engines.dfn.is_none() && engines.dfn_failed);
+        assert!(engines.failed_dfn.is_some(), "freed on the audio thread");
+        let out = run(&mut fx, deep, &input[HOP..], HOP);
+        assert!(out.iter().all(|s| s.is_finite()));
+
+        prepare();
+        fx.reset();
+        assert!(fx.inner.as_ref().unwrap().engines.dfn.is_none());
+        let spare = fx.spare.as_ref().unwrap();
+        assert!(!spare.spent.load(Ordering::Acquire).is_null());
     }
 
     #[test]

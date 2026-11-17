@@ -852,7 +852,9 @@ fn receiver_slots(pid: u16, ctx: &DriverCtx, skip: impl Fn(u8, u16) -> bool) -> 
             continue;
         }
         let sub = hidpp::pairing_sub(bolt, slot);
-        let Ok(r) = hidpp::read_long_register(&mut rx, hidpp::REG_RECEIVER_INFO, sub, short) else {
+        let Ok(r) =
+            hidpp::read_long_register(&mut rx, hidpp::REG_RECEIVER_INFO, sub, short, &mut |_| {})
+        else {
             continue;
         };
         let Some((wpid, kind)) = hidpp::parse_pairing(bolt, &r) else {
@@ -1073,6 +1075,7 @@ mod tests {
             audio: std::sync::Arc::new(hako_audio::AudioService::new()),
             open: Vec::new(),
             vendor_id: VID,
+            reopen: false,
         };
         let adapters = (pro2::MODEL.open)(pro2::RX_PID, &ctx).unwrap();
         for a in &adapters {

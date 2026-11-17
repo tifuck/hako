@@ -185,6 +185,8 @@ pub struct AuxEffectChain {
 
 /// Most stages an AUX chain may hold.
 pub const MAX_AUX_EFFECTS: usize = 16;
+/// Longest stage id (the UI makes `<kind>-<n>`).
+pub const MAX_AUX_EFFECT_ID: usize = 32;
 
 impl AuxEffectChain {
     pub fn validate(&self) -> Result<(), String> {
@@ -197,6 +199,7 @@ impl AuxEffectChain {
         let mut ids = HashSet::with_capacity(self.effects.len());
         for effect in &self.effects {
             if effect.id.is_empty()
+                || effect.id.len() > MAX_AUX_EFFECT_ID
                 || !effect
                     .id
                     .bytes()

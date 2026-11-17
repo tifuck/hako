@@ -407,7 +407,7 @@ impl KeyboardAdapter {
         match t.transact(p::KB_POWER) {
             Ok(r) => {
                 let (pct, charging) = p::kb_battery(&r, at);
-                state.percent = Some(pct);
+                state.percent = pct;
                 state.charging = charging;
                 // Back in range: it lost the lighting meanwhile.
                 if !self.reachable {

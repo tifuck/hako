@@ -261,15 +261,29 @@ fn recv_message(stream: &mut impl Read, hs: &mut HandshakeState) -> Result<Vec<u
     Ok(payload)
 }
 
+/// The other machine speaks another network protocol than `PROTOCOL`.
+#[derive(Debug)]
+pub struct OtherProtocol(String);
+
+impl std::fmt::Display for OtherProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OtherProtocol {}
+
 /// A message 2 / 3 payload (`PROTOCOL` + nonce or commitment): the nonce
-/// or commitment. Another protocol is refused by name, so mismatched
-/// versions fail clearly instead of pairing with a wrong code.
+/// or commitment. Another protocol is refused by name (`OtherProtocol`), so
+/// mismatched versions fail clearly instead of pairing with a wrong code.
 fn protocol_payload(payload: &[u8]) -> Result<[u8; NONCE]> {
     match payload {
-        [] => bail!("the other computer runs an older hako: update both computers"),
-        [version, ..] if *version != PROTOCOL => bail!(
+        [] => bail!(OtherProtocol(
+            "the other computer runs an older hako: update both computers".into()
+        )),
+        [version, ..] if *version != PROTOCOL => bail!(OtherProtocol(format!(
             "the other computer speaks hako network protocol {version}, this one {PROTOCOL}: update both computers"
-        ),
+        ))),
         [_, nonce @ ..] => nonce
             .try_into()
             .ok()

@@ -233,10 +233,12 @@ impl HidrawDevice {
             .custom_flags(O_NONBLOCK)
             .open(path)
             .map_err(|e| {
-                anyhow::anyhow!(
-                    "open {} failed: {e} (Permission denied usually means the hako udev rules are not installed, or this user has no active seat session)",
-                    path.display()
-                )
+                let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    " (Permission denied usually means the hako udev rules are not installed, or this user has no active seat session)"
+                } else {
+                    ""
+                };
+                anyhow::anyhow!("open {} failed: {e}{hint}", path.display())
             })?;
         Ok(Self {
             file,
@@ -570,6 +572,15 @@ mod tests {
         assert_eq!(usb_interface(BUS_USB, &hid), Some(2));
         assert_eq!(usb_interface(BUS_BLUETOOTH, &hid), None);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_a_refused_open_blames_permissions() {
+        // The placeholder shows the udev rules' install steps for this text.
+        let e = HidrawDevice::open(Path::new("/nonexistent/hidraw0"))
+            .err()
+            .unwrap();
+        assert!(!format!("{e:#}").contains("Permission denied"), "{e:#}");
     }
 
     #[test]

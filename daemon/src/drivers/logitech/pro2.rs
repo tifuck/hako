@@ -279,7 +279,14 @@ impl LogitechMouseAdapter {
 
     fn hidpp_long(&mut self, feature_idx: u8, fnid: u8, params: &[u8]) -> Result<[u8; 20]> {
         let dev = self.dev.as_mut().context("no dev")?;
-        hidpp::request(dev, self.device_index, feature_idx, fnid, params)
+        hidpp::request(
+            dev,
+            self.device_index,
+            feature_idx,
+            fnid,
+            params,
+            &mut |_| {},
+        )
     }
 
     fn root_get_feature(&mut self, feature_id: u16) -> Result<Option<(u8, u8)>> {
@@ -719,7 +726,7 @@ fn pairing_slot(dev: &mut HidrawDevice, short: bool) -> Option<Option<u8>> {
     let mut answered = false;
     for slot in 1..=6u8 {
         let sub = hidpp::pairing_sub(false, slot);
-        match hidpp::read_long_register(dev, hidpp::REG_RECEIVER_INFO, sub, short) {
+        match hidpp::read_long_register(dev, hidpp::REG_RECEIVER_INFO, sub, short, &mut |_| {}) {
             Ok(r) => {
                 answered = true;
                 if hidpp::parse_pairing(false, &r).map(|(wpid, _)| wpid) == Some(MOUSE_PID) {
@@ -757,7 +764,7 @@ fn discover_index(dev: &mut HidrawDevice) -> Result<u8> {
             s[2] = 0x00;
             s[3] = 0x1a;
             s[6] = 0x88;
-            let _ = dev.write(&s);
+            dev.write(&s)?;
         }
         let mut buf = [0u8; 32];
         let deadline = Instant::now() + Duration::from_millis(80);

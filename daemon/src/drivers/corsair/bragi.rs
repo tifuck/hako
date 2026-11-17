@@ -227,6 +227,12 @@ pub trait Props {
 /// value and refuse to touch a property holding something unexpected, skip
 /// the write when it already holds `value`, write, then read it back.
 pub fn store(io: &mut impl Props, addr: u8, prop: u8, value: u32) -> Result<()> {
+    let old = stored_before(io, addr, prop, value)?;
+    store_over(io, addr, prop, old, value)
+}
+
+/// What `prop` holds before [`store`] writes `value`: both must be storable.
+fn stored_before(io: &mut impl Props, addr: u8, prop: u8, value: u32) -> Result<u32> {
     if !storable(prop, value) {
         bail!("refusing to store {value} in property {prop:#04x}");
     }
@@ -236,6 +242,11 @@ pub fn store(io: &mut impl Props, addr: u8, prop: u8, value: u32) -> Result<()> 
     if !storable(prop, old) {
         bail!("property {prop:#04x} holds unexpected value {old}; not writing");
     }
+    Ok(old)
+}
+
+/// The write half of [`store`]: `value` over `old`, then read back.
+fn store_over(io: &mut impl Props, addr: u8, prop: u8, old: u32, value: u32) -> Result<()> {
     if old == value {
         return Ok(());
     }
@@ -282,6 +293,32 @@ pub fn set_dpi(io: &mut impl Props, addr: u8, dpi: u16, combined: bool) -> Resul
     }
 }
 
+/// `store` each of `writes` on `addr`, in order. When one fails, every
+/// property read so far gets its old value back, newest first.
+fn store_each(io: &mut impl Props, addr: u8, writes: &[(u8, u32)]) -> Result<()> {
+    let mut read = Vec::new();
+    for &(prop, value) in writes {
+        let stored = stored_before(io, addr, prop, value).and_then(|old| {
+            read.push((prop, old));
+            store_over(io, addr, prop, old, value)
+        });
+        let Err(e) = stored else {
+            continue;
+        };
+        let restored = read
+            .iter()
+            .rev()
+            .try_for_each(|&(prop, old)| store(io, addr, prop, old));
+        return Err(match restored {
+            Ok(()) => e,
+            Err(re) => anyhow::anyhow!(
+                "{e:#}; restoring the previous values also failed ({re:#}), the device may hold part of the change"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// `store` each of `writes` on the last of `path`, in software mode, which
 /// headsets require for writes (HeadsetControl). Unless the host already
 /// drives the device (`software`), every address on `path` (a V2 receiver,
@@ -294,13 +331,8 @@ pub fn store_in_software(
     software: bool,
 ) -> Result<()> {
     let &addr = path.last().context("no address to write")?;
-    let store_all = |io: &mut _| {
-        writes
-            .iter()
-            .try_for_each(|&(prop, value)| store(io, addr, prop, value))
-    };
     if software {
-        return store_all(io);
+        return store_each(io, addr, writes);
     }
     let mut switched = 0;
     let mut result = Ok(());
@@ -312,7 +344,7 @@ pub fn store_in_software(
         switched += 1;
     }
     if result.is_ok() {
-        result = store_all(io);
+        result = store_each(io, addr, writes);
     }
     for &a in path[..switched].iter().rev() {
         let back = io.set(a, PROP_MODE, MODE_HARDWARE);
@@ -535,7 +567,14 @@ impl Backend for Bragi {
         if on {
             self.link.set(self.addr, PROP_MODE, MODE_SOFTWARE)?;
             if self.leds > 0 {
-                self.format = Some(self.open_lighting()?);
+                match self.open_lighting() {
+                    Ok(format) => self.format = Some(format),
+                    Err(e) => {
+                        // Without a lighting handle the firmware keeps the LEDs.
+                        let _ = self.link.set(self.addr, PROP_MODE, MODE_HARDWARE);
+                        return Err(e);
+                    }
+                }
             }
         } else {
             if self.format.take().is_some() {
@@ -597,7 +636,7 @@ impl Backend for Bragi {
             .get(self.addr, prop)
             .or_else(|_| self.link.get(self.addr, PROP_DPI_X))
             .ok()
-            .map(|v| v as u16)
+            .and_then(|v| u16::try_from(v).ok())
     }
 
     fn report_rate(&mut self) -> Option<u32> {
@@ -682,6 +721,8 @@ mod tests {
         sticky: Option<u32>,
         /// Writes apply but report a failure status.
         refuse: bool,
+        /// A property whose writes fail and do not apply.
+        fail: Option<u8>,
     }
 
     impl Props for Fake {
@@ -690,6 +731,9 @@ mod tests {
         }
         fn set(&mut self, _addr: u8, prop: u8, value: u32) -> Result<()> {
             self.writes.push((prop, value));
+            if self.fail == Some(prop) {
+                bail!("no reply to {prop:#04x}");
+            }
             if prop != PROP_MODE {
                 self.props.insert(prop, self.sticky.unwrap_or(value));
             }
@@ -841,6 +885,44 @@ mod tests {
         assert!(!storable(PROP_SIDETONE_LEVEL, 1005));
         assert!(!storable(PROP_ANC, 3));
         assert!(d.writes.is_empty());
+    }
+
+    #[test]
+    fn a_failed_store_puts_back_what_it_changed() {
+        // V2 sidetone on: ANC off, unmuted, then the level, which fails.
+        let mut d = Fake {
+            props: [
+                (PROP_ANC, 1),
+                (PROP_SIDETONE_MUTED, 1),
+                (PROP_SIDETONE_LEVEL, 300),
+            ]
+            .into(),
+            fail: Some(PROP_SIDETONE_LEVEL),
+            ..Fake::default()
+        };
+        let writes = [
+            (PROP_ANC, 0),
+            (PROP_SIDETONE_MUTED, 0),
+            (PROP_SIDETONE_LEVEL, 500),
+        ];
+        let e = store_in_software(&mut d, &[SELF, SELF | 1], &writes, false).unwrap_err();
+        assert!(!format!("{e:#}").contains("part of the change"), "{e:#}");
+        assert_eq!(
+            d.writes,
+            [
+                (PROP_MODE, MODE_SOFTWARE),
+                (PROP_MODE, MODE_SOFTWARE),
+                (PROP_ANC, 0),
+                (PROP_SIDETONE_MUTED, 0),
+                (PROP_SIDETONE_LEVEL, 500),
+                // The level never changed; the others go back, newest first.
+                (PROP_SIDETONE_MUTED, 1),
+                (PROP_ANC, 1),
+                (PROP_MODE, MODE_HARDWARE),
+                (PROP_MODE, MODE_HARDWARE)
+            ]
+        );
+        assert_eq!((d.props[&PROP_ANC], d.props[&PROP_SIDETONE_MUTED]), (1, 1));
     }
 
     #[test]

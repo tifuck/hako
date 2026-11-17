@@ -443,6 +443,43 @@ fn every_model_has_a_control_or_battery_and_valid_values() {
     }
 }
 
+#[test]
+fn a_battery_byte_above_100_is_no_reading() {
+    let root = std::env::temp_dir();
+    let mut a = HeadsetAdapter {
+        spec: &CLOUD_ALPHA,
+        id: DeviceId {
+            vendor_id: HP,
+            product_id: 0x098d,
+            instance: "fake".into(),
+        },
+        dev: None,
+        input: None,
+        settings: SettingsMap::new(),
+        battery: BatteryState {
+            label: "Headset".into(),
+            percent: None,
+            charging: false,
+            present: false,
+        },
+        sidetone: (None, None),
+        last_poll: None,
+        failures: 0,
+        last_error: None,
+        paths: ConfigPaths {
+            root: root.clone(),
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+        },
+    };
+    a.handle(&[0x21, 0xbb, 0x0b, 0xff]);
+    assert_eq!((a.battery.present, a.battery.percent), (false, None));
+    a.handle(&[0x21, 0xbb, 0x0b, 80]);
+    assert_eq!((a.battery.present, a.battery.percent), (true, Some(80)));
+}
+
 /// Read-only probe of a plugged-in headset (sends status queries only).
 #[test]
 #[ignore]

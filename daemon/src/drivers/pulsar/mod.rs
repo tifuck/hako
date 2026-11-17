@@ -570,7 +570,10 @@ impl Mouse {
             return;
         };
         let mut buf = [0u8; 64];
-        while let Ok(n) = dev.read_timeout(&mut buf, Duration::ZERO) {
+        for _ in 0..64 {
+            let Ok(n) = dev.read_timeout(&mut buf, Duration::ZERO) else {
+                break;
+            };
             if cid87::parse_status_changed(&buf[..n]).is_some_and(|(a, b)| a & 0x0f != 0 || b != 0)
             {
                 self.dirty = true;
@@ -626,21 +629,12 @@ impl DeviceAdapter for Mouse {
             )
         };
         let dev = self.dev.as_mut().context("not connected")?;
+        let (state, dirty) = (&mut self.state, &mut self.dirty);
         let result = cid87::with_mouse(dev, family.wireless, |l| {
-            family.write(l, key, &value)?;
-            family.read_settings(l)
+            family.write_and_read(l, key, &value, state, dirty)
         });
-        match result {
-            Ok(s) => {
-                self.state = s;
-                self.last_error = None;
-                Ok(())
-            }
-            Err(e) => {
-                self.last_error = Some(e.to_string());
-                Err(e)
-            }
-        }
+        self.last_error = result.as_ref().err().map(|e| format!("{e:#}"));
+        result
     }
 
     fn tick(&mut self) -> Result<()> {
@@ -653,7 +647,10 @@ impl DeviceAdapter for Mouse {
         }
         self.last_poll = Some(Instant::now());
         let result = self.poll();
-        self.last_error = result.as_ref().err().map(|e| e.to_string());
+        // A settings read still pending keeps its error.
+        if result.is_err() || !self.dirty {
+            self.last_error = result.as_ref().err().map(|e| e.to_string());
+        }
         if result.is_err() {
             self.battery.present = false;
         }
@@ -818,6 +815,7 @@ mod tests {
             audio: std::sync::Arc::new(hako_audio::AudioService::new()),
             open: Vec::new(),
             vendor_id: PULSAR,
+            reopen: false,
         };
         for m in MODELS {
             for &pid in m.product_ids {

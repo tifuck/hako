@@ -301,11 +301,14 @@ impl Mouse {
         self.battery_read = Some(Instant::now());
         if proto == Proto::V1 {
             self.row = Some(protocol::read_row(dev)?);
-            if !self.identified {
-                // A receiver without a mouse cannot say; retried next time.
-                let _ = self.identify(dev);
-            }
+            // A receiver without a mouse cannot say; retried next time.
+            let identified = if self.identified {
+                Ok(())
+            } else {
+                self.identify(dev)
+            };
             self.read_extras(dev)?;
+            identified.context("could not identify the sensor (tried again on the next read)")?;
         }
         Ok(())
     }

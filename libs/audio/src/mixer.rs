@@ -39,7 +39,7 @@ use hako_core::mixer::{
     validate_label, validate_node_name, AudioDevice, ChatMixSide, DeviceDirection, EffectChain,
     Input, InputKind, Output, OutputKind, Scene, Source, StripProblem, MAX_LABEL,
 };
-use hako_core::AuxConfig;
+use hako_core::{AuxConfig, AuxEffectKind};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -343,9 +343,17 @@ fn describe(label: &str) -> String {
 /// makes every link) and none restores a stored volume (the fader owns it).
 fn strip_config(def: &StripDef, naming: &Naming, plugins: &Plugins) -> Result<String> {
     def.chain.validate().map_err(anyhow::Error::msg)?;
+    // AI noise removal's models run at 48 kHz only: its strip's streams
+    // resample to that and filter-chain runs the plugins at their rate.
+    let denoise = def
+        .chain
+        .effects
+        .iter()
+        .any(|e| e.enabled && matches!(e.kind, AuxEffectKind::NoiseSuppression { .. }));
     let common = format!(
-        "node.latency = \"{}\" state.restore-props = false",
-        node_latency(def.latency)
+        "node.latency = \"{}\" state.restore-props = false{}",
+        node_latency(def.latency),
+        if denoise { " audio.rate = 48000" } else { "" }
     );
     let unlinked = "node.autoconnect = false node.dont-reconnect = true node.dont-fallback = true";
     let description = describe(&def.label);
@@ -675,7 +683,8 @@ pub fn devices(created: &[&str]) -> Result<(Vec<DeviceInfo>, Option<String>)> {
         engine()?.with_graph(|graph| (device_list(graph, created), graph.default_sink.clone()));
     for info in &mut list {
         if let (DeviceDirection::Source, Some(card)) = (info.device.direction, &info.alsa_card) {
-            (info.device.inputs, info.device.capture) = capture_controls(&info.device.node, card);
+            (info.device.inputs, info.device.capture) =
+                capture_controls(&info.device.node, card).unwrap_or_default();
             if info.device.capture {
                 info.device.capture_now = capture_level(&info.device.node, card);
             }
@@ -691,8 +700,8 @@ type CardControls = (Vec<String>, bool);
 /// asked again (`amixer` may take seconds to fail; status reads wait on it).
 const CARD_RETRY: Duration = Duration::from_secs(30);
 
-/// Controls read, or none until the instant after a failed read.
-type CachedControls = (CardControls, Option<Instant>);
+/// Controls read, or none until the instant after a failed read (and why).
+type CachedControls = (CardControls, Option<(String, Instant)>);
 
 /// Asked once per (node, card); after a failure, again once `CARD_RETRY`
 /// has passed.
@@ -700,25 +709,29 @@ type CachedControls = (CardControls, Option<Instant>);
 static CARD_CONTROLS: Mutex<BTreeMap<(String, String), CachedControls>> =
     Mutex::new(BTreeMap::new());
 
-fn capture_controls(node: &str, card: &str) -> CardControls {
+fn capture_controls(node: &str, card: &str) -> Result<CardControls> {
     let cache = || CARD_CONTROLS.lock().unwrap_or_else(|p| p.into_inner());
     let key = (node.to_string(), card.to_string());
-    if let Some((found, retry)) = cache().get(&key) {
-        if retry.is_none_or(|at| Instant::now() < at) {
-            return found.clone();
+    if let Some((found, failed)) = cache().get(&key) {
+        match failed {
+            None => return Ok(found.clone()),
+            Some((error, at)) if Instant::now() < *at => return Err(anyhow!("{error}")),
+            Some(_) => {}
         }
     }
     // Not under the lock: `amixer` may take seconds. Two callers may both
     // ask; the last answer is kept.
-    let (found, retry) = match card_capture_controls(card) {
-        Ok(found) => (found, None),
+    let read = card_capture_controls(card);
+    let cached = match &read {
+        Ok(found) => (found.clone(), None),
         Err(e) => {
             warn!("mixer: ALSA card {card} ({node}): {e:#}");
-            ((Vec::new(), false), Some(Instant::now() + CARD_RETRY))
+            let failed = (format!("{e:#}"), Instant::now() + CARD_RETRY);
+            ((Vec::new(), false), Some(failed))
         }
     };
-    cache().insert(key, (found.clone(), retry));
-    found
+    cache().insert(key, cached);
+    read
 }
 
 /// What the first-run layout is made from.
@@ -1040,18 +1053,23 @@ struct CardClaim {
     /// The node's PipeWire id then: a new one (a replug, the card reset, a
     /// PipeWire restart) gets the settings again.
     node_id: u32,
+    /// What is set on the card: a part that failed is `None`.
     applied: CardWant,
     /// "Input Source" before hako changed it; restored when let go. Kept
     /// while the node is on the same card (ALSA keeps hako's selection
     /// across a PipeWire restart).
     previous: Option<String>,
     error: Option<String>,
+    /// Applying failed: the settings wanted, and when they are tried again.
+    retry: Option<(CardWant, Instant)>,
     /// Giving `previous` back failed: why, and when it is tried again.
     release_error: Option<(String, Instant)>,
 }
 
 /// How long a card whose input could not be given back waits for the next try.
 const RELEASE_RETRY: Duration = Duration::from_secs(10);
+/// How long a card whose settings could not be applied waits for the next try.
+const APPLY_RETRY: Duration = Duration::from_secs(10);
 
 /// Put the card's input selection back, unless the node is gone or on
 /// another card (its card number may be another device's by now).
@@ -1763,7 +1781,14 @@ impl MixerGraph {
                 continue;
             }
             let current = self.cards.get(node);
-            if let Some(c) = current.filter(|c| c.node_id == *id && c.applied == *want) {
+            if let Some(c) = current.filter(|c| {
+                c.node_id == *id
+                    && match &c.retry {
+                        // Not again before its time, unless the settings changed.
+                        Some((failed, at)) => failed == want && Instant::now() < *at,
+                        None => c.applied == *want,
+                    }
+            }) {
                 problems.extend(c.error.as_ref().map(|e| problem(&c.input, e.clone())));
                 continue;
             }
@@ -1776,6 +1801,7 @@ impl MixerGraph {
                 _ => ((None, None), None),
             };
             let mut errors = Vec::new();
+            let mut done = want.clone();
             if applied.0 != want.0 || (want.0.is_none() && previous.is_some()) {
                 let result = match &want.0 {
                     // Never switched without knowing what to switch back to.
@@ -1794,7 +1820,9 @@ impl MixerGraph {
                     }
                     .and_then(|original| {
                         previous = Some(original);
-                        if capture_controls(node, card).0.contains(item) {
+                        let controls =
+                            capture_controls(node, card).context("reading its input sources")?;
+                        if controls.0.contains(item) {
                             set_input_source(card, item)
                         } else {
                             Err(anyhow!("the card has no input source {item:?}"))
@@ -1810,11 +1838,13 @@ impl MixerGraph {
                 };
                 if let Err(e) = result {
                     errors.push(format!("input source: {e:#}"));
+                    done.0 = None;
                 }
             }
             if applied.1 != want.1 {
                 if let Some(Err(e)) = want.1.map(|p| set_capture_percent(card, p)) {
                     errors.push(format!("capture level: {e:#}"));
+                    done.1 = None;
                 }
             }
             let error = (!errors.is_empty()).then(|| errors.join("; "));
@@ -1834,8 +1864,11 @@ impl MixerGraph {
                     input: input.clone(),
                     card: card.clone(),
                     node_id: *id,
-                    applied: want.clone(),
+                    applied: done,
                     previous,
+                    retry: error
+                        .is_some()
+                        .then(|| (want.clone(), Instant::now() + APPLY_RETRY)),
                     error,
                     release_error: None,
                 },
@@ -2091,6 +2124,34 @@ mod tests {
             "{b1}"
         );
         assert!(!b1.contains("hako hako"), "{b1}");
+    }
+
+    #[test]
+    fn a_strip_with_ai_noise_removal_runs_at_48_khz() {
+        let mut scene = scene();
+        let fx = Plugins {
+            lsp: None,
+            fx: Some("/usr/lib/hako/libhako_fx.so".into()),
+        };
+        let config = |scene: &Scene| {
+            strip_config(&def(scene, Side::Input, "desk"), &test_naming(), &fx).unwrap()
+        };
+        assert!(!config(&scene).contains("audio.rate"));
+        scene.inputs[1].chain = EffectChain {
+            effects: vec![AuxEffect {
+                id: "nr".into(),
+                enabled: true,
+                kind: AuxEffectKind::NoiseSuppression {
+                    max_reduction_db: 0.0,
+                    model: 0,
+                },
+            }],
+        };
+        // Both streams: filter-chain resamples them, its plugins run at 48 kHz.
+        let on = config(&scene);
+        assert_eq!(on.matches("audio.rate = 48000").count(), 2, "{on}");
+        scene.inputs[1].chain.effects[0].enabled = false;
+        assert!(!config(&scene).contains("audio.rate"));
     }
 
     #[test]
@@ -2353,6 +2414,56 @@ mod tests {
         assert!(graph.cards.is_empty());
     }
 
+    /// Settings a card refused are tried again once `APPLY_RETRY` has
+    /// passed, not at every heal; a card whose controls could not be read
+    /// shows amixer's error.
+    #[test]
+    fn a_failed_card_apply_is_retried() {
+        use crate::tests::{amixer_calls, SSET_FAILS};
+        let node = "hako-test-apply-line".to_string();
+        let want = |node: &str| {
+            let settings = (Some("Line".to_string()), Some(66));
+            vec![(node.to_string(), "line-in".to_string(), settings)]
+        };
+        let at = |node: &str| HashMap::from([(node.to_string(), (5, "7".to_string()))]);
+        let mut graph = MixerGraph::new(test_naming(), 256);
+        amixer_calls();
+        SSET_FAILS.set(true);
+        let problems = graph.sync_cards(&want(&node), &at(&node));
+        SSET_FAILS.set(false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("busy"), "{problems:?}");
+        amixer_calls();
+        // Not again before its retry time; still a problem.
+        assert_eq!(graph.sync_cards(&want(&node), &at(&node)).len(), 1);
+        assert!(amixer_calls().is_empty());
+        let claim = graph.cards.get_mut(&node).unwrap();
+        claim.retry.as_mut().unwrap().1 = Instant::now();
+        let problems = graph.sync_cards(&want(&node), &at(&node));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            amixer_calls(),
+            ["7 sset Input Source Line", "7 sset Capture 66%"]
+        );
+        assert!(graph.sync_cards(&want(&node), &at(&node)).is_empty());
+        assert!(amixer_calls().is_empty());
+
+        let unread = "hako-test-apply-unread".to_string();
+        let failed = ("amixer: card 7 is busy".into(), Instant::now() + CARD_RETRY);
+        CARD_CONTROLS.lock().unwrap().insert(
+            (unread.clone(), "7".to_string()),
+            ((Vec::new(), false), Some(failed)),
+        );
+        let mut graph = MixerGraph::new(test_naming(), 256);
+        let problems = graph.sync_cards(&want(&unread), &at(&unread));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].message.contains("busy")
+                && !problems[0].message.contains("no input source"),
+            "{problems:?}"
+        );
+    }
+
     /// At startup and teardown every saved card that is there gets its own
     /// input back; one that is not there, or fails, stays saved.
     #[test]
@@ -2556,16 +2667,20 @@ mod tests {
         use crate::tests::amixer_calls;
         let node = "hako-test-controls-retry";
         amixer_calls();
-        assert_eq!(capture_controls(node, "9"), (Vec::new(), false));
+        let error = capture_controls(node, "9").unwrap_err();
+        assert!(format!("{error:#}").contains("no such card"), "{error:#}");
         assert_eq!(amixer_calls(), ["9 scontrols"]);
         // Not every status read: once the retry time has come.
-        capture_controls(node, "9");
+        assert!(
+            capture_controls(node, "9").is_err(),
+            "the error is kept too"
+        );
         assert!(amixer_calls().is_empty());
         let key = (node.to_string(), "9".to_string());
         let mut cache = CARD_CONTROLS.lock().unwrap();
-        cache.get_mut(&key).unwrap().1 = Some(Instant::now());
+        cache.get_mut(&key).unwrap().1.as_mut().unwrap().1 = Instant::now();
         drop(cache);
-        capture_controls(node, "9");
+        assert!(capture_controls(node, "9").is_err());
         assert_eq!(amixer_calls(), ["9 scontrols"]);
     }
 

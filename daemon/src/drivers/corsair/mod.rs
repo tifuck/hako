@@ -851,11 +851,14 @@ impl DeviceAdapter for Peripheral {
         merge_setting(&mut self.settings, key, value.clone());
         if let Err(mut e) = self.write(key, &value) {
             // The UI and the file keep the old value. Host mode with its
-            // colour, both DPI axes, the onboard sidetone / sleep properties
-            // are several writes that may stop midway: send the old value
-            // back so the device matches ("onboard" hands back to hardware).
+            // colour and both DPI axes are several writes that may stop
+            // midway: send the old value back so the device matches
+            // ("onboard" hands back to hardware). Onboard-memory writes are
+            // not sent again: a Bragi store sequence puts back what it
+            // changed itself (`bragi::store_in_software`).
             self.settings = before;
-            if let Some(old) = old {
+            let onboard = self.controls().iter().any(|c| c.key == key && c.persistent);
+            if let Some(old) = old.filter(|_| !onboard) {
                 if let Err(re) = self.write(key, &old) {
                     e = anyhow!(
                         "{e:#}; restoring the previous value also failed ({re:#}), the device may hold part of the change"
@@ -1251,10 +1254,14 @@ mod tests {
             ["sw false", "store 0x01 3", "store 0x07 0"]
         );
         assert_eq!(p.report_rate, Some(500));
-        // A failed store keeps the old value.
-        assert!(p
+        // A failed store keeps the old value and is not sent again (the
+        // store sequence puts back what it changed).
+        log.lock().unwrap().clear();
+        let e = p
             .set(SettingKey::ReportRate, SettingValue::Int(250))
-            .is_err());
+            .unwrap_err();
+        assert!(!format!("{e:#}").contains("restoring"), "{e:#}");
+        assert!(log.lock().unwrap().is_empty());
         assert_eq!(p.settings.get("report_rate"), Some(&SettingValue::Int(500)));
 
         // Reconnect: nothing is written back, the device's values win.

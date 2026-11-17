@@ -908,8 +908,9 @@ impl UniversalMouse {
     /// Like NGENUITY: the first `ff` ack for the packet decides; status 1
     /// means failure and the packet is sent again (at most [`ACK_RETRIES`]
     /// times), any other status is accepted. A write without a mouse reply
-    /// is done at its ack; no ack within [`ACK_WAIT`] is not an error here
-    /// (the read-backs check what matters).
+    /// is done at its ack, and an error when every try was refused; no ack
+    /// within [`ACK_WAIT`] is not an error here (the read-backs check what
+    /// matters).
     fn query(&mut self, req: &[u8]) -> Result<Option<Vec<u8>>> {
         let (cmd, sub) = (req[0], req[1]);
         let write = is_write(cmd, sub);
@@ -926,7 +927,16 @@ impl UniversalMouse {
                 return Ok(Some(reply.clone()));
             }
             let first = reports.iter().find_map(|r| ack_status(r, cmd, sub));
-            if first != Some(ACK_FAILURE) || attempt == ACK_RETRIES {
+            if first != Some(ACK_FAILURE) {
+                break;
+            }
+            if attempt == ACK_RETRIES {
+                if write {
+                    bail!(
+                        "the mouse refused {cmd:02x} {sub:02x} (ack status 1, sent {} times)",
+                        ACK_RETRIES + 1
+                    );
+                }
                 break;
             }
             warn!(
@@ -954,7 +964,11 @@ impl UniversalMouse {
             }
             // DPI button: fb 08 <stage> <code u16 LE>.
             [0xfb, 0x08, stage, lo, hi, ..] => {
-                let dpi = SettingValue::Int((i64::from(u16::from_le_bytes([*lo, *hi])) + 1) * 50);
+                let dpi = (i64::from(u16::from_le_bytes([*lo, *hi])) + 1) * 50;
+                if !(200..=i64::from(self.caps.max_dpi)).contains(&dpi) {
+                    return;
+                }
+                let dpi = SettingValue::Int(dpi);
                 let s = &mut self.settings;
                 merge_setting(s, SettingKey::Dpi, dpi.clone());
                 if let Some(&key) = STAGES.get(usize::from(*stage)) {
@@ -1025,14 +1039,20 @@ impl UniversalMouse {
         use SettingKey::*;
         let save_lift = self.caps.save_lift;
         let mut q = |req: &[u8]| self.query(req);
+        // Storing everything (`None`) stops at the first failure: say what
+        // is already saved.
+        let partly = |e: anyhow::Error, saved: &str| match key {
+            None => e.context(format!("{saved} saved to device memory, the rest not")),
+            Some(_) => e,
+        };
         if matches!(key, None | Some(Dpi | ReportRate)) {
             store_table(&mut q)?;
         }
         if matches!(key, None | Some(Brightness)) {
-            store_brightness(&mut q)?;
+            store_brightness(&mut q).map_err(|e| partly(e, "DPI table"))?;
         }
         if save_lift && matches!(key, None | Some(LiftOffDistance)) {
-            store_lift(&mut q)?;
+            store_lift(&mut q).map_err(|e| partly(e, "DPI table and brightness"))?;
         }
         Ok(())
     }
@@ -2346,6 +2366,82 @@ mod tests {
             get_setting(&s, SettingKey::DpiStageActive),
             Some(&SettingValue::Int(5))
         );
+    }
+
+    /// A Haste 2 Wireless adapter on `dev` (a plain file in place of hidraw).
+    fn universal_on(dev: Option<HidrawDevice>, root: &std::path::Path) -> UniversalMouse {
+        let Family::Universal { caps, .. } = HASTE_2_WIRELESS.family else {
+            unreachable!()
+        };
+        UniversalMouse {
+            spec: &HASTE_2_WIRELESS,
+            id: DeviceId {
+                vendor_id: HP,
+                product_id: 0x0f98,
+                instance: "fake".into(),
+            },
+            dev,
+            cabled: false,
+            rates: R1K,
+            caps,
+            user: SettingsMap::new(),
+            settings: SettingsMap::new(),
+            battery: BatteryState {
+                label: "Mouse".into(),
+                percent: None,
+                charging: false,
+                present: true,
+            },
+            online: true,
+            sync: false,
+            last_resync: None,
+            resync_error: None,
+            mask: 0,
+            last_link: None,
+            last_battery: None,
+            failures: 0,
+            last_error: None,
+            paths: ConfigPaths {
+                root: root.to_path_buf(),
+                config_toml: root.join("config.toml"),
+                devices_dir: root.join("devices"),
+                profiles_dir: root.join("profiles"),
+                remaps_dir: root.join("remaps"),
+            },
+        }
+    }
+
+    #[test]
+    fn a_write_refused_on_every_try_is_an_error() {
+        let root = std::env::temp_dir().join(format!("hako-universal-nak-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let node = root.join("hidraw");
+        let mut nak = pad(&[0xff, 0x01], 64);
+        nak[14..17].copy_from_slice(&[0x40, 0x01, ACK_FAILURE]);
+        // Each try writes its request over one record and reads the next.
+        std::fs::write(&node, nak.repeat(2 * (ACK_RETRIES + 1))).unwrap();
+        let mut m = universal_on(Some(HidrawDevice::open(&node).unwrap()), &root);
+        let err = m.query(&brightness_write(50)).unwrap_err();
+        assert!(err.to_string().contains("refused"), "{err}");
+        // Acked at once: done.
+        let mut ok = nak.clone();
+        ok[16] = 0x00;
+        std::fs::write(&node, [nak, ok].concat()).unwrap();
+        let mut m = universal_on(Some(HidrawDevice::open(&node).unwrap()), &root);
+        assert_eq!(m.query(&brightness_write(50)).unwrap(), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_dpi_event_outside_the_models_range_is_ignored() {
+        let mut m = universal_on(None, &std::env::temp_dir());
+        // `fb 08 <stage> <code u16 LE>`: stage 2 at 1600 DPI (code 31).
+        m.event(&[0xfb, 0x08, 0x01, 31, 0x00]);
+        let dpi = |m: &UniversalMouse| get_setting(&m.settings, SettingKey::Dpi).cloned();
+        assert_eq!(dpi(&m), Some(SettingValue::Int(1600)));
+        // Code ffff would read as 3.2 million DPI.
+        m.event(&[0xfb, 0x08, 0x01, 0xff, 0xff]);
+        assert_eq!(dpi(&m), Some(SettingValue::Int(1600)));
     }
 
     /// Read-only probe: connection, battery and the live DPI table.
