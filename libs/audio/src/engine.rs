@@ -292,6 +292,19 @@ pub fn params_pod(params: &[(String, f32)]) -> Result<Vec<u8>> {
     )])
 }
 
+/// `Props` with an ALSA node's `api.alsa.headroom`: the frames it keeps
+/// beyond a cycle (PipeWire applies it when the node opens or its driver
+/// changes).
+pub fn headroom_pod(frames: u32) -> Result<Vec<u8>> {
+    props_pod(vec![Property::new(
+        spa::sys::SPA_PROP_params,
+        Value::Struct(vec![
+            Value::String("api.alsa.headroom".into()),
+            Value::Int(i32::try_from(frames)?),
+        ]),
+    )])
+}
+
 fn props_pod(properties: Vec<Property>) -> Result<Vec<u8>> {
     let object = Value::Object(Object {
         type_: spa::sys::SPA_TYPE_OBJECT_Props,
@@ -1147,6 +1160,16 @@ mod tests {
                     Value::Float(4.0),
                     Value::String("mix_l:Gain 1".into()),
                     Value::Float(0.5),
+                ])
+            )]
+        );
+        assert_eq!(
+            props(&headroom_pod(256).unwrap()),
+            [(
+                spa::sys::SPA_PROP_params,
+                Value::Struct(vec![
+                    Value::String("api.alsa.headroom".into()),
+                    Value::Int(256),
                 ])
             )]
         );

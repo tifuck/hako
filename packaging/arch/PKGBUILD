@@ -2,7 +2,7 @@
 # scripts/publish.sh sets pkgver and the checksum from each release's signed
 # SHA256SUMS; copy the file to the AUR repo after a release.
 pkgname=hako-bin
-pkgver=0.2.17
+pkgver=0.2.18
 pkgrel=1
 pkgdesc='Control panel for gaming keyboards, mice and headsets'
 arch=('x86_64')
@@ -19,7 +19,7 @@ conflicts=('hako')
 install=hako.install
 _dir="hako-${pkgver}-x86_64-linux"
 source=("${url}/releases/download/v${pkgver}/${_dir}.tar.gz")
-sha256sums=('e42fb15658ececc6f67cd4bf981aa3d898604a9fc58de4447d52856c0f887de6')
+sha256sums=('ef3ed2edbb67110681ad518155e848df124f04a654f31ab64c3520a8e9aa866d')
 
 package() {
   cd "$_dir"

@@ -27,7 +27,9 @@
 //! runs, and handed back to WirePlumber when the app, the strip or the graph
 //! goes.
 
-use crate::engine::{engine, fader_pod, params_pod, Direction, Engine, Graph, LinkHandle, Node};
+use crate::engine::{
+    engine, fader_pod, headroom_pod, params_pod, Direction, Engine, Graph, LinkHandle, Node,
+};
 use crate::{
     alsa_card, capture_level, card_capture_controls, current_input_source, db_to_gain, dsp_stages,
     effect_params, filter_chain_config, node_latency, pkill, plugins_for, pw_escape,
@@ -1023,6 +1025,51 @@ fn wanted_apps(scene: &Scene, up: &[&str], graph: &Graph) -> BTreeMap<u32, (Move
         .collect()
 }
 
+/// The ALSA capture devices `scene`'s hardware inputs take that keep less
+/// than `frames` of headroom and were not given it yet (`given`: frames by
+/// `object.serial`): `(id, object.serial, input id)`.
+///
+/// A device on another clock than the graph's driver is resampled to it, and
+/// PipeWire reads it `headroom` frames behind its fill. Onboard cards get
+/// 32, less than a USB driver's wakeup jitter: a read then finds too few
+/// frames, fails, and PipeWire speeds the device up to catch up, so its
+/// pitch climbs until a resync. One cycle of headroom absorbs that jitter.
+fn short_headroom(
+    scene: &Scene,
+    graph: &Graph,
+    frames: u32,
+    given: &HashMap<String, u32>,
+) -> Vec<(u32, String, String)> {
+    let mut short: Vec<(u32, String, String)> = Vec::new();
+    for input in &scene.inputs {
+        let InputKind::Hardware { sources } = &input.kind else {
+            continue;
+        };
+        for source in sources {
+            let Some((id, node)) = graph
+                .node_id(&source.node)
+                .and_then(|id| Some((id, graph.nodes.get(&id)?)))
+            else {
+                continue;
+            };
+            let headroom = node.props.get("api.alsa.headroom");
+            let (Some(headroom), Some(serial)) =
+                (headroom.and_then(|h| h.parse::<u32>().ok()), serial(node))
+            else {
+                continue;
+            };
+            if node.media_class == "Audio/Source"
+                && headroom < frames
+                && given.get(&serial) != Some(&frames)
+                && !short.iter().any(|(other, ..)| *other == id)
+            {
+                short.push((id, serial, input.id.clone()));
+            }
+        }
+    }
+    short
+}
+
 /// `(Source::alsa_input, Source::capture_percent)`.
 type CardWant = (Option<String>, Option<u8>);
 
@@ -1234,6 +1281,10 @@ pub struct MixerGraph {
     mono_sinks: BTreeMap<String, bool>,
     /// App streams moved into virtual inputs, by stream id.
     moved: BTreeMap<u32, Moved>,
+    /// Capture devices given headroom (`sync_headroom`): frames by
+    /// `object.serial`, which PipeWire never reuses.
+    // ponytail: never evicted (one entry per device node a source ever used).
+    headroom: HashMap<String, u32>,
     problems: Vec<StripProblem>,
     running: bool,
 }
@@ -1253,6 +1304,7 @@ impl MixerGraph {
             unreaped: Vec::new(),
             mono_sinks: BTreeMap::new(),
             moved: BTreeMap::new(),
+            headroom: HashMap::new(),
             problems: Vec::new(),
             running: false,
         }
@@ -1436,6 +1488,7 @@ impl MixerGraph {
             }
         }
 
+        self.sync_headroom(engine, scene, &mut problems);
         self.sync_links(engine, scene, &mut problems);
         self.sync_apps(engine, scene, &mut problems);
         let wanted = wanted_cards(scene);
@@ -1632,6 +1685,24 @@ impl MixerGraph {
                     );
                 }
                 Err(error) => problems.push(problem(&key.1, format!("link: {error:#}"))),
+            }
+        }
+    }
+
+    /// Give the capture devices sources take one cycle of headroom
+    /// (`short_headroom`) before they are linked. PipeWire applies it when a
+    /// device opens or its driver changes, so when linking makes it follow
+    /// another clock; one that already did gets it at its next change.
+    fn sync_headroom(&mut self, engine: &Engine, scene: &Scene, problems: &mut Vec<StripProblem>) {
+        let frames = self.latency;
+        let short = engine.with_graph(|graph| short_headroom(scene, graph, frames, &self.headroom));
+        for (id, serial, input) in short {
+            match headroom_pod(frames).and_then(|pod| engine.set_props(id, pod)) {
+                Ok(()) => {
+                    info!("mixer: capture device {id} gets {frames} frames of headroom");
+                    self.headroom.insert(serial, frames);
+                }
+                Err(error) => problems.push(problem(&input, format!("headroom: {error:#}"))),
             }
         }
     }
@@ -3256,6 +3327,47 @@ mod tests {
             ]
         );
         assert!(!links.iter().any(|(_, t, _)| t.0 == "hako-test-x-out_B1"));
+    }
+
+    /// ALSA capture devices short of a cycle of headroom get it once per
+    /// node; enough already, not ALSA or given it at this latency: left alone.
+    #[test]
+    fn capture_devices_get_a_cycle_of_headroom() {
+        let scene = scene();
+        let graph = graph_with(&[
+            (
+                "mic-a",
+                "Audio/Source",
+                &[("api.alsa.headroom", "32"), ("object.serial", "10")],
+            ),
+            (
+                "mic-b",
+                "Audio/Source",
+                &[("api.alsa.headroom", "256"), ("object.serial", "11")],
+            ),
+        ]);
+        let none = HashMap::new();
+        assert_eq!(
+            short_headroom(&scene, &graph, 256, &none),
+            [(1, "10".to_string(), "desk".to_string())]
+        );
+        assert_eq!(short_headroom(&scene, &graph, 512, &none).len(), 2);
+        // Given at this latency: not again until the device reopens with it.
+        let given = HashMap::from([("10".to_string(), 256)]);
+        assert!(short_headroom(&scene, &graph, 256, &given).is_empty());
+        // A new latency is given again.
+        assert_eq!(short_headroom(&scene, &graph, 512, &given).len(), 2);
+
+        // Not an ALSA device (no headroom), or not a capture device.
+        let graph = graph_with(&[
+            ("mic-a", "Audio/Source", &[("object.serial", "10")]),
+            (
+                "mic-b",
+                "Audio/Sink",
+                &[("api.alsa.headroom", "32"), ("object.serial", "11")],
+            ),
+        ]);
+        assert!(short_headroom(&scene, &graph, 256, &none).is_empty());
     }
 
     /// A one-channel sink (Bluetooth HFP, a speakerphone) gets the strip's
