@@ -5,7 +5,15 @@
 //! bound (motion, MSC, SYN, autorepeat) is forwarded 1:1 through one shared
 //! virtual device. Turbo, toggle and macros run on deadlines from
 //! [`Mapper::tick`], never sleeps.
+//!
+//! Hotkeys (`crate::hotkeys`) see every key event this engine reads first,
+//! as the physical key (before remaps): from grabbed nodes, and from every
+//! other keyboard / mouse, read without a grab while a hotkey is live. A
+//! Block chord grabs its devices and is held back here.
 
+use crate::hotkeys::inputs::{self, node_number, InputNode};
+use crate::hotkeys::matcher::{Node, NodeInfo};
+use crate::hotkeys::{HotkeyLink, RemapDevice, VOICE_KEYBOARD_NAME};
 use anyhow::Result;
 use evdev::{
     uinput::VirtualDevice, AttributeSet, AttributeSetRef, Device, EventSummary, EventType,
@@ -25,9 +33,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{broadcast, mpsc};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const VIRTUAL_NAME: &str = "hako remap";
+/// Our own virtual devices: never read (injected keys must not fire hotkeys).
+pub(crate) const OWN_DEVICES: [&str; 2] = [VIRTUAL_NAME, VOICE_KEYBOARD_NAME];
+/// How often keyboards / mice are listed again for hotkeys (hotplug).
+const LISTEN_SCAN: Duration = Duration::from_secs(2);
+/// How often the keys of a held Hold / Smart chord are re-read.
+const HOLD_WATCH: Duration = Duration::from_millis(250);
 const KEY_ESC: u16 = 1;
 /// Upper bound on one poll; also the command latency.
 const IDLE_WAIT: Duration = Duration::from_millis(100);
@@ -157,7 +171,17 @@ pub struct RemapEngine {
 }
 
 impl RemapEngine {
+    #[cfg(test)]
     pub fn start(paths: ConfigPaths, events: broadcast::Sender<AdapterEvent>) -> Self {
+        Self::start_with(paths, events, None)
+    }
+
+    /// `hotkeys`: fed every key event read (None: remaps only).
+    pub fn start_with(
+        paths: ConfigPaths,
+        events: broadcast::Sender<AdapterEvent>,
+        hotkeys: Option<HotkeyLink>,
+    ) -> Self {
         let inner = Arc::new(Mutex::new(EngineInner {
             paths,
             devices: Vec::new(),
@@ -174,6 +198,13 @@ impl RemapEngine {
             axes: Axes::default(),
             mapper: Mapper::default(),
             session: None,
+            hotkeys,
+            listeners: Vec::new(),
+            inputs: Vec::new(),
+            open_failed: BTreeSet::new(),
+            fed: BTreeMap::new(),
+            next_scan: Instant::now(),
+            next_watch: Instant::now(),
         };
         // Without the thread `rx` is dropped: every request then fails with
         // "remap engine stopped" instead of the daemon going down.
@@ -595,6 +626,13 @@ impl Session {
     }
 }
 
+/// A keyboard / mouse node read without a grab, for hotkeys only.
+struct Listener {
+    path: PathBuf,
+    node: Node,
+    dev: Device,
+}
+
 struct Worker {
     inner: Arc<Mutex<EngineInner>>,
     edits: Arc<Mutex<()>>,
@@ -605,6 +643,17 @@ struct Worker {
     axes: Axes,
     mapper: Mapper,
     session: Option<Session>,
+    hotkeys: Option<HotkeyLink>,
+    /// Keyboards / mice read for hotkeys that no slot has grabbed.
+    listeners: Vec<Listener>,
+    /// Every keyboard / mouse node, from the last scan.
+    inputs: Vec<InputNode>,
+    /// Nodes a listener failed to open; tried again after the next scan.
+    open_failed: BTreeSet<PathBuf>,
+    /// The nodes the hotkey matcher was last told it is fed from.
+    fed: BTreeMap<Node, NodeInfo>,
+    next_scan: Instant,
+    next_watch: Instant,
 }
 
 impl Worker {
@@ -703,10 +752,13 @@ impl Worker {
         }
 
         self.sync_grabs();
+        self.sync_listeners(Instant::now());
         self.wait();
         self.read_slots();
+        self.read_listeners();
         self.read_session();
         self.expire_session();
+        self.watch_hotkeys(Instant::now());
         self.mapper.tick(Instant::now());
         self.flush();
         true
@@ -718,10 +770,185 @@ impl Worker {
         self.mapper
             .release_forwarded(idx, |code| bindings.contains_key(&code));
         slot.bindings = bindings;
-        if slot.bindings.is_empty() {
+        if !self.wants_grab(idx) {
             self.ungrab(idx);
         }
         self.flush();
+        self.publish_remaps();
+    }
+
+    /// Remaps, or a hotkey that holds keys back on this device.
+    fn wants_grab(&self, idx: usize) -> bool {
+        let s = &self.slots[idx];
+        !s.bindings.is_empty()
+            || self.hotkeys.as_ref().is_some_and(|hk| {
+                hk.wants_grab(s.id.vendor_id, &s.pids, s.kind == DeviceKind::Keyboard)
+            })
+    }
+
+    /// Tell hotkeys what is remapped where (conflicts, `with_remaps`).
+    fn publish_remaps(&self) {
+        let Some(hk) = &self.hotkeys else { return };
+        let devices = (lock(&self.inner).devices.iter())
+            .map(|d| RemapDevice {
+                name: d.name.clone(),
+                vendor_id: d.id.vendor_id,
+                pids: d.pids.pids.clone(),
+                own: d.pids.own,
+                remapped: d.bindings.keys().copied().collect(),
+            })
+            .collect();
+        hk.set_devices(devices);
+    }
+
+    /// Hotkeys: read every keyboard / mouse no slot has grabbed (no grab)
+    /// while a hotkey is live or a hotkey capture runs, and tell the
+    /// matcher which nodes it is fed from.
+    fn sync_listeners(&mut self, now: Instant) {
+        let Some(hk) = self.hotkeys.clone() else {
+            return;
+        };
+        hk.set_remap_capture(self.session.is_some());
+        if now >= self.next_scan {
+            self.next_scan = now + LISTEN_SCAN;
+            self.open_failed.clear();
+            let inputs = inputs::scan(&OWN_DEVICES);
+            if inputs != self.inputs {
+                self.inputs = inputs;
+                hk.set_inputs(self.inputs.clone());
+            }
+        }
+        let want = hk.want_listen();
+        let grabbed: BTreeSet<&PathBuf> = self.slots.iter().flat_map(|s| &s.paths).collect();
+        let inputs = &self.inputs;
+        // Like grabs (`sync_grabs`): after a user switch an open fd would
+        // keep reading someone else's keys.
+        self.listeners.retain(|l| {
+            want && !grabbed.contains(&l.path)
+                && inputs.iter().any(|i| i.path == l.path && i.readable)
+        });
+        let wanted = inputs.iter().filter(|i| {
+            want && i.readable
+                && !grabbed.contains(&i.path)
+                && !self.open_failed.contains(&i.path)
+                && !self.listeners.iter().any(|l| l.path == i.path)
+        });
+        let (mut opened, mut failed) = (Vec::new(), Vec::new());
+        for i in wanted {
+            // Reads assume a node that never blocks the remap thread.
+            match Device::open(&i.path).and_then(|dev| dev.set_nonblocking(true).map(|()| dev)) {
+                Ok(dev) => opened.push(Listener {
+                    path: i.path.clone(),
+                    node: i.node,
+                    dev,
+                }),
+                Err(e) => {
+                    debug!("listen on {}: {e}", i.path.display());
+                    failed.push(i.path.clone());
+                }
+            }
+        }
+        self.open_failed.extend(failed);
+        for l in opened {
+            // Keys already down (a modifier held as it was plugged in).
+            if let Some(down) = held_keys(&l.dev) {
+                hk.resync(l.node, &down, now);
+            }
+            self.listeners.push(l);
+        }
+        let fed = self.node_infos();
+        if fed != self.fed {
+            self.fed = fed.clone();
+            hk.sync_nodes(fed, now);
+        }
+    }
+
+    /// What the hotkey matcher needs to know about each node it is fed from.
+    fn node_infos(&self) -> BTreeMap<Node, NodeInfo> {
+        let remapped = |s: &Slot| s.bindings.keys().copied().collect();
+        let mut out = BTreeMap::new();
+        for s in &self.slots {
+            for node in s.paths.iter().filter_map(|p| node_number(p)) {
+                let info = NodeInfo {
+                    vendor_id: s.id.vendor_id,
+                    product_ids: s.pids.clone(),
+                    grabbed: true,
+                    remapped: remapped(s),
+                };
+                out.insert(node, info);
+            }
+        }
+        for l in &self.listeners {
+            let Some(i) = self.inputs.iter().find(|i| i.path == l.path) else {
+                continue;
+            };
+            let owner = (self.slots.iter())
+                .find(|s| s.id.vendor_id == i.vendor_id && s.pids.contains(&i.product_id));
+            let mut product_ids = vec![i.product_id];
+            product_ids.extend(owner.iter().flat_map(|s| s.pids.iter().copied()));
+            let info = NodeInfo {
+                vendor_id: i.vendor_id,
+                product_ids,
+                grabbed: false,
+                remapped: owner.map(remapped).unwrap_or_default(),
+            };
+            out.insert(l.node, info);
+        }
+        out
+    }
+
+    /// (node, slot) of every grabbed node.
+    fn node_owners(&self) -> Vec<(Node, usize)> {
+        (self.slots.iter().enumerate())
+            .flat_map(|(i, s)| {
+                s.paths
+                    .iter()
+                    .filter_map(move |p| Some((node_number(p)?, i)))
+            })
+            .collect()
+    }
+
+    fn read_listeners(&mut self) {
+        let Some(hk) = &self.hotkeys else { return };
+        let now = Instant::now();
+        // A node that fails (unplugged) is dropped; the matcher releases its
+        // keys on the next sync.
+        self.listeners.retain_mut(|l| match l.dev.fetch_events() {
+            Ok(iter) => {
+                for ev in iter {
+                    if let EventSummary::Key(_, code, value) = ev.destructure() {
+                        hk.key(l.node, code.code(), value, now);
+                    }
+                }
+                true
+            }
+            Err(e) => e.kind() == std::io::ErrorKind::WouldBlock,
+        });
+    }
+
+    /// Hotkey deadlines, and the watchdog: while a Hold / Smart chord is
+    /// held its nodes are re-read, so a lost release cannot keep it on.
+    fn watch_hotkeys(&mut self, now: Instant) {
+        let Some(hk) = &self.hotkeys else { return };
+        hk.tick(now);
+        if now < self.next_watch {
+            return;
+        }
+        self.next_watch = now + HOLD_WATCH;
+        for node in hk.watch_nodes() {
+            let grabbed = (self.slots.iter())
+                .flat_map(|s| s.nodes.iter().zip(&s.paths))
+                .find(|(_, p)| node_number(p) == Some(node))
+                .map(|(d, _)| d);
+            let dev = grabbed.or_else(|| {
+                (self.listeners.iter())
+                    .find(|l| l.node == node)
+                    .map(|l| &l.dev)
+            });
+            if let Some(down) = dev.and_then(held_keys) {
+                hk.release_missing(node, &down, now);
+            }
+        }
     }
 
     /// Listening must not outlive an abandoned UI: every grab is released and
@@ -754,7 +981,7 @@ impl Worker {
         let now = Instant::now();
         for idx in 0..self.slots.len() {
             let slot = &self.slots[idx];
-            let want = !slot.bindings.is_empty() && self.session.is_none();
+            let want = self.wants_grab(idx) && self.session.is_none();
             let grabbed = !slot.nodes.is_empty();
             // The seat ACL goes away when the user switches session; open fds
             // would keep reading (and re-injecting) someone else's input.
@@ -821,6 +1048,12 @@ impl Worker {
             self.slots[idx].retry = now + OPEN_RETRY;
             return;
         }
+        let mut owners = self.node_owners();
+        owners.extend(
+            nodes
+                .iter()
+                .filter_map(|(p, _)| Some((node_number(p)?, idx))),
+        );
         let slot = &mut self.slots[idx];
         slot.retry = now + OPEN_RETRY;
         let mut grabbed = Vec::new();
@@ -873,7 +1106,16 @@ impl Worker {
                 }
             }
             for ev in fresh {
-                self.mapper.event(idx, &slot.bindings, ev, now);
+                let at = (idx, node_number(&path));
+                route(
+                    &mut self.mapper,
+                    self.hotkeys.as_ref(),
+                    &owners,
+                    at,
+                    &slot.bindings,
+                    ev,
+                    now,
+                );
             }
             slot.nodes.push(dev);
             slot.paths.push(path);
@@ -1023,6 +1265,7 @@ impl Worker {
                     .iter()
                     .flat_map(|s| s.nodes.iter().map(|(_, d, _)| d)),
             )
+            .chain(self.listeners.iter().map(|l| &l.dev))
             .map(|d| libc::pollfd {
                 fd: d.as_raw_fd(),
                 events: libc::POLLIN,
@@ -1042,13 +1285,23 @@ impl Worker {
 
     fn read_slots(&mut self) {
         let now = Instant::now();
+        let owners = self.node_owners();
         let mut dead = Vec::new();
         for (idx, slot) in self.slots.iter_mut().enumerate() {
-            for dev in &mut slot.nodes {
+            for (dev, path) in slot.nodes.iter_mut().zip(&slot.paths) {
                 match dev.fetch_events() {
                     Ok(iter) => {
+                        let at = (idx, node_number(path));
                         for ev in iter {
-                            self.mapper.event(idx, &slot.bindings, ev, now);
+                            route(
+                                &mut self.mapper,
+                                self.hotkeys.as_ref(),
+                                &owners,
+                                at,
+                                &slot.bindings,
+                                ev,
+                                now,
+                            );
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -1239,6 +1492,48 @@ impl Worker {
     }
 }
 
+/// One event of grabbed slot `idx` from node `node`: hotkeys see it first,
+/// as the physical key; a held-back chord key stops there.
+fn route(
+    mapper: &mut Mapper,
+    hotkeys: Option<&HotkeyLink>,
+    owners: &[(Node, usize)],
+    (idx, node): (usize, Option<Node>),
+    bindings: &HashMap<u16, RemapBinding>,
+    ev: InputEvent,
+    now: Instant,
+) {
+    if let (Some(hk), Some(node), EventSummary::Key(_, code, value)) =
+        (hotkeys, node, ev.destructure())
+    {
+        let v = hk.key(node, code.code(), value, now);
+        let slot = |n: Node| owners.iter().find(|o| o.0 == n).map(|o| o.1);
+        for (n, c) in v.press {
+            if let Some(s) = slot(n) {
+                mapper.forward(s, InputEvent::new(EventType::KEY.0, c, 1));
+            }
+        }
+        // Apps saw the chord's modifiers go down: they see them go up now,
+        // and never the half chord.
+        for (n, c) in v.release {
+            if let Some(s) = slot(n) {
+                mapper.release_forwarded(s, |k| k == c);
+            }
+        }
+        // A remapped key still goes to its remap (the user chose both).
+        if v.swallow && !bindings.contains_key(&code.code()) {
+            mapper.scan.remove(&idx);
+            return;
+        }
+    }
+    mapper.event(idx, bindings, ev, now);
+}
+
+/// The keys `dev` reports held (`EVIOCGKEY`); None when it cannot say.
+fn held_keys(dev: &Device) -> Option<Vec<u16>> {
+    Some(dev.get_key_state().ok()?.iter().map(|k| k.code()).collect())
+}
+
 /// Mouse: may use any button but left / right. Keyboard: any key but Esc
 /// (Esc cancels listening).
 fn source_allowed(kind: DeviceKind, code: u16) -> bool {
@@ -1305,7 +1600,7 @@ fn drop_unreadable<D>(
 }
 
 /// The calling user may still open `path` (seat ACL / group).
-fn readable(path: &Path) -> bool {
+pub(crate) fn readable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes())
         // SAFETY: valid NUL-terminated path; access() only reads it.
@@ -2221,6 +2516,13 @@ mod tests {
             axes: Axes::default(),
             mapper: Mapper::default(),
             session: None,
+            hotkeys: None,
+            listeners: Vec::new(),
+            inputs: Vec::new(),
+            open_failed: BTreeSet::new(),
+            fed: BTreeMap::new(),
+            next_scan: Instant::now(),
+            next_watch: Instant::now(),
         };
         let capture = |worker: &mut Worker| {
             worker.session = Some(Session {
@@ -2856,5 +3158,178 @@ mod tests {
         m.event(0, &bindings, scan(0x70007), t0);
         m.event(0, &bindings, syn, t0);
         assert_eq!(keys(&mut m), [(4, 0x70007), (0, 0)]);
+    }
+
+    /// A Block hotkey's trigger is held back and its modifier released for
+    /// apps; a key that is not the chord passes.
+    #[test]
+    fn a_block_chord_never_reaches_apps_by_half() {
+        use crate::hotkeys::HotkeyService;
+        use hako_core::hotkey::{
+            HotkeyAction, HotkeyBinding, HotkeyMode, PassThrough, KEY_LEFTCTRL, KEY_SPACE,
+        };
+        let block = HotkeyBinding {
+            mode: HotkeyMode::Hold,
+            pass: PassThrough::Block,
+            ..HotkeyBinding::new(
+                "d",
+                HotkeyAction::VoiceTranscribe,
+                &[KEY_LEFTCTRL, KEY_SPACE],
+            )
+        };
+        let svc = HotkeyService::with_bindings(vec![block]);
+        let hk = svc.link();
+        svc.set_active(BTreeSet::from([HotkeyAction::VoiceTranscribe]));
+        assert!(hk.wants_grab(0x1234, &[0x0001], true));
+        assert!(
+            !hk.wants_grab(0x1234, &[0x0001], false),
+            "a mouse has no part in it"
+        );
+        let t0 = Instant::now();
+        let info = NodeInfo {
+            vendor_id: 0x1234,
+            product_ids: vec![0x0001],
+            grabbed: true,
+            remapped: BTreeSet::new(),
+        };
+        hk.sync_nodes(BTreeMap::from([(3, info)]), t0);
+        let owners = [(3, 0)];
+        let bindings = HashMap::new();
+        let mut m = Mapper::default();
+        let mut send = |code: u16, value: i32| {
+            for ev in [
+                InputEvent::new(EventType::KEY.0, code, value),
+                InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0),
+            ] {
+                route(&mut m, Some(&hk), &owners, (0, Some(3)), &bindings, ev, t0);
+            }
+            m.take()
+                .iter()
+                .filter(|e| e.event_type() == EventType::KEY)
+                .map(|e| (e.code(), e.value()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(send(KEY_LEFTCTRL, 1), [(29, 1)]);
+        assert_eq!(send(KEY_SPACE, 1), [(29, 0)], "Ctrl up, Space held back");
+        assert!(svc.held_modifiers().is_empty());
+        assert!(send(KEY_SPACE, 2).is_empty());
+        assert!(send(KEY_SPACE, 0).is_empty());
+        assert!(send(KEY_LEFTCTRL, 0).is_empty());
+        // Ctrl+C is not the chord: untouched.
+        assert_eq!(send(KEY_LEFTCTRL, 1), [(29, 1)]);
+        assert_eq!(send(C.0, 1), [(46, 1)]);
+        assert_eq!(send(C.0, 0), [(46, 0)]);
+        assert_eq!(send(KEY_LEFTCTRL, 0), [(29, 0)]);
+        assert!(m.held.is_empty());
+    }
+
+    /// Live: needs write access to /dev/uinput and read access to the event
+    /// nodes it creates. Presses Ctrl+Space on a virtual keyboard bound as a
+    /// Block hotkey: Start then Stop, and apps (the remap device) see Ctrl
+    /// go down and up but never Space. Run:
+    /// `cargo test -p hakod live_uinput_hotkey -- --ignored --exact`.
+    #[test]
+    #[ignore]
+    fn live_uinput_hotkey_loopback() {
+        use crate::hotkeys::{HotkeyEdge, HotkeyService};
+        use evdev::{BusType, InputId};
+        use hako_core::hotkey::{
+            update_hotkeys, HotkeyAction, HotkeyBinding, HotkeyMode, HotkeyScope, HotkeysFile,
+            PassThrough, KEY_LEFTCTRL, KEY_SPACE,
+        };
+        let pid = 0x5703;
+        let root = std::env::temp_dir().join(format!("hako-remap-hotkey-{}", std::process::id()));
+        let paths = ConfigPaths {
+            config_toml: root.join("config.toml"),
+            devices_dir: root.join("devices"),
+            profiles_dir: root.join("profiles"),
+            remaps_dir: root.join("remaps"),
+            root,
+        };
+        paths.ensure().unwrap();
+        let binding = HotkeyBinding {
+            mode: HotkeyMode::Hold,
+            pass: PassThrough::Block,
+            scope: HotkeyScope::Device {
+                vendor_id: 0x1234,
+                product_id: pid,
+            },
+            ..HotkeyBinding::new(
+                "d",
+                HotkeyAction::VoiceTranscribe,
+                &[KEY_LEFTCTRL, KEY_SPACE],
+            )
+        };
+        update_hotkeys(&paths, |_| {
+            Ok(HotkeysFile {
+                bindings: vec![binding],
+                ..HotkeysFile::default()
+            })
+        })
+        .unwrap();
+        let remap_nodes = || -> BTreeSet<PathBuf> {
+            evdev::enumerate()
+                .filter(|(_, d)| d.name() == Some(VIRTUAL_NAME))
+                .map(|(p, _)| p)
+                .collect()
+        };
+        let before = remap_nodes();
+        let mut kbd = VirtualDevice::builder()
+            .unwrap()
+            .name("hako test keyboard")
+            .input_id(InputId::new(BusType::BUS_USB, 0x1234, pid, 1))
+            .with_keys(&keyset(&[KEY_LEFTCTRL, KEY_SPACE, C.0]))
+            .unwrap()
+            .build()
+            .unwrap();
+        let events = broadcast::channel(64).0;
+        let hotkeys = HotkeyService::start(paths.clone(), events.clone());
+        let (tx, edges) = std::sync::mpsc::channel();
+        hotkeys.on_trigger(Box::new(move |_, edge| {
+            let _ = tx.send(edge);
+        }));
+        hotkeys.set_active(BTreeSet::from([HotkeyAction::VoiceTranscribe]));
+        let engine = RemapEngine::start_with(paths.clone(), events, Some(hotkeys.link()));
+        let id = DeviceId {
+            vendor_id: 0x1234,
+            product_id: pid,
+            instance: "live".into(),
+        };
+        let pids = RemapPids {
+            pids: vec![pid],
+            own: 1,
+        };
+        engine.attach(id.clone(), DeviceKind::Keyboard, pids, "Keyboard");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !engine.snapshot(&id).unwrap().grabbed {
+            assert!(Instant::now() < deadline, "{:?}", engine.snapshots());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let path = remap_nodes().difference(&before).next().cloned();
+        let mut out = Device::open(path.expect("hako virtual device")).unwrap();
+        out.set_nonblocking(true).unwrap();
+        let key = |code, v| InputEvent::new(EventType::KEY.0, code, v);
+        let pause = || std::thread::sleep(Duration::from_millis(50));
+        kbd.emit(&[key(KEY_LEFTCTRL, 1)]).unwrap();
+        pause();
+        kbd.emit(&[key(KEY_SPACE, 1)]).unwrap();
+        let wait = Duration::from_secs(5);
+        assert_eq!(edges.recv_timeout(wait).unwrap(), HotkeyEdge::Start);
+        assert!(hotkeys.held_modifiers().is_empty());
+        std::thread::sleep(Duration::from_millis(300));
+        kbd.emit(&[key(KEY_SPACE, 0)]).unwrap();
+        assert_eq!(edges.recv_timeout(wait).unwrap(), HotkeyEdge::Stop);
+        kbd.emit(&[key(KEY_LEFTCTRL, 0)]).unwrap();
+        pause();
+        let mut seen = Vec::new();
+        while let Ok(evs) = out.fetch_events() {
+            seen.extend(
+                evs.filter(|e| e.event_type() == EventType::KEY)
+                    .map(|e| (e.code(), e.value())),
+            );
+        }
+        assert_eq!(seen, [(29, 1), (29, 0)]);
+        engine.shutdown();
+        let _ = std::fs::remove_dir_all(paths.root);
     }
 }

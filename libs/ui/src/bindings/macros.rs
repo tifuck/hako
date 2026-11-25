@@ -1,6 +1,6 @@
 //! Macro editor: record, a timeline of the take, and an editable step list.
 
-use super::editor::{apply, interval_row, Draft};
+use super::editor::{apply, interval_row, Draft, RecordWait};
 use super::{key_name, keycap_chip, Cx};
 use crate::theme::{self, pal};
 use crate::widgets;
@@ -315,7 +315,7 @@ pub(super) fn editor(ui: &mut Ui, cx: &mut Cx, source: EvdevKey, draft: &mut Dra
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Discard").clicked() {
-                    draft.awaiting_record = false;
+                    draft.record = None;
                     cx.cancel_capture(false);
                 }
                 if widgets::primary_button(ui, "Stop").clicked() {
@@ -337,7 +337,10 @@ pub(super) fn editor(ui: &mut Ui, cx: &mut Cx, source: EvdevKey, draft: &mut Dra
                 theme::pal().danger,
             );
             if rec.clicked() {
-                draft.awaiting_record = true;
+                draft.record = Some(RecordWait::Requested {
+                    at: ui.input(|i| i.time),
+                    error: cx.remaps.last_error.clone(),
+                });
                 cx.out.push(UiCommand::StartCapture {
                     device_id: cx.d.id.clone(),
                     role: CaptureRole::Record,

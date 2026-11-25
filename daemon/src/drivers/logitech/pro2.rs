@@ -19,6 +19,7 @@
 //!   blocked placeholder (no extra request on the wire). Research:
 //!   `docs/onboard-writes/logitech.md`.
 
+use super::device::PROBE_MISSES;
 use super::hidpp::{
     self, answered, ext_rr_supported, mouse_effect_payload, rr_supported, MouseEffectKind,
     EXT_RR_HZ, FEAT_ADJ_DPI, FEAT_EXT_DPI, FEAT_EXT_RR, FEAT_FEATURE_SET, FEAT_ONBOARD,
@@ -134,6 +135,8 @@ pub struct LogitechMouseAdapter {
     host_mode: bool,
     /// Why the last read of DPI / report rate failed, until one succeeds.
     sync_error: Option<String>,
+    /// While probing: unanswered requests in a row.
+    probe_misses: Option<u8>,
 }
 
 #[derive(Default, Clone)]
@@ -191,6 +194,7 @@ impl LogitechMouseAdapter {
             probe_incomplete: true,
             host_mode: false,
             sync_error: None,
+            probe_misses: None,
         };
         migrate_mouse_effect(&mut a.settings);
         a.online = read_sysfs_battery().map(|b| b.online).unwrap_or(true);
@@ -231,7 +235,10 @@ impl LogitechMouseAdapter {
             }
         }
         if self.probe_incomplete {
-            match self.probe_features() {
+            self.probe_misses = Some(0);
+            let probed = self.probe_features();
+            self.probe_misses = None;
+            match probed {
                 Ok(()) => {
                     self.probe_incomplete = false;
                     self.last_error = None;
@@ -278,15 +285,25 @@ impl LogitechMouseAdapter {
     }
 
     fn hidpp_long(&mut self, feature_idx: u8, fnid: u8, params: &[u8]) -> Result<[u8; 20]> {
+        if self.probe_misses.is_some_and(|n| n >= PROBE_MISSES) {
+            bail!("no answer to {PROBE_MISSES} requests in a row");
+        }
         let dev = self.dev.as_mut().context("no dev")?;
-        hidpp::request(
+        let r = hidpp::request(
             dev,
             self.device_index,
             feature_idx,
             fnid,
             params,
             &mut |_| {},
-        )
+        );
+        if let Some(n) = &mut self.probe_misses {
+            *n = match &r {
+                Err(e) if hidpp::unanswered(e) => n.saturating_add(1),
+                _ => 0,
+            };
+        }
+        r
     }
 
     fn root_get_feature(&mut self, feature_id: u16) -> Result<Option<(u8, u8)>> {
@@ -1167,6 +1184,58 @@ mod effect_tests {
         // Nonzero type/version bytes do not turn index 0 (ROOT) into the feature.
         assert_eq!(parse_get_feature(&reply(0, 0x20, 2), FEAT_ONBOARD), None);
         assert_eq!(parse_get_feature(&reply(0, 0, 2), FEAT_ROOT), Some((0, 2)));
+    }
+
+    /// The mouse goes quiet mid-probe: after PROBE_MISSES unanswered requests
+    /// nothing more is sent (no 64 table reads at 250 ms each).
+    #[test]
+    fn a_probe_stops_asking_a_mouse_that_went_silent() {
+        let root = std::env::temp_dir().join(format!("hako-pro2-silent-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let node = root.join("hidraw");
+        std::fs::write(&node, []).unwrap();
+        let mut a = LogitechMouseAdapter {
+            id: DeviceId {
+                vendor_id: RX_VID,
+                product_id: RX_PID,
+                instance: "hidpp:1".into(),
+            },
+            dev: Some(HidrawDevice::open(&node).unwrap()),
+            device_index: 1,
+            settings: SettingsMap::new(),
+            batteries: Vec::new(),
+            last_error: None,
+            last_bat: Instant::now(),
+            last_sync: Instant::now(),
+            paths: ConfigPaths {
+                config_toml: root.join("config.toml"),
+                devices_dir: root.join("devices"),
+                profiles_dir: root.join("profiles"),
+                remaps_dir: root.join("remaps"),
+                root: root.clone(),
+            },
+            has_rgb: false,
+            feat: FeatureMap::default(),
+            lod: None,
+            rgb_cluster: 0,
+            rgb_slots: Default::default(),
+            rr_hz: Vec::new(),
+            online: true,
+            last_probe: Instant::now(),
+            index_known: true,
+            probe_incomplete: true,
+            host_mode: false,
+            sync_error: None,
+            probe_misses: Some(0),
+        };
+        assert!(a.probe_features().is_err());
+        let sent = std::fs::metadata(&node).unwrap().len();
+        assert_eq!(sent, 20 * u64::from(PROBE_MISSES));
+        // Outside the probe every request goes out.
+        a.probe_misses = None;
+        assert!(a.hidpp_long(0x00, 0x01, &[]).is_err());
+        assert_eq!(std::fs::metadata(&node).unwrap().len(), sent + 20);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

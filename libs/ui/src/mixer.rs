@@ -224,6 +224,30 @@ enum Edit {
     Local(MixerOp),
     /// Fader move: local now, sent through `LiveGains` (`true` = released).
     Gain(Strip, f32, bool),
+    /// A whole-strip op built from the local copy as this frame's earlier
+    /// edits left it (a rename committed by clicking Mute keeps the mute),
+    /// then sent; None (strip gone) sends nothing.
+    Put(PutOp),
+}
+
+type PutOp = Box<dyn FnOnce(&Scene) -> Option<MixerOp>>;
+
+fn put_input(id: &str, f: impl FnOnce(&mut Input) + 'static) -> Edit {
+    let id = id.to_string();
+    Edit::Put(Box::new(move |s| {
+        let mut input = s.inputs.iter().find(|i| i.id == id)?.clone();
+        f(&mut input);
+        Some(MixerOp::PutInput { input })
+    }))
+}
+
+fn put_output(id: &str, f: impl FnOnce(&mut Output) + 'static) -> Edit {
+    let id = id.to_string();
+    Edit::Put(Box::new(move |s| {
+        let mut output = s.outputs.iter().find(|o| o.id == id)?.clone();
+        f(&mut output);
+        Some(MixerOp::PutOutput { output })
+    }))
 }
 
 /// The mixer as the page shows it.
@@ -237,6 +261,10 @@ pub struct MixerUi {
     error: Option<String>,
     /// Mixer edits sent and not answered yet (the client sets this).
     pub busy: bool,
+    /// Inputs whose device list changed locally since the daemon's state was
+    /// last adopted: ops address a device by position, so the drawer's device
+    /// controls wait for the daemon's list (the change may be refused).
+    reordered: HashSet<String>,
     selected: Option<Strip>,
     live: LiveGains,
     dialog: Option<Dialog>,
@@ -290,6 +318,7 @@ impl MixerUi {
         if self.state.is_none() || settled {
             if let Some(r) = self.remote.take() {
                 self.state = Some(r);
+                self.reordered.clear();
             }
         }
     }
@@ -499,7 +528,8 @@ impl HakoAppUi {
             match &selected {
                 Some(Strip::Input(id)) => {
                     if let Some(i) = scene.inputs.iter().find(|i| &i.id == id) {
-                        input_drawer(ui, drawer, i, &st, &mut edits);
+                        let settled = !self.mixer.reordered.contains(id);
+                        input_drawer(ui, drawer, i, &st, settled, &mut edits);
                     }
                 }
                 Some(Strip::Output(id)) => {
@@ -628,6 +658,7 @@ impl HakoAppUi {
             state: Some(st),
             live,
             selected,
+            reordered,
             ..
         } = &mut self.mixer
         else {
@@ -636,27 +667,45 @@ impl HakoAppUi {
         let mut send = Vec::new();
         let mut refused = None;
         for e in edits {
-            match e {
-                Edit::Send(op) => match st.file.apply(&op) {
-                    Ok(()) => {
-                        if matches!(
-                            op,
-                            MixerOp::RemoveInput { .. } | MixerOp::RemoveOutput { .. }
-                        ) {
-                            *selected = None;
-                        }
-                        send.push(op);
-                    }
-                    Err(e) => refused = Some(e),
+            let op = match e {
+                Edit::Send(op) => op,
+                Edit::Put(f) => match f(&st.file.live) {
+                    Some(op) => op,
+                    None => continue,
                 },
                 Edit::Local(op) => {
                     let _ = st.file.apply(&op);
+                    continue;
                 }
                 Edit::Gain(strip, db, release) => {
                     if st.file.apply(&strip.gain_op(db)).is_ok() {
                         live.set(strip, db, release);
                     }
+                    continue;
                 }
+            };
+            let before = match &op {
+                MixerOp::PutInput { input } => {
+                    Some((&input.id, source_nodes(&st.file.live, &input.id)))
+                }
+                _ => None,
+            };
+            match st.file.apply(&op) {
+                Ok(()) => {
+                    if let Some((id, nodes)) = before {
+                        if source_nodes(&st.file.live, id) != nodes {
+                            reordered.insert(id.clone());
+                        }
+                    }
+                    if matches!(
+                        op,
+                        MixerOp::RemoveInput { .. } | MixerOp::RemoveOutput { .. }
+                    ) {
+                        *selected = None;
+                    }
+                    send.push(op);
+                }
+                Err(e) => refused = Some(e),
             }
         }
         if !send.is_empty() {
@@ -1310,6 +1359,14 @@ pub(crate) fn shows_dial(i: &Input) -> bool {
     i.chatmix.is_some() || matches!(i.kind, InputKind::Virtual { .. })
 }
 
+/// Input `id`'s devices in order (what source ops count by).
+fn source_nodes(scene: &Scene, id: &str) -> Vec<String> {
+    match scene.inputs.iter().find(|i| i.id == id).map(|i| &i.kind) {
+        Some(InputKind::Hardware { sources }) => sources.iter().map(|s| s.node.clone()).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn new_source(d: &AudioDevice) -> Source {
     Source {
         node: d.node.clone(),
@@ -1471,14 +1528,10 @@ fn input_drawer(
     drawer: &mut Drawer,
     i: &Input,
     st: &MixerState,
+    settled: bool,
     edits: &mut Vec<Edit>,
 ) {
     let key = Strip::Input(i.id.clone());
-    let put = |f: &dyn Fn(&mut Input)| {
-        let mut next = i.clone();
-        f(&mut next);
-        Edit::Send(MixerOp::PutInput { input: next })
-    };
     let virt = device_rows(i) == DeviceRows::Virtual;
     let kind = if virt {
         "Virtual input"
@@ -1502,18 +1555,20 @@ fn input_drawer(
                     apps_row(ui, i, apps, st, edits);
                 }
                 InputKind::Hardware { sources } => {
-                    if device_rows(i) == DeviceRows::Merged {
-                        ui.add_space(theme::SPACE_SM);
-                        ui.label(egui::RichText::new("Devices").color(pal().text));
-                        for (k, s) in sources.iter().enumerate() {
-                            ui.push_id(k, |ui| merged_row(ui, i, k, s, st, edits));
+                    ui.add_enabled_ui(settled, |ui| {
+                        if device_rows(i) == DeviceRows::Merged {
+                            ui.add_space(theme::SPACE_SM);
+                            ui.label(egui::RichText::new("Devices").color(pal().text));
+                            for (k, s) in sources.iter().enumerate() {
+                                ui.push_id(k, |ui| merged_row(ui, i, k, s, st, edits));
+                            }
+                        } else {
+                            device_row(ui, i, sources.first(), st, edits);
                         }
-                    } else {
-                        device_row(ui, i, sources.first(), st, edits);
-                    }
-                    if !sources.is_empty() {
-                        merge_link(ui, i, sources, st, edits);
-                    }
+                        if !sources.is_empty() {
+                            merge_link(ui, i, sources, st, edits);
+                        }
+                    });
                 }
             }
             if shows_dial(i) {
@@ -1532,7 +1587,7 @@ fn input_drawer(
                         let labels = ["Not linked", "Game side", "Chat side"];
                         if let Some(k) = widgets::segmented(ui, seg_id, &labels, Some(current)) {
                             let side = [None, Some(ChatMixSide::Game), Some(ChatMixSide::Chat)][k];
-                            edits.push(put(&|n| n.chatmix = side));
+                            edits.push(put_input(&i.id, move |n| n.chatmix = side));
                         }
                     },
                 );
@@ -1540,7 +1595,7 @@ fn input_drawer(
         },
     );
     if let Some(label) = renamed {
-        edits.push(put(&|n| n.label = label.clone()));
+        edits.push(put_input(&i.id, move |n| n.label = label));
     }
     chain_section(
         ui,
@@ -1965,11 +2020,6 @@ fn output_drawer(
     edits: &mut Vec<Edit>,
 ) {
     let key = Strip::Output(o.id.clone());
-    let put = |f: &dyn Fn(&mut Output)| {
-        let mut next = o.clone();
-        f(&mut next);
-        Edit::Send(MixerOp::PutOutput { output: next })
-    };
     let virt = matches!(o.kind, OutputKind::Virtual { .. });
     let kind = if virt {
         "Virtual microphone"
@@ -2003,12 +2053,11 @@ fn output_drawer(
                                         .clicked()
                                         && &d.node != sink
                                     {
-                                        edits.push(put(&|n| {
-                                            n.kind = OutputKind::Hardware {
-                                                sink: d.node.clone(),
-                                                description: d.description.clone(),
-                                            }
-                                        }));
+                                        let kind = OutputKind::Hardware {
+                                            sink: d.node.clone(),
+                                            description: d.description.clone(),
+                                        };
+                                        edits.push(put_output(&o.id, move |n| n.kind = kind));
                                     }
                                 }
                             });
@@ -2018,7 +2067,7 @@ fn output_drawer(
         },
     );
     if let Some(label) = renamed {
-        edits.push(put(&|n| n.label = label.clone()));
+        edits.push(put_output(&o.id, move |n| n.label = label));
     }
     chain_section(
         ui,
@@ -2419,6 +2468,97 @@ mod tests {
         app.mixer.receive(MixerState::default());
         app.mixer.sync(false);
         assert_eq!(app.mixer.state().unwrap().file.live.inputs.len(), 1);
+    }
+
+    /// A drawer's whole-strip op in the same frame as a strip button keeps
+    /// that button's change.
+    #[test]
+    fn a_put_after_a_route_keeps_the_route() {
+        let mut app = HakoAppUi::default();
+        let mut st = MixerState::default();
+        st.file.enabled = true;
+        st.file.live.inputs.push(virt_input("game", "Hako_Game"));
+        st.file.live.outputs.push(Output {
+            id: "B1".into(),
+            label: "Mic".into(),
+            kind: OutputKind::Virtual {
+                node_name: "Hako_Mic".into(),
+            },
+            chain: EffectChain::default(),
+            gain_db: 0.0,
+            mute: false,
+            mono: false,
+        });
+        app.mixer.receive(st);
+        app.mixer.sync(false);
+        let mut out = Vec::new();
+        app.apply_edits(
+            vec![
+                Edit::Send(MixerOp::SetRoute {
+                    input: "game".into(),
+                    output: "B1".into(),
+                    on: true,
+                }),
+                put_input("game", |n| n.label = "Games".into()),
+                Edit::Send(MixerOp::SetOutputMute {
+                    output: "B1".into(),
+                    mute: true,
+                }),
+                put_output("B1", |n| n.label = "Stream".into()),
+                put_input("gone", |n| n.label = "x".into()),
+            ],
+            &mut out,
+        );
+        let live = &app.mixer.state().unwrap().file.live;
+        assert_eq!(live.inputs[0].routes, ["B1"]);
+        assert_eq!(live.inputs[0].label, "Games");
+        assert!(live.outputs[0].mute);
+        assert_eq!(live.outputs[0].label, "Stream");
+        match out.as_slice() {
+            [UiCommand::PatchMixer(ops)] => match ops.as_slice() {
+                [_, MixerOp::PutInput { input }, _, MixerOp::PutOutput { output }] => {
+                    assert_eq!(input.routes, ["B1"]);
+                    assert!(output.mute);
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Device controls address a device by position: after a change to an
+    /// input's device list they wait for the daemon's list.
+    #[test]
+    fn a_changed_device_list_holds_device_controls_until_the_daemon_answers() {
+        let mut app = HakoAppUi::default();
+        let mut st = MixerState::default();
+        st.file.enabled = true;
+        st.file
+            .live
+            .inputs
+            .push(hw_input("voice", &["a", "b", "c"]));
+        app.mixer.receive(st.clone());
+        app.mixer.sync(false);
+        let voice = st.file.live.inputs[0].clone();
+        let mut out = Vec::new();
+        app.apply_edits(
+            vec![put_input("voice", |n| n.label = "Mic".into())],
+            &mut out,
+        );
+        assert!(app.mixer.reordered.is_empty(), "same devices");
+        app.apply_edits(vec![Edit::Send(unmerge_device(&voice, 0))], &mut out);
+        assert!(app.mixer.reordered.contains("voice"));
+        app.mixer.busy = true;
+        app.mixer.receive(st);
+        app.mixer.sync(false);
+        assert!(app.mixer.reordered.contains("voice"), "still in flight");
+        app.mixer.busy = false;
+        app.mixer.sync(false);
+        assert!(app.mixer.reordered.is_empty());
+        assert_eq!(
+            sources(&app.mixer.state().unwrap().file.live.inputs[0]).len(),
+            3
+        );
     }
 
     fn virt_input(id: &str, node: &str) -> Input {

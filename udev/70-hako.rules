@@ -5163,12 +5163,17 @@ KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="3367", ATTRS{idProduct}=
 
 # Logitech HID++ devices not listed above
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0005:046D:*", MODE="0660", TAG+="uaccess"
 
 # QMK / VIA keyboards: raw HID interface (usage page 0xFF60, usage 0x61).
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", PROGRAM="/bin/sh -c 'LC_ALL=C grep -qaP \"\x06\x60\xff\x09\x61\" /sys%p/device/report_descriptor'", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", PROGRAM="/bin/sh -c 'od -An -tx1 -v -w4096 /sys%p/device/report_descriptor | grep -qE \"(( 06 60 ff| 07 60 ff 00 00)( [0-9a-f][48]| [0-9a-f][59] [0-9a-f]{2}| [0-9a-f][6a] [0-9a-f]{2} [0-9a-f]{2}| [0-9a-f][7b] [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2})*( 09 61| 0a 61 00| 0b 61 00 00 00)| 0b 61 00 60 ff)( [0-9a-f][48]| [0-9a-f][59] [0-9a-f]{2}| [0-9a-f][6a] [0-9a-f]{2} [0-9a-f]{2}| [0-9a-f][7b] [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2})*( a1 01| a2 01 00| a3 01 00 00 00)\"'", MODE="0660", TAG+="uaccess"
 
 # HID LampArray / Dynamic Lighting devices (usage page 0x59, usage 0x01).
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", PROGRAM="/bin/sh -c 'od -An -tx1 -v -w4096 /sys%p/device/report_descriptor | grep -qE \"(( 05 59| 06 59 00| 07 59 00 00 00)( [0-9a-f][48]| [0-9a-f][59] [0-9a-f]{2}| [0-9a-f][6a] [0-9a-f]{2} [0-9a-f]{2}| [0-9a-f][7b] [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2})*( 09 01| 0a 01 00| 0b 01 00 00 00)| 0b 01 00 59 00)( [0-9a-f][48]| [0-9a-f][59] [0-9a-f]{2}| [0-9a-f][6a] [0-9a-f]{2} [0-9a-f]{2}| [0-9a-f][7b] [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2} [0-9a-f]{2})*( a1 01| a2 01 00| a3 01 00 00 00)\"'", MODE="0660", TAG+="uaccess"
 
 # Host-side remaps and macros inject through uinput.
 KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uinput"
+
+# App hotkeys and generic remaps: every keyboard and mouse (seat ACL only).
+KERNEL=="event*", SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ENV{ID_INPUT_MOUSE}=="1", TAG+="uaccess"

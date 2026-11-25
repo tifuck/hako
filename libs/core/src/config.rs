@@ -15,6 +15,8 @@ use std::sync::Mutex;
 
 /// Serialises every read-modify-write of `config.toml` in this process.
 static APP_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+/// Numbers [`write_atomic`]'s temp files within this process.
+static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -86,6 +88,9 @@ pub struct AuxConfig {
     pub set_default_sink: bool,
     #[serde(default)]
     pub effects: AuxEffectChain,
+    /// Keys this version does not know: kept when the file is rewritten.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 fn default_true() -> bool {
@@ -111,6 +116,7 @@ impl Default for AuxConfig {
             capture_percent: default_capture_percent(),
             set_default_sink: false,
             effects: AuxEffectChain::default(),
+            extra: toml::Table::new(),
         }
     }
 }
@@ -221,7 +227,6 @@ pub fn update_app_config<T>(
 /// leaves a truncated file and concurrent writers never share a temp file.
 /// A symlink (dotfile managers) stays one: the file it points to is replaced.
 pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
     let resolved = fs::read_link(path).ok().map(|target| {
         fs::canonicalize(path).unwrap_or_else(|_| match path.parent() {
             Some(dir) => dir.join(&target),
@@ -232,13 +237,23 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let tmp = path.with_extension(format!(
         "toml.{}.{}.tmp",
         std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
+        WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    let open = |tmp: &Path| {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(tmp)
+    };
+    let mut f = match open(&tmp) {
+        // Left by a crashed process that had this pid: no writer uses it.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(&tmp);
+            open(&tmp)?
+        }
+        f => f?,
+    };
     let written = f
         .write_all(text.as_bytes())
         .and_then(|()| f.sync_all())
@@ -609,6 +624,37 @@ mod tests {
         assert_eq!(back["future"]["level"].as_integer(), Some(3), "{text}");
         assert_eq!(back["theme"].as_str(), Some("dark"), "{text}");
         assert_eq!(load_app_config(&paths).unwrap().theme, "dark");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unknown_aux_keys_survive_a_rewrite() {
+        let text = "version = 1\n[aux]\nauto_enable = true\nfuture_aux = \"x\"\n[aux.future_table]\nn = 2\n";
+        let cfg: AppConfig = toml::from_str(text).unwrap();
+        assert!(cfg.aux.auto_enable);
+        assert!(cfg.extra.is_empty(), "{:?}", cfg.extra);
+        let back: toml::Table = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back["aux"]["future_aux"].as_str(), Some("x"));
+        assert_eq!(back["aux"]["future_table"]["n"].as_integer(), Some(2));
+        assert_eq!(back["aux"]["auto_enable"].as_bool(), Some(true));
+    }
+
+    /// A temp file a crashed process with this pid left behind does not
+    /// block writes.
+    #[test]
+    fn a_stale_temp_file_does_not_block_a_write() {
+        let root = std::env::temp_dir().join(format!("hako-cfg-stale-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("x.toml");
+        let next = WRITE_SEQ.load(Ordering::Relaxed);
+        // Other tests write too: cover the numbers they may take first.
+        for seq in next..next + 64 {
+            let stale = path.with_extension(format!("toml.{}.{seq}.tmp", std::process::id()));
+            fs::write(stale, "stale").unwrap();
+        }
+        write_atomic(&path, "version = 1\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "version = 1\n");
         let _ = fs::remove_dir_all(root);
     }
 

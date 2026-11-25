@@ -21,8 +21,10 @@
 //! `src/protocol.rs`) and OpenRGB `RazerController.h` (`RAZER_STORAGE_SAVE`).
 //! Stages are read, validated and read back around the write; stored
 //! brightness is read back. DPI, poll rate, idle time and game mode stay as
-//! they are: their storage byte is disputed or absent. Evidence and the
-//! per-model exclusions: docs/onboard-writes/razer.md.
+//! they are: their storage byte is disputed or absent. HyperPolling mice get
+//! their rate a second time for the stored profile slot, so there the rate
+//! is an onboard write: behind the opt-in, and never re-sent on connect.
+//! Evidence and the per-model exclusions: docs/onboard-writes/razer.md.
 
 use super::models::{spec_for, Battery, Family, Link, Poll, Spec, Wave, CLASSIC_RATES};
 use super::protocol::{self as p, Cmd, Effect, MAX_DPI_STAGES, NOSTORE, VARSTORE};
@@ -294,6 +296,7 @@ impl RazerAdapter {
                 continue;
             }
             let result = match get_setting(&self.chosen, key).cloned() {
+                _ if key == SettingKey::ReportRate && rate_stored(&self.link) => self.read(key),
                 Some(v) if self.holds(key, &v) => Ok(()),
                 Some(v) => self.write(key, &v, NOSTORE),
                 None => self.read(key),
@@ -558,6 +561,12 @@ impl RazerAdapter {
     }
 }
 
+/// The poll rate goes to the onboard profile too: HyperPolling mice repeat
+/// it with argument 0x01, which Synapse sends as the stored profile slot.
+fn rate_stored(link: &Link) -> bool {
+    matches!(link.poll, Poll::V2(_, true))
+}
+
 /// (lighting, DPI stages) the save mode stores for this model.
 fn storable(spec: &Spec) -> (bool, bool) {
     let lighting = !spec.leds.is_empty() && spec.volatile_lighting.is_none();
@@ -709,14 +718,19 @@ fn controls(spec: &Spec, link: &Link, settings: &SettingsMap, stages: usize) -> 
         Poll::V2(r, _) => r,
     };
     if !rates.is_empty() {
-        c.push(SettingMeta::dropdown(
+        let rate = SettingMeta::dropdown(
             K::ReportRate,
             "Report rate",
             rates
                 .iter()
                 .map(|&hz| SettingOption::int(i64::from(hz), &format!("{hz} Hz")))
                 .collect(),
-        ));
+        );
+        c.push(if rate_stored(link) {
+            rate.persistent()
+        } else {
+            rate
+        });
     }
     if spec.game_txn.is_some() {
         c.push(SettingMeta::toggle(K::GameMode, "Game mode"));
@@ -988,6 +1002,46 @@ mod tests {
         };
         assert_eq!(rates(0x00c0), 3);
         assert_eq!(rates(0x00c1), 6);
+    }
+
+    /// The mice's second HyperPolling set is the stored profile slot: an
+    /// onboard write, never sent by a reconnect. Keyboards (one set) and
+    /// classic rates stay ordinary.
+    #[test]
+    fn hyperpolling_mouse_rate_is_an_onboard_write() {
+        let persistent = |pid| {
+            let spec = spec_for(pid).unwrap();
+            controls(
+                spec,
+                &spec.link_for(pid),
+                &SettingsMap::new(),
+                MAX_DPI_STAGES,
+            )
+            .into_iter()
+            .find(|m| m.key == SettingKey::ReportRate)
+            .unwrap()
+            .persistent
+        };
+        assert!(persistent(0x00c1), "Viper V3 Pro");
+        assert!(!persistent(0x0287), "BlackWidow V4");
+        assert!(!persistent(0x007c), "DeathAdder V2 Pro");
+
+        let root = std::env::temp_dir().join(format!("hako-razer-rate-{}", std::process::id()));
+        let fake = std::sync::Arc::new(std::sync::Mutex::new(Fake::new()));
+        let mut a = fake_adapter(0x00c1, &fake, &root);
+        a.set(SettingKey::ReportRate, SettingValue::Int(500))
+            .unwrap();
+        assert_eq!(writes(&fake), [(0x00, 0x40), (0x00, 0x40)], "a user change");
+        // The device now runs another rate: the reconnect only reads it.
+        a.chosen
+            .insert("report_rate".into(), SettingValue::Int(1000));
+        a.connect();
+        assert!(!writes(&fake).contains(&(0x00, 0x40)));
+        assert_eq!(
+            get_setting(&a.settings, SettingKey::ReportRate),
+            Some(&SettingValue::Int(500))
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A device that keeps what it is set to and answers like the firmware:

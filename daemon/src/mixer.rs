@@ -27,7 +27,7 @@ use hako_core::mixer::{
     MixerStatus, OutputKind, Scene, Source, MAX_MIXER_OPS,
 };
 use hako_core::protocol::{is_new_error, AdapterEvent};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -603,9 +603,14 @@ fn is_fader(op: &MixerOp) -> bool {
 /// the actor restarts with a fresh graph after a backoff.
 fn supervise(mut actor: Actor, rx: mpsc::Receiver<Cmd>) {
     let mut crashes = 0;
+    let mut backlog = VecDeque::new();
     loop {
         let started = Instant::now();
-        if catch_unwind(AssertUnwindSafe(|| actor.run(&rx))).is_ok() {
+        if catch_unwind(AssertUnwindSafe(|| {
+            actor.run(&rx, std::mem::take(&mut backlog));
+        }))
+        .is_ok()
+        {
             return;
         }
         if started.elapsed() >= RECOVERED_AFTER {
@@ -632,7 +637,48 @@ fn supervise(mut actor: Actor, rx: mpsc::Receiver<Cmd>) {
             });
             return;
         }
-        std::thread::sleep(wait);
+        if !back_off(&mut actor, &rx, wait, &mut backlog) {
+            return;
+        }
+    }
+}
+
+/// Wait out a crashed engine's backoff. Its graph is down already, so a
+/// teardown is answered at once; other commands wait in `backlog` for the
+/// restart. `false`: stopped.
+fn back_off(
+    actor: &mut Actor,
+    rx: &mpsc::Receiver<Cmd>,
+    wait: Duration,
+    backlog: &mut VecDeque<Cmd>,
+) -> bool {
+    let until = Instant::now() + wait;
+    loop {
+        match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            Ok(Cmd::Shutdown(reply)) => {
+                let _ = reply.send(());
+                return false;
+            }
+            Ok(Cmd::Reset(reply)) => {
+                // Edits before it are kept, not built: the graph stays down.
+                for cmd in std::mem::take(backlog) {
+                    match cmd {
+                        Cmd::Apply(file, done) => {
+                            actor.file = file;
+                            if let Some(done) = done {
+                                let _ = done.send(());
+                            }
+                        }
+                        cmd => backlog.push_back(cmd),
+                    }
+                }
+                actor.reset();
+                let _ = reply.send(());
+            }
+            Ok(cmd) => backlog.push_back(cmd),
+            Err(RecvTimeoutError::Timeout) => return true,
+            Err(RecvTimeoutError::Disconnected) => return false,
+        }
     }
 }
 
@@ -655,6 +701,9 @@ fn tell_default(
             None
         }
         Err(e) => {
+            // A failed release may have dropped the claim already: the retry
+            // tells it again whichever way.
+            *told = None;
             let error = format!("{e:#}");
             let new = failed.as_ref().is_none_or(|(old, _)| *old != error);
             *failed = Some((error.clone(), Instant::now() + DEFAULT_RETRY));
@@ -697,10 +746,11 @@ struct Actor {
 }
 
 impl Actor {
-    fn run(&mut self, rx: &mpsc::Receiver<Cmd>) {
+    /// `backlog`: commands that came in while it was down, handled first.
+    fn run(&mut self, rx: &mpsc::Receiver<Cmd>, mut backlog: VecDeque<Cmd>) {
         let mut next = None;
         loop {
-            let cmd = match next.take() {
+            let cmd = match next.take().or_else(|| backlog.pop_front()) {
                 Some(cmd) => Ok(cmd),
                 None => rx.recv_timeout(HEAL),
             };
@@ -713,6 +763,10 @@ impl Actor {
                     if let Some(reply) = reply {
                         let _ = reply.send(());
                     }
+                }
+                Ok(Cmd::Dial(game, chat)) if !backlog.is_empty() => {
+                    self.dial = (game, chat);
+                    self.sync();
                 }
                 Ok(Cmd::Dial(game, chat)) => {
                     (self.dial, next) = latest_dial((game, chat), rx);
@@ -979,6 +1033,48 @@ mod tests {
         assert_eq!((told, failed.is_none()), (Some(true), true));
         assert_eq!(tell_default(&mut told, &mut failed, true, fails), None);
         assert_eq!(calls.get(), 2, "told: not again");
+
+        // A failed release (it may have dropped the claim anyway) is not
+        // "told": `Hako_Game` coming back claims it again.
+        assert!(tell_default(&mut told, &mut failed, false, fails).is_some());
+        assert_eq!(told, None);
+        failed.as_mut().unwrap().1 = Instant::now();
+        let claimed = std::cell::Cell::new(false);
+        tell_default(&mut told, &mut failed, true, |game| {
+            claimed.set(game);
+            Ok(())
+        });
+        assert!(claimed.get(), "claimed again");
+        assert_eq!(told, Some(true));
+    }
+
+    /// A stop during a crashed engine's backoff is answered at once.
+    #[test]
+    fn a_stop_does_not_wait_out_a_crash_backoff() {
+        let paths = paths("crash-stop");
+        let (mixer, mut events) = service(&paths);
+        let (reply, done) = mpsc::channel();
+        mixer.tx.send(Cmd::Panic(reply)).unwrap();
+        assert_eq!(done.recv(), Err(mpsc::RecvError));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut told = false;
+        while !told && Instant::now() < deadline {
+            match events.try_recv() {
+                Ok(AdapterEvent::Error { message, .. }) => told = message.contains("crashed"),
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(told, "no Error event");
+        let started = Instant::now();
+        mixer.reset().unwrap();
+        mixer.shutdown();
+        assert!(
+            started.elapsed() < RESTART_FIRST / 2,
+            "{:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&paths.root);
     }
 
     /// A burst of dial reports is one sync with the last; whatever came

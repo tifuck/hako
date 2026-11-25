@@ -283,20 +283,11 @@ impl Adapter {
             last_poll: None,
         };
         info!("{} open", spec.name);
+        // Extra controls (the Elo 7.1 Air's auto-off, stored where is unknown)
+        // are only sent for a user change, never again on open.
         let mut result = Ok(());
         if get_setting(&a.settings, SettingKey::Effect).is_some() {
             result = a.apply_lighting();
-        }
-        let extra: Vec<_> = a
-            .lights
-            .as_ref()
-            .map(|l| l.extra_controls())
-            .unwrap_or_default();
-        for meta in extra {
-            if let (Some(v), Some(l)) = (get_setting(&a.settings, meta.key).cloned(), &mut a.lights)
-            {
-                result = result.and(l.set_extra(meta.key, &v));
-            }
         }
         a.last_error = result.err().map(|e| e.to_string());
         Ok(vec![Box::new(a)])
@@ -574,6 +565,86 @@ mod tests {
         let e = a.set(SettingKey::Effect, stat).unwrap_err();
         assert!(e.to_string().contains("applied, but not saved"), "{e}");
         assert_eq!(a.effect(), "static");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Lights with the Elo 7.1 Air's auto-off; logs every write.
+    struct Extra(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Lights for Extra {
+        fn effects(&self) -> &'static [(&'static str, &'static str)] {
+            headset::ELO_EFFECTS
+        }
+        fn apply(&mut self, effect: &str, _: [u8; 3]) -> Result<()> {
+            self.0.lock().unwrap().push(effect.into());
+            Ok(())
+        }
+        fn extra_controls(&self) -> Vec<SettingMeta> {
+            vec![SettingMeta::slider(
+                SettingKey::PmShutdown,
+                "Auto-off",
+                0.0,
+                60.0,
+                1.0,
+            )]
+        }
+        fn set_extra(&mut self, key: SettingKey, value: &SettingValue) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{} {value:?}", key.as_str()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn extra_settings_are_not_resent_on_open() {
+        let dir = std::env::temp_dir().join(format!("hako-roccat-extra-{}", std::process::id()));
+        let ctx = DriverCtx {
+            paths: ConfigPaths {
+                root: dir.clone(),
+                config_toml: dir.join("config.toml"),
+                devices_dir: dir.join("devices"),
+                profiles_dir: dir.join("profiles"),
+                remaps_dir: dir.join("remaps"),
+            },
+            audio: std::sync::Arc::new(hako_audio::AudioService::new()),
+            open: Vec::new(),
+            vendor_id: ROCCAT,
+            reopen: false,
+        };
+        ctx.paths.ensure().unwrap();
+        let spec = &headset::ELO_AIR;
+        let mut saved = SettingsMap::new();
+        merge_setting(
+            &mut saved,
+            SettingKey::Effect,
+            SettingValue::Text("static".into()),
+        );
+        merge_setting(&mut saved, SettingKey::PmShutdown, SettingValue::Int(10));
+        hako_core::config::save_device_settings(&ctx.paths, spec.vid, spec.pids[0], &saved)
+            .unwrap();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut opened = Adapter::open(
+            spec,
+            DeviceKind::Headset,
+            spec.pids[0],
+            "t".into(),
+            Box::new(Extra(log.clone())),
+            &ctx,
+        )
+        .unwrap();
+        // Lighting is re-applied; the auto-off is not.
+        assert_eq!(*log.lock().unwrap(), ["static"]);
+        opened[0]
+            .set(SettingKey::PmShutdown, SettingValue::Int(20))
+            .unwrap();
+        let sent = format!(
+            "{} {:?}",
+            SettingKey::PmShutdown.as_str(),
+            SettingValue::Int(20)
+        );
+        assert_eq!(*log.lock().unwrap(), ["static".to_string(), sent]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

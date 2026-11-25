@@ -1,0 +1,5518 @@
+{
+ "kws": {
+  "decoder": "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+  "dir": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01",
+  "encoder": "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+  "id": "kws-zipformer-gigaspeech-3.3m",
+  "joiner": "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+  "license": "apache-2.0",
+  "pieces": "bpe.model",
+  "sha256": "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a",
+  "size": 17626723,
+  "tokens": "tokens.txt",
+  "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2"
+ },
+ "models": [
+  {
+   "base_model": "MediaTek-Research/Breeze-ASR-25",
+   "files": [
+    {
+     "file": "Breeze-ASR-25-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "cb056e63e5606284637c8a9c6d35e3c544f190dd5d26335466c7e584e61815c4",
+     "size": 996526080,
+     "url": "https://huggingface.co/handy-computer/Breeze-ASR-25-gguf/resolve/c827f209c3fcb4956f49f9935ae04a0d88b7fae9/Breeze-ASR-25-Q4_K_M.gguf"
+    },
+    {
+     "file": "Breeze-ASR-25-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "c871fc811b33a16a5607c4d4166cfa2c0a1d359f7796e3da255e3e922f59139b",
+     "size": 1160366080,
+     "url": "https://huggingface.co/handy-computer/Breeze-ASR-25-gguf/resolve/c827f209c3fcb4956f49f9935ae04a0d88b7fae9/Breeze-ASR-25-Q5_K_M.gguf"
+    },
+    {
+     "file": "Breeze-ASR-25-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "4c7fe8eed7b36a00dc345e9825fb0f4ac717c38cc5a9292cd552c2f141e3b258",
+     "size": 1296353280,
+     "url": "https://huggingface.co/handy-computer/Breeze-ASR-25-gguf/resolve/c827f209c3fcb4956f49f9935ae04a0d88b7fae9/Breeze-ASR-25-Q6_K.gguf"
+    },
+    {
+     "file": "Breeze-ASR-25-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "1650c163cd1623d13b585368ffd87d7e669c5ff23014511e0fa91bb4ce994756",
+     "size": 1667964224,
+     "url": "https://huggingface.co/handy-computer/Breeze-ASR-25-gguf/resolve/c827f209c3fcb4956f49f9935ae04a0d88b7fae9/Breeze-ASR-25-Q8_0.gguf"
+    },
+    {
+     "file": "Breeze-ASR-25-F16.gguf",
+     "quant": "F16",
+     "sha256": "1ed33e23e1dd7183c7d60e8713d159a61bfa1852019e7a65fd04ec6042a44f98",
+     "size": 3106458208,
+     "url": "https://huggingface.co/handy-computer/Breeze-ASR-25-gguf/resolve/c827f209c3fcb4956f49f9935ae04a0d88b7fae9/Breeze-ASR-25-F16.gguf"
+    },
+    {
+     "file": "Breeze-ASR-25-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "b2ae64afd2bea002c0188bba34e868f208eca8ab2b5d1359bd5d4b052209851e",
+     "size": 3096013408,
+     "url": "https://huggingface.co/handy-computer/Breeze-ASR-25-gguf/resolve/c827f209c3fcb4956f49f9935ae04a0d88b7fae9/Breeze-ASR-25-BF16.gguf"
+    }
+   ],
+   "id": "breeze-asr-25",
+   "lang_detect": true,
+   "languages": [
+    "zh",
+    "en"
+   ],
+   "license": "apache-2.0",
+   "name": "Breeze-ASR-25",
+   "params": 1553229104,
+   "repo": "handy-computer/Breeze-ASR-25-gguf",
+   "rtf_cpu": 0.96,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "BF16": 2.29,
+    "F16": 2.29,
+    "Q4_K_M": 2.26,
+    "Q5_K_M": 2.25,
+    "Q6_K": 2.29,
+    "Q8_0": 2.27
+   }
+  },
+  {
+   "base_model": "nvidia/canary-180m-flash",
+   "files": [
+    {
+     "file": "canary-180m-flash-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "0bcbac1d05674625393ac6be663a04d34341e39ea14cd172d4cd35d958343da8",
+     "size": 139223840,
+     "url": "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/8b01fc77ac169a0a05c5c0332bbfe54acf65c26f/canary-180m-flash-Q4_K_M.gguf"
+    },
+    {
+     "file": "canary-180m-flash-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "73c4861a43fe848cc7a64c179c08da04e985efac03f3e4684a3f5e94a1bb33fe",
+     "size": 158704416,
+     "url": "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/8b01fc77ac169a0a05c5c0332bbfe54acf65c26f/canary-180m-flash-Q5_K_M.gguf"
+    },
+    {
+     "file": "canary-180m-flash-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "c0c6733fb8b268b1774b11778904fad8325334a2d3ab57cb7cd7ecf4b1fb01e0",
+     "size": 176291616,
+     "url": "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/8b01fc77ac169a0a05c5c0332bbfe54acf65c26f/canary-180m-flash-Q6_K.gguf"
+    },
+    {
+     "file": "canary-180m-flash-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "f942ab746040b531a29ab78ca3afc8dc9564efd8e4c942b5541e53644be9c408",
+     "size": 218447648,
+     "url": "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/8b01fc77ac169a0a05c5c0332bbfe54acf65c26f/canary-180m-flash-Q8_0.gguf"
+    },
+    {
+     "file": "canary-180m-flash-F16.gguf",
+     "quant": "F16",
+     "sha256": "ae293ae01819e3279c0e7ea8fb3e814e60ecb0380d68debd11d51e93da328871",
+     "size": 381632288,
+     "url": "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/8b01fc77ac169a0a05c5c0332bbfe54acf65c26f/canary-180m-flash-F16.gguf"
+    },
+    {
+     "file": "canary-180m-flash-F32.gguf",
+     "quant": "F32",
+     "sha256": "244ea53ee99e4763579143f7b0f8d001a42af8300aa1f7b4cbf44520a1314266",
+     "size": 756498208,
+     "url": "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/8b01fc77ac169a0a05c5c0332bbfe54acf65c26f/canary-180m-flash-F32.gguf"
+    }
+   ],
+   "id": "canary-180m-flash",
+   "lang_detect": false,
+   "languages": [
+    "en",
+    "de",
+    "es",
+    "fr"
+   ],
+   "license": "cc-by-4.0",
+   "name": "canary-180m-flash",
+   "params": 190816144,
+   "repo": "handy-computer/canary-180m-flash-gguf",
+   "rtf_cpu": 21.73,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 1.94,
+    "F32": 1.94,
+    "Q4_K_M": 1.93,
+    "Q5_K_M": 1.9,
+    "Q6_K": 1.93,
+    "Q8_0": 1.93
+   }
+  },
+  {
+   "base_model": "nvidia/canary-1b",
+   "files": [
+    {
+     "file": "canary-1b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "06b173162888d442d50e7ac0f909242c1f05d80004fc33ad3f99a69a09d14616",
+     "size": 729686912,
+     "url": "https://huggingface.co/handy-computer/canary-1b-gguf/resolve/0661f4894fc17556061f5ba2a16d30d516b6fd1b/canary-1b-Q4_K_M.gguf"
+    },
+    {
+     "file": "canary-1b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "3851e643f3ce996ab4f8b06233c95ad48499c16d48386b8187170465ce69a5c0",
+     "size": 837694336,
+     "url": "https://huggingface.co/handy-computer/canary-1b-gguf/resolve/0661f4894fc17556061f5ba2a16d30d516b6fd1b/canary-1b-Q5_K_M.gguf"
+    },
+    {
+     "file": "canary-1b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "2dc99af1a0436c28def9f348fa645e5b6106e6c838ce05d735142509e9f09b90",
+     "size": 934167680,
+     "url": "https://huggingface.co/handy-computer/canary-1b-gguf/resolve/0661f4894fc17556061f5ba2a16d30d516b6fd1b/canary-1b-Q6_K.gguf"
+    },
+    {
+     "file": "canary-1b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "e43f56067a2683a27147c852a26fc352a6791c240535ed6b6813adc9246186ca",
+     "size": 1162740352,
+     "url": "https://huggingface.co/handy-computer/canary-1b-gguf/resolve/0661f4894fc17556061f5ba2a16d30d516b6fd1b/canary-1b-Q8_0.gguf"
+    },
+    {
+     "file": "canary-1b-F16.gguf",
+     "quant": "F16",
+     "sha256": "f1c45494b21f6fe46af263be635337c5d7d6560ba4627e7b3505e4897ddc0bd1",
+     "size": 2047537792,
+     "url": "https://huggingface.co/handy-computer/canary-1b-gguf/resolve/0661f4894fc17556061f5ba2a16d30d516b6fd1b/canary-1b-F16.gguf"
+    },
+    {
+     "file": "canary-1b-F32.gguf",
+     "quant": "F32",
+     "sha256": "34072fa012f9c037012a95fbb8cfd20d23d9c6c75be21d221f59eb3b13b7d91c",
+     "size": 4086100608,
+     "url": "https://huggingface.co/handy-computer/canary-1b-gguf/resolve/0661f4894fc17556061f5ba2a16d30d516b6fd1b/canary-1b-F32.gguf"
+    }
+   ],
+   "id": "canary-1b",
+   "lang_detect": false,
+   "languages": [
+    "en",
+    "de",
+    "es",
+    "fr"
+   ],
+   "license": "cc-by-nc-4.0",
+   "name": "canary-1b",
+   "params": 1023768896,
+   "repo": "handy-computer/canary-1b-gguf",
+   "rtf_cpu": 6.48,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 1.55,
+    "F32": 1.55,
+    "Q4_K_M": 1.55,
+    "Q5_K_M": 1.57,
+    "Q6_K": 1.57,
+    "Q8_0": 1.55
+   }
+  },
+  {
+   "base_model": "nvidia/canary-1b-flash",
+   "files": [
+    {
+     "file": "canary-1b-flash-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "ba671f83391f22e81bb62b5d3a941d38afef7c14e56cbf24fbb455ca7de81f7a",
+     "size": 677141344,
+     "url": "https://huggingface.co/handy-computer/canary-1b-flash-gguf/resolve/c1a2a0729e7fe5c0ac99b5919fe274930b1b0793/canary-1b-flash-Q4_K_M.gguf"
+    },
+    {
+     "file": "canary-1b-flash-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "17f438ba2708841d526c1c26bf8b493ee98a01c4405d9a8afeeb47cd713680a9",
+     "size": 769563488,
+     "url": "https://huggingface.co/handy-computer/canary-1b-flash-gguf/resolve/c1a2a0729e7fe5c0ac99b5919fe274930b1b0793/canary-1b-flash-Q5_K_M.gguf"
+    },
+    {
+     "file": "canary-1b-flash-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "f49f6589a7375845a4ba80d490b94479185b9a7fabcd782abfb507d9d78c2fbf",
+     "size": 857603936,
+     "url": "https://huggingface.co/handy-computer/canary-1b-flash-gguf/resolve/c1a2a0729e7fe5c0ac99b5919fe274930b1b0793/canary-1b-flash-Q6_K.gguf"
+    },
+    {
+     "file": "canary-1b-flash-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "b23202a996d716c8d90c2c0da708ef72c9d340eda0e90c9e4a4436064de980ea",
+     "size": 1048131424,
+     "url": "https://huggingface.co/handy-computer/canary-1b-flash-gguf/resolve/c1a2a0729e7fe5c0ac99b5919fe274930b1b0793/canary-1b-flash-Q8_0.gguf"
+    },
+    {
+     "file": "canary-1b-flash-F16.gguf",
+     "quant": "F16",
+     "sha256": "2bab1f9907a93a355b530516d787b680838600b9dcb38401c37e3492f988f925",
+     "size": 1785657184,
+     "url": "https://huggingface.co/handy-computer/canary-1b-flash-gguf/resolve/c1a2a0729e7fe5c0ac99b5919fe274930b1b0793/canary-1b-flash-F16.gguf"
+    },
+    {
+     "file": "canary-1b-flash-F32.gguf",
+     "quant": "F32",
+     "sha256": "95983af8aa241b261ae6f59cc2a1d26a214ba2299250517be305c7a8357ea3fb",
+     "size": 3560372064,
+     "url": "https://huggingface.co/handy-computer/canary-1b-flash-gguf/resolve/c1a2a0729e7fe5c0ac99b5919fe274930b1b0793/canary-1b-flash-F32.gguf"
+    }
+   ],
+   "id": "canary-1b-flash",
+   "lang_detect": false,
+   "languages": [
+    "en",
+    "de",
+    "es",
+    "fr"
+   ],
+   "license": "cc-by-4.0",
+   "name": "canary-1b-flash",
+   "params": 892828592,
+   "repo": "handy-computer/canary-1b-flash-gguf",
+   "rtf_cpu": 8.85,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 1.62,
+    "F32": 1.62,
+    "Q4_K_M": 1.59,
+    "Q5_K_M": 1.64,
+    "Q6_K": 1.65,
+    "Q8_0": 1.62
+   }
+  },
+  {
+   "base_model": "nvidia/canary-1b-v2",
+   "files": [
+    {
+     "file": "canary-1b-v2-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "49e0a67e219bec95a254c2348460b6350e75a7ac6f93a131e48244b4c7cb53b9",
+     "size": 735476448,
+     "url": "https://huggingface.co/handy-computer/canary-1b-v2-gguf/resolve/692af661b140183b60e44f55ad03c59e1e77d078/canary-1b-v2-Q4_K_M.gguf"
+    },
+    {
+     "file": "canary-1b-v2-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "9c3a893c93795438baf9b4b1c853c39b60316c3a0d259a3ba6e284712f5ddb71",
+     "size": 836664032,
+     "url": "https://huggingface.co/handy-computer/canary-1b-v2-gguf/resolve/692af661b140183b60e44f55ad03c59e1e77d078/canary-1b-v2-Q5_K_M.gguf"
+    },
+    {
+     "file": "canary-1b-v2-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "6567c2d601fccacf9809fc230edefde05728340f65860bbe91cfd72d0a5eea9d",
+     "size": 931986144,
+     "url": "https://huggingface.co/handy-computer/canary-1b-v2-gguf/resolve/692af661b140183b60e44f55ad03c59e1e77d078/canary-1b-v2-Q6_K.gguf"
+    },
+    {
+     "file": "canary-1b-v2-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "224f83d1bc487b3303b495a7d6874912fdece93de19d1a04b550829c30a5d289",
+     "size": 1144290016,
+     "url": "https://huggingface.co/handy-computer/canary-1b-v2-gguf/resolve/692af661b140183b60e44f55ad03c59e1e77d078/canary-1b-v2-Q8_0.gguf"
+    },
+    {
+     "file": "canary-1b-v2-F16.gguf",
+     "quant": "F16",
+     "sha256": "eadda53cd1652d65cd12ff7ac4b7dc64cba1ce9837aae0c86e4222e8db89e320",
+     "size": 1966111456,
+     "url": "https://huggingface.co/handy-computer/canary-1b-v2-gguf/resolve/692af661b140183b60e44f55ad03c59e1e77d078/canary-1b-v2-F16.gguf"
+    },
+    {
+     "file": "canary-1b-v2-F32.gguf",
+     "quant": "F32",
+     "sha256": "b0b48b62b2c68f2779c49481de102715c5eaadbe084bca7fdddc7912f9c20e8b",
+     "size": 3920657120,
+     "url": "https://huggingface.co/handy-computer/canary-1b-v2-gguf/resolve/692af661b140183b60e44f55ad03c59e1e77d078/canary-1b-v2-F32.gguf"
+    }
+   ],
+   "id": "canary-1b-v2",
+   "lang_detect": false,
+   "languages": [
+    "bg",
+    "hr",
+    "cs",
+    "da",
+    "nl",
+    "en",
+    "et",
+    "fi",
+    "fr",
+    "de",
+    "el",
+    "hu",
+    "it",
+    "lv",
+    "lt",
+    "mt",
+    "pl",
+    "pt",
+    "ro",
+    "sk",
+    "sl",
+    "es",
+    "sv",
+    "ru",
+    "uk"
+   ],
+   "license": "cc-by-4.0",
+   "name": "canary-1b-v2",
+   "params": 983055728,
+   "repo": "handy-computer/canary-1b-v2-gguf",
+   "rtf_cpu": 8.32,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 1.92,
+    "F32": 1.92,
+    "Q4_K_M": 1.91,
+    "Q5_K_M": 1.93,
+    "Q6_K": 1.94,
+    "Q8_0": 1.91
+   }
+  },
+  {
+   "base_model": "nvidia/canary-qwen-2.5b",
+   "files": [
+    {
+     "file": "canary-qwen-2.5b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "db5162229d6fa22597d06a613bd9b543eddb3ee02e6afc5e759120fde02bebf7",
+     "size": 1737575808,
+     "url": "https://huggingface.co/handy-computer/canary-qwen-2.5b-gguf/resolve/a4480da236b7d99d7a12186868de021ef4ff5ced/canary-qwen-2.5b-Q4_K_M.gguf"
+    },
+    {
+     "file": "canary-qwen-2.5b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "d71b1d9ae442dc538665ed4df63a69520eb9be769ec0bc78c7d2f40040928306",
+     "size": 1983729024,
+     "url": "https://huggingface.co/handy-computer/canary-qwen-2.5b-gguf/resolve/a4480da236b7d99d7a12186868de021ef4ff5ced/canary-qwen-2.5b-Q5_K_M.gguf"
+    },
+    {
+     "file": "canary-qwen-2.5b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "25dba2a425113e73d626cc3db6148d925cbd7ead6872b631b7ef4d927788be31",
+     "size": 2208697728,
+     "url": "https://huggingface.co/handy-computer/canary-qwen-2.5b-gguf/resolve/a4480da236b7d99d7a12186868de021ef4ff5ced/canary-qwen-2.5b-Q6_K.gguf"
+    },
+    {
+     "file": "canary-qwen-2.5b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "d89aad1285d5bd5aa441c464d3a4cf37bd5474f70705408e71558d8627415b34",
+     "size": 2797548928,
+     "url": "https://huggingface.co/handy-computer/canary-qwen-2.5b-gguf/resolve/a4480da236b7d99d7a12186868de021ef4ff5ced/canary-qwen-2.5b-Q8_0.gguf"
+    },
+    {
+     "file": "canary-qwen-2.5b-F16.gguf",
+     "quant": "F16",
+     "sha256": "ae310ac25c1f190b8df4b29a301e936440e1d5306c23d6e5352e29400338ad87",
+     "size": 5076972928,
+     "url": "https://huggingface.co/handy-computer/canary-qwen-2.5b-gguf/resolve/a4480da236b7d99d7a12186868de021ef4ff5ced/canary-qwen-2.5b-F16.gguf"
+    },
+    {
+     "file": "canary-qwen-2.5b-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "5b29334e1d257503b95436608519c39436f0e2056251d17b7c5c001f862c00b8",
+     "size": 5076107136,
+     "url": "https://huggingface.co/handy-computer/canary-qwen-2.5b-gguf/resolve/a4480da236b7d99d7a12186868de021ef4ff5ced/canary-qwen-2.5b-BF16.gguf"
+    }
+   ],
+   "id": "canary-qwen-2.5b",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-4.0",
+   "name": "canary-qwen-2.5b",
+   "params": 2538486464,
+   "repo": "handy-computer/canary-qwen-2.5b-gguf",
+   "rtf_cpu": 2.51,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.63,
+    "F16": 1.63,
+    "Q4_K_M": 1.63,
+    "Q5_K_M": 1.63,
+    "Q6_K": 1.63,
+    "Q8_0": 1.63
+   }
+  },
+  {
+   "base_model": "CohereLabs/cohere-transcribe-03-2026",
+   "files": [
+    {
+     "file": "cohere-transcribe-03-2026-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "0ea56826d8bd5d74b7143a4a04e022dc1bb75452cfae49d98b6acb0c1d16a1fb",
+     "size": 1558162944,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/7353b6040bdc1be9e5a3823d99d5fe12afe88264/cohere-transcribe-03-2026-Q4_K_M.gguf"
+    },
+    {
+     "file": "cohere-transcribe-03-2026-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "14d02f1ad6dd77b3a60f82639879012c3adb4fe25c50a5a47a2c4c661daf1558",
+     "size": 1770270208,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/7353b6040bdc1be9e5a3823d99d5fe12afe88264/cohere-transcribe-03-2026-Q5_K_M.gguf"
+    },
+    {
+     "file": "cohere-transcribe-03-2026-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "094fb65b9d82d4a52db1d944152e4d7b6629f356bb3beaffdd0891eb527f24f3",
+     "size": 1972524544,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/7353b6040bdc1be9e5a3823d99d5fe12afe88264/cohere-transcribe-03-2026-Q6_K.gguf"
+    },
+    {
+     "file": "cohere-transcribe-03-2026-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "931916663432fd895423a4291a8400221802b288967ca2d435fc5e3141c9e71e",
+     "size": 2410655232,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/7353b6040bdc1be9e5a3823d99d5fe12afe88264/cohere-transcribe-03-2026-Q8_0.gguf"
+    },
+    {
+     "file": "cohere-transcribe-03-2026-F16.gguf",
+     "quant": "F16",
+     "sha256": "65ea095ba78ed938a613cc950da0599b29e16bb5a22a968d7b1fd99d71f13784",
+     "size": 4106644992,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/7353b6040bdc1be9e5a3823d99d5fe12afe88264/cohere-transcribe-03-2026-F16.gguf"
+    },
+    {
+     "file": "cohere-transcribe-03-2026-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "72e7625abc358da7b1a27348b18269b4a026eceb792e6ade53c6bb2280d0f3a7",
+     "size": 4105263104,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/7353b6040bdc1be9e5a3823d99d5fe12afe88264/cohere-transcribe-03-2026-BF16.gguf"
+    }
+   ],
+   "id": "cohere-transcribe-03-2026",
+   "lang_detect": false,
+   "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "it",
+    "pt",
+    "nl",
+    "pl",
+    "el",
+    "ar",
+    "ja",
+    "zh",
+    "vi",
+    "ko"
+   ],
+   "license": "apache-2.0",
+   "name": "cohere-transcribe-03-2026",
+   "params": 2053322496,
+   "repo": "handy-computer/cohere-transcribe-03-2026-gguf",
+   "rtf_cpu": 4.31,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.26,
+    "F16": 1.26,
+    "Q4_K_M": 1.24,
+    "Q5_K_M": 1.25,
+    "Q6_K": 1.27,
+    "Q8_0": 1.27
+   }
+  },
+  {
+   "base_model": "CohereLabs/cohere-transcribe-arabic-07-2026",
+   "files": [
+    {
+     "file": "cohere-transcribe-arabic-07-2026-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "4671080cd10ffc6166e1e1b36216f9b51e1455f170d55c59cff7b81332ad4621",
+     "size": 1558162848,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-arabic-07-2026-gguf/resolve/11a54d6895f94cce78d0ece142b8e552e7822539/cohere-transcribe-arabic-07-2026-Q4_K_M.gguf"
+    },
+    {
+     "file": "cohere-transcribe-arabic-07-2026-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "55e61c9b047e36f0e084d367f6b0bfecc71a6a0527da6eea4f0c687f3584775f",
+     "size": 1770270112,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-arabic-07-2026-gguf/resolve/11a54d6895f94cce78d0ece142b8e552e7822539/cohere-transcribe-arabic-07-2026-Q5_K_M.gguf"
+    },
+    {
+     "file": "cohere-transcribe-arabic-07-2026-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "f0fc615d27da3236166cd68cf9968c3be7d257b953bbba3b2e10e5d9f3fd1ff4",
+     "size": 1972524448,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-arabic-07-2026-gguf/resolve/11a54d6895f94cce78d0ece142b8e552e7822539/cohere-transcribe-arabic-07-2026-Q6_K.gguf"
+    },
+    {
+     "file": "cohere-transcribe-arabic-07-2026-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "910de5c9c57f9fd8a280e1701f9cd96f63768878c1ca9e4ecf23638a5e0fef16",
+     "size": 2410655136,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-arabic-07-2026-gguf/resolve/11a54d6895f94cce78d0ece142b8e552e7822539/cohere-transcribe-arabic-07-2026-Q8_0.gguf"
+    },
+    {
+     "file": "cohere-transcribe-arabic-07-2026-F16.gguf",
+     "quant": "F16",
+     "sha256": "c8a37345c10d1cb3b85d7d1779905e63051f39694bd6fdd5002d9434c09226fc",
+     "size": 4106644896,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-arabic-07-2026-gguf/resolve/11a54d6895f94cce78d0ece142b8e552e7822539/cohere-transcribe-arabic-07-2026-F16.gguf"
+    },
+    {
+     "file": "cohere-transcribe-arabic-07-2026-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "4eade55ddc6ef7d9d1caeee0fa412d161212910c30ee2aa82d95725e0dfdf0a2",
+     "size": 4105263008,
+     "url": "https://huggingface.co/handy-computer/cohere-transcribe-arabic-07-2026-gguf/resolve/11a54d6895f94cce78d0ece142b8e552e7822539/cohere-transcribe-arabic-07-2026-BF16.gguf"
+    }
+   ],
+   "id": "cohere-transcribe-arabic-07-2026",
+   "lang_detect": false,
+   "languages": [
+    "en",
+    "ar"
+   ],
+   "license": "apache-2.0",
+   "name": "cohere-transcribe-arabic-07-2026",
+   "params": 2053322448,
+   "repo": "handy-computer/cohere-transcribe-arabic-07-2026-gguf",
+   "rtf_cpu": 4.31,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.33,
+    "F16": 1.33,
+    "Q4_K_M": 1.34,
+    "Q5_K_M": 1.34,
+    "Q6_K": 1.34,
+    "Q8_0": 1.34
+   }
+  },
+  {
+   "base_model": "FunAudioLLM/Fun-ASR-MLT-Nano-2512",
+   "files": [
+    {
+     "file": "Fun-ASR-MLT-Nano-2512-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "38c40bbaaf72f683acc8ac0ca2d37c6d34c5afecd475223b98285a16d1c01a7a",
+     "size": 556975328,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-MLT-Nano-2512-gguf/resolve/08f28dadd984030331802b2f9fbd9ecac97bf834/Fun-ASR-MLT-Nano-2512-Q4_K_M.gguf"
+    },
+    {
+     "file": "Fun-ASR-MLT-Nano-2512-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "09cdca09adb2297fef0c285205b5437462a4f0ce7c7d4cc338f4783005dfd08e",
+     "size": 631129312,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-MLT-Nano-2512-gguf/resolve/08f28dadd984030331802b2f9fbd9ecac97bf834/Fun-ASR-MLT-Nano-2512-Q5_K_M.gguf"
+    },
+    {
+     "file": "Fun-ASR-MLT-Nano-2512-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "0279ca04a597d723d0ddbb90ffc560ad12e9c9e2caf556886a7eec31da5f8f77",
+     "size": 690744544,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-MLT-Nano-2512-gguf/resolve/08f28dadd984030331802b2f9fbd9ecac97bf834/Fun-ASR-MLT-Nano-2512-Q6_K.gguf"
+    },
+    {
+     "file": "Fun-ASR-MLT-Nano-2512-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "419d350b220d5a1d398740ec1511c8ea751517f2157043a73a399b76b60f21e4",
+     "size": 891271392,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-MLT-Nano-2512-gguf/resolve/08f28dadd984030331802b2f9fbd9ecac97bf834/Fun-ASR-MLT-Nano-2512-Q8_0.gguf"
+    },
+    {
+     "file": "Fun-ASR-MLT-Nano-2512-F16.gguf",
+     "quant": "F16",
+     "sha256": "f34f23f58a050a1b5bbc86376cc16adcf68bde9336a9238fd3a9f5a93c7b3829",
+     "size": 1667504352,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-MLT-Nano-2512-gguf/resolve/08f28dadd984030331802b2f9fbd9ecac97bf834/Fun-ASR-MLT-Nano-2512-F16.gguf"
+    },
+    {
+     "file": "Fun-ASR-MLT-Nano-2512-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "379487163aace1d7d11b82d92571bbf9385f56d68b9723862110d76520e079ca",
+     "size": 1667504352,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-MLT-Nano-2512-gguf/resolve/08f28dadd984030331802b2f9fbd9ecac97bf834/Fun-ASR-MLT-Nano-2512-BF16.gguf"
+    }
+   ],
+   "id": "fun-asr-mlt-nano-2512",
+   "lang_detect": true,
+   "languages": [
+    "zh",
+    "en",
+    "yue",
+    "ja",
+    "ko",
+    "vi",
+    "id",
+    "th",
+    "ms",
+    "tl",
+    "ar",
+    "hi",
+    "bg",
+    "hr",
+    "cs",
+    "da",
+    "nl",
+    "et",
+    "fi",
+    "el",
+    "hu",
+    "ga",
+    "lv",
+    "lt",
+    "mt",
+    "pl",
+    "pt",
+    "ro",
+    "sk",
+    "sl",
+    "sv"
+   ],
+   "license": "other",
+   "name": "Fun-ASR-MLT-Nano-2512",
+   "params": 833752176,
+   "repo": "handy-computer/Fun-ASR-MLT-Nano-2512-gguf",
+   "rtf_cpu": 5.47,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.71,
+    "F16": 1.71,
+    "Q4_K_M": 1.8,
+    "Q5_K_M": 1.74,
+    "Q6_K": 1.66,
+    "Q8_0": 1.72
+   }
+  },
+  {
+   "base_model": "FunAudioLLM/Fun-ASR-Nano-2512",
+   "files": [
+    {
+     "file": "Fun-ASR-Nano-2512-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "7fdd8339ca4dd85c069dcb9397021a2526ec114263e6d025e29035060717a6ec",
+     "size": 556975008,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-Nano-2512-gguf/resolve/3f66330195d91d51e9a70703bd21e570bdb19d75/Fun-ASR-Nano-2512-Q4_K_M.gguf"
+    },
+    {
+     "file": "Fun-ASR-Nano-2512-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "6f609f80b359e9099a7f6e0b4a9a8f1b6a83884abf058d0d50db2eb2f2e16479",
+     "size": 631128992,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-Nano-2512-gguf/resolve/3f66330195d91d51e9a70703bd21e570bdb19d75/Fun-ASR-Nano-2512-Q5_K_M.gguf"
+    },
+    {
+     "file": "Fun-ASR-Nano-2512-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "bae6ca97ab9a781a68696b780ec6b2b6c5a8adba165c3e69f4599fcf4f8ea3b7",
+     "size": 690744224,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-Nano-2512-gguf/resolve/3f66330195d91d51e9a70703bd21e570bdb19d75/Fun-ASR-Nano-2512-Q6_K.gguf"
+    },
+    {
+     "file": "Fun-ASR-Nano-2512-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "ae53d84740fafc1ed5ab1703a3dde994926a2be3ea8bf0ec40588dfea44a245f",
+     "size": 891271072,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-Nano-2512-gguf/resolve/3f66330195d91d51e9a70703bd21e570bdb19d75/Fun-ASR-Nano-2512-Q8_0.gguf"
+    },
+    {
+     "file": "Fun-ASR-Nano-2512-F16.gguf",
+     "quant": "F16",
+     "sha256": "8085754494295469a8d0ba6615eae738716fc64736cb83cd8a98a1b97ebc5bf4",
+     "size": 1667504032,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-Nano-2512-gguf/resolve/3f66330195d91d51e9a70703bd21e570bdb19d75/Fun-ASR-Nano-2512-F16.gguf"
+    },
+    {
+     "file": "Fun-ASR-Nano-2512-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "e990300f9362973c3a635fe558925b68af26efa62bb28cd98000120002009406",
+     "size": 1667504032,
+     "url": "https://huggingface.co/handy-computer/Fun-ASR-Nano-2512-gguf/resolve/3f66330195d91d51e9a70703bd21e570bdb19d75/Fun-ASR-Nano-2512-BF16.gguf"
+    }
+   ],
+   "id": "fun-asr-nano-2512",
+   "lang_detect": true,
+   "languages": [
+    "zh",
+    "en",
+    "ja"
+   ],
+   "license": "other",
+   "name": "Fun-ASR-Nano-2512",
+   "params": 833752016,
+   "repo": "handy-computer/Fun-ASR-Nano-2512-gguf",
+   "rtf_cpu": 7.95,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.78,
+    "F16": 1.79,
+    "Q4_K_M": 1.92,
+    "Q5_K_M": 1.82,
+    "Q6_K": 1.78,
+    "Q8_0": 1.79
+   }
+  },
+  {
+   "base_model": "ai-sage/GigaAM-v3",
+   "files": [
+    {
+     "file": "gigaam-v3-ctc-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "16b329fed3eaa197f2191506ac3cad72f46502297ed6a0f915c79d2ac08c404e",
+     "size": 182150080,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-ctc-gguf/resolve/53ac479633748119e11b049cf28bc801f0440f10/gigaam-v3-ctc-Q4_K_M.gguf"
+    },
+    {
+     "file": "gigaam-v3-ctc-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "2002cd7603b99c318b52a88047d6676e69218083014f19b11c84da0223fb2023",
+     "size": 204563392,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-ctc-gguf/resolve/53ac479633748119e11b049cf28bc801f0440f10/gigaam-v3-ctc-Q5_K_M.gguf"
+    },
+    {
+     "file": "gigaam-v3-ctc-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "7556f1c8b9ed0f93b3e224d14a954b51cc331c5a3d2be0f5988bd0523b962c7f",
+     "size": 226091968,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-ctc-gguf/resolve/53ac479633748119e11b049cf28bc801f0440f10/gigaam-v3-ctc-Q6_K.gguf"
+    },
+    {
+     "file": "gigaam-v3-ctc-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "71e5c82890e9e243a6bd7575f129f5d1bd2c3ca3ae79aab75cfb1a6934c6a62b",
+     "size": 271803328,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-ctc-gguf/resolve/53ac479633748119e11b049cf28bc801f0440f10/gigaam-v3-ctc-Q8_0.gguf"
+    },
+    {
+     "file": "gigaam-v3-ctc-F16.gguf",
+     "quant": "F16",
+     "sha256": "1d958ddf73abf722e320ee36212190e9bdfc6bfdc89778d2e4deeaaeb5bce443",
+     "size": 448750528,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-ctc-gguf/resolve/53ac479633748119e11b049cf28bc801f0440f10/gigaam-v3-ctc-F16.gguf"
+    },
+    {
+     "file": "gigaam-v3-ctc-F32.gguf",
+     "quant": "F32",
+     "sha256": "0feb1fdebf57d6b16769391e23d87e8bdba69549b6cf8864cbcbaa3b0f9caab6",
+     "size": 882913216,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-ctc-gguf/resolve/53ac479633748119e11b049cf28bc801f0440f10/gigaam-v3-ctc-F32.gguf"
+    }
+   ],
+   "id": "gigaam-v3-ctc",
+   "lang_detect": false,
+   "languages": [
+    "ru"
+   ],
+   "license": "mit",
+   "name": "gigaam-v3-ctc",
+   "params": 224375264,
+   "repo": "handy-computer/gigaam-v3-ctc-gguf",
+   "rtf_cpu": 19.62,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "ai-sage/GigaAM-v3",
+   "files": [
+    {
+     "file": "gigaam-v3-e2e-ctc-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "35581e11e048eef785657cff07e5fced794bba6d9c75143257f6452c8aeea655",
+     "size": 182497888,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-ctc-gguf/resolve/59717de63d50dd9dd93b3249da6ad3f2f1c4ad6b/gigaam-v3-e2e-ctc-Q4_K_M.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-ctc-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "d7c6a729f9bae8714d05cb7e66149e662c5098fe10b66206b70f4917f4f84004",
+     "size": 204911200,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-ctc-gguf/resolve/59717de63d50dd9dd93b3249da6ad3f2f1c4ad6b/gigaam-v3-e2e-ctc-Q5_K_M.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-ctc-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "cb517247ae37589c5b281d6d9331ffb32124c77b789affe46a272be1428a5260",
+     "size": 226439776,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-ctc-gguf/resolve/59717de63d50dd9dd93b3249da6ad3f2f1c4ad6b/gigaam-v3-e2e-ctc-Q6_K.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-ctc-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "9ccce4750dc813a493d96ca15ee251712bedec15ac9a02fa3d2bd732f08ae5eb",
+     "size": 272151136,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-ctc-gguf/resolve/59717de63d50dd9dd93b3249da6ad3f2f1c4ad6b/gigaam-v3-e2e-ctc-Q8_0.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-ctc-F16.gguf",
+     "quant": "F16",
+     "sha256": "25a2fd66a50912645307bca1489b8c07e9060ef079b61a7cce0041248cc89b4a",
+     "size": 449098336,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-ctc-gguf/resolve/59717de63d50dd9dd93b3249da6ad3f2f1c4ad6b/gigaam-v3-e2e-ctc-F16.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-ctc-F32.gguf",
+     "quant": "F32",
+     "sha256": "bf300323d1bc67bee5e9f177a5fae748d78077528c27de73ecc6d7a113e09ec5",
+     "size": 883603552,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-ctc-gguf/resolve/59717de63d50dd9dd93b3249da6ad3f2f1c4ad6b/gigaam-v3-e2e-ctc-F32.gguf"
+    }
+   ],
+   "id": "gigaam-v3-e2e-ctc",
+   "lang_detect": false,
+   "languages": [
+    "ru"
+   ],
+   "license": "mit",
+   "name": "gigaam-v3-e2e-ctc",
+   "params": 224549168,
+   "repo": "handy-computer/gigaam-v3-e2e-ctc-gguf",
+   "rtf_cpu": 18.23,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "ai-sage/GigaAM-v3",
+   "files": [
+    {
+     "file": "gigaam-v3-e2e-rnnt-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "7d69952fb431a8d7800ed9910dc61fea37d8406bfe96d10bf24c8bd4b7c68623",
+     "size": 183948704,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-rnnt-gguf/resolve/3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d/gigaam-v3-e2e-rnnt-Q4_K_M.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-rnnt-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "0f5969b05f7e196e8922e243c64963132025a5ae7ec2f83d028ae120d201594f",
+     "size": 206392736,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-rnnt-gguf/resolve/3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d/gigaam-v3-e2e-rnnt-Q5_K_M.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-rnnt-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "1ef0f771d9ab0b0675c45ce67a3e5b79ac7497fe35ebb08a51704c4ee423edce",
+     "size": 227953952,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-rnnt-gguf/resolve/3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d/gigaam-v3-e2e-rnnt-Q6_K.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-rnnt-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "78d63b47723b7f8d78c6113a6ef983b5a86e2a86f6c273e1f5cb6967b1c4467a",
+     "size": 273724832,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-rnnt-gguf/resolve/3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d/gigaam-v3-e2e-rnnt-Q8_0.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-rnnt-F16.gguf",
+     "quant": "F16",
+     "sha256": "87b12fa3523939d3c47c4b427f587e415dda41dcafa9e4ba17f2a1cab2f0d5ad",
+     "size": 452381408,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-rnnt-gguf/resolve/3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d/gigaam-v3-e2e-rnnt-F16.gguf"
+    },
+    {
+     "file": "gigaam-v3-e2e-rnnt-F32.gguf",
+     "quant": "F32",
+     "sha256": "0de6fa626b8a3429dc80e4b34c4b03c0e85b02e2eca4c654efbeb27a8a0a4c5b",
+     "size": 890138592,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-e2e-rnnt-gguf/resolve/3efd5b39882ceadca5570a8fb9fa1a2c801d6d6d/gigaam-v3-e2e-rnnt-F32.gguf"
+    }
+   ],
+   "id": "gigaam-v3-e2e-rnnt",
+   "lang_detect": false,
+   "languages": [
+    "ru"
+   ],
+   "license": "mit",
+   "name": "gigaam-v3-e2e-rnnt",
+   "params": 226190704,
+   "repo": "handy-computer/gigaam-v3-e2e-rnnt-gguf",
+   "rtf_cpu": 10.68,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "ai-sage/GigaAM-v3",
+   "files": [
+    {
+     "file": "gigaam-v3-rnnt-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "33b09558330ccfdc5c156e6d6b57c89759a0ac3b653bcdfcd5f1e13f20fc1e76",
+     "size": 183246752,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-rnnt-gguf/resolve/93cba3cdf21d66ca7a746718c849419c2946d6bb/gigaam-v3-rnnt-Q4_K_M.gguf"
+    },
+    {
+     "file": "gigaam-v3-rnnt-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "3541b4e6b2c3909e99254bcb7c61565137038f24db5651a779885d0c08257348",
+     "size": 205690784,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-rnnt-gguf/resolve/93cba3cdf21d66ca7a746718c849419c2946d6bb/gigaam-v3-rnnt-Q5_K_M.gguf"
+    },
+    {
+     "file": "gigaam-v3-rnnt-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "ee329ee6ef93b5da62e1915927278a9930b04ac95b2735e7c80e64b725f3f82d",
+     "size": 227252000,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-rnnt-gguf/resolve/93cba3cdf21d66ca7a746718c849419c2946d6bb/gigaam-v3-rnnt-Q6_K.gguf"
+    },
+    {
+     "file": "gigaam-v3-rnnt-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "130d54450be2922144b265d90d453b781fc2b5adaee52a16954b00f3686201f7",
+     "size": 273022880,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-rnnt-gguf/resolve/93cba3cdf21d66ca7a746718c849419c2946d6bb/gigaam-v3-rnnt-Q8_0.gguf"
+    },
+    {
+     "file": "gigaam-v3-rnnt-F16.gguf",
+     "quant": "F16",
+     "sha256": "b1fe43be121c64934e464c2320c576d74de1466cb7e91f2d8c2aa1149ebe8572",
+     "size": 451084832,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-rnnt-gguf/resolve/93cba3cdf21d66ca7a746718c849419c2946d6bb/gigaam-v3-rnnt-F16.gguf"
+    },
+    {
+     "file": "gigaam-v3-rnnt-F32.gguf",
+     "quant": "F32",
+     "sha256": "6e02744a354fd44e50af9a3cb555de417d7be7163ab79561ad7ff42796990df9",
+     "size": 887573536,
+     "url": "https://huggingface.co/handy-computer/gigaam-v3-rnnt-gguf/resolve/93cba3cdf21d66ca7a746718c849419c2946d6bb/gigaam-v3-rnnt-F32.gguf"
+    }
+   ],
+   "id": "gigaam-v3-rnnt",
+   "lang_detect": false,
+   "languages": [
+    "ru"
+   ],
+   "license": "mit",
+   "name": "gigaam-v3-rnnt",
+   "params": 225542416,
+   "repo": "handy-computer/gigaam-v3-rnnt-gguf",
+   "rtf_cpu": 15.63,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "ibm-granite/granite-4.0-1b-speech",
+   "files": [
+    {
+     "file": "granite-4.0-1b-speech-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "5412bfbf48ad8ed417ad065a63f9051849c8459457842a2e0453359307d609bb",
+     "size": 1602904896,
+     "url": "https://huggingface.co/handy-computer/granite-4.0-1b-speech-gguf/resolve/b593e6610577b2013a2387b3959018667b9d1795/granite-4.0-1b-speech-Q4_K_M.gguf"
+    },
+    {
+     "file": "granite-4.0-1b-speech-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "6a478270e5a1646249aebe712720be786f538ca23afd22faac4650e9f31f1779",
+     "size": 1829704640,
+     "url": "https://huggingface.co/handy-computer/granite-4.0-1b-speech-gguf/resolve/b593e6610577b2013a2387b3959018667b9d1795/granite-4.0-1b-speech-Q5_K_M.gguf"
+    },
+    {
+     "file": "granite-4.0-1b-speech-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "850ce696371ee78e68a8c722787bad5fdd98655ea7eee3153ae8f9b616f623a8",
+     "size": 2024968032,
+     "url": "https://huggingface.co/handy-computer/granite-4.0-1b-speech-gguf/resolve/b593e6610577b2013a2387b3959018667b9d1795/granite-4.0-1b-speech-Q6_K.gguf"
+    },
+    {
+     "file": "granite-4.0-1b-speech-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "d2841c3145bf0c3e5df7a8b9a086c7d1c2bf43d23a2e615df45d03d1fa5a0337",
+     "size": 2559878944,
+     "url": "https://huggingface.co/handy-computer/granite-4.0-1b-speech-gguf/resolve/b593e6610577b2013a2387b3959018667b9d1795/granite-4.0-1b-speech-Q8_0.gguf"
+    },
+    {
+     "file": "granite-4.0-1b-speech-F16.gguf",
+     "quant": "F16",
+     "sha256": "cae3dd7524a2e518f4cf2f6b45cf7dbc678eddbbb18a8094b3ca6bff60a7b672",
+     "size": 4632623200,
+     "url": "https://huggingface.co/handy-computer/granite-4.0-1b-speech-gguf/resolve/b593e6610577b2013a2387b3959018667b9d1795/granite-4.0-1b-speech-F16.gguf"
+    },
+    {
+     "file": "granite-4.0-1b-speech-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "b26243025bdfa03eac909702e6dee6c04d40882f9dd490fa1bd876cb6a20358b",
+     "size": 4631640192,
+     "url": "https://huggingface.co/handy-computer/granite-4.0-1b-speech-gguf/resolve/b593e6610577b2013a2387b3959018667b9d1795/granite-4.0-1b-speech-BF16.gguf"
+    }
+   ],
+   "id": "granite-4.0-1b-speech",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "pt",
+    "ja"
+   ],
+   "license": "apache-2.0",
+   "name": "granite-4.0-1b-speech",
+   "params": 2316311600,
+   "repo": "handy-computer/granite-4.0-1b-speech-gguf",
+   "rtf_cpu": 2.75,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "BF16": 1.42,
+    "F16": 1.42,
+    "Q4_K_M": 1.48,
+    "Q5_K_M": 1.42,
+    "Q6_K": 1.41,
+    "Q8_0": 1.44
+   }
+  },
+  {
+   "base_model": "ibm-granite/granite-speech-4.1-2b",
+   "files": [
+    {
+     "file": "granite-speech-4.1-2b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "c63e6d7e2f4811a732f3870b48d122e38d5d19c6b60c9c0eee731b2be911916c",
+     "size": 1602904896,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-gguf/resolve/6c6a92dfc36d2b9eda767ef2fb2320237672c4b6/granite-speech-4.1-2b-Q4_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "d9a53cd466b611c0a06bb2766eebc1424f79d6fb8e28300d9aaf09444bfab531",
+     "size": 1829704640,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-gguf/resolve/6c6a92dfc36d2b9eda767ef2fb2320237672c4b6/granite-speech-4.1-2b-Q5_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "272005a2de2d302e275a4fec7f0146a52b5d42c1bad83dca46f5c6f675f81640",
+     "size": 2024968032,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-gguf/resolve/6c6a92dfc36d2b9eda767ef2fb2320237672c4b6/granite-speech-4.1-2b-Q6_K.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "f6054d4ceb6c4e1984a8d72de8f947d360731a4672311f6ce7b9110cce691369",
+     "size": 2559878944,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-gguf/resolve/6c6a92dfc36d2b9eda767ef2fb2320237672c4b6/granite-speech-4.1-2b-Q8_0.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-F16.gguf",
+     "quant": "F16",
+     "sha256": "266ee1ff8142338fda162aafcc631d87c6467f5b0f4389f3b8098bee04e13f99",
+     "size": 4632623200,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-gguf/resolve/6c6a92dfc36d2b9eda767ef2fb2320237672c4b6/granite-speech-4.1-2b-F16.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "21f9683c4171c853980f8c9a9613695b7545e25bee90535901f170265bad73c4",
+     "size": 4631640192,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-gguf/resolve/6c6a92dfc36d2b9eda767ef2fb2320237672c4b6/granite-speech-4.1-2b-BF16.gguf"
+    }
+   ],
+   "id": "granite-speech-4.1-2b",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "pt",
+    "ja"
+   ],
+   "license": "apache-2.0",
+   "name": "granite-speech-4.1-2b",
+   "params": 2316311600,
+   "repo": "handy-computer/granite-speech-4.1-2b-gguf",
+   "rtf_cpu": 2.78,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "BF16": 1.31,
+    "F16": 1.32,
+    "Q4_K_M": 1.37,
+    "Q5_K_M": 1.33,
+    "Q6_K": 1.29,
+    "Q8_0": 1.32
+   }
+  },
+  {
+   "base_model": "ibm-granite/granite-speech-4.1-2b-nar",
+   "files": [
+    {
+     "file": "granite-speech-4.1-2b-nar-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "5b07bc8c66230764eab460d744f24d4f49b9524dc1cd53d26209ca517f258e48",
+     "size": 1560008864,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-nar-gguf/resolve/36325d11d13bdd712ea9233adec0f89fbd7b9bd8/granite-speech-4.1-2b-nar-Q4_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-nar-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "dda8ffc26d2969dd3fc3f8d80e29d98d3435b830c83b01bb1263199fee79710a",
+     "size": 1782089376,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-nar-gguf/resolve/36325d11d13bdd712ea9233adec0f89fbd7b9bd8/granite-speech-4.1-2b-nar-Q5_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-nar-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "be58c89ae5c2da2dd84fb685271eee2b10343e4dfadd1e7aa5b8236798f9c685",
+     "size": 1977417600,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-nar-gguf/resolve/36325d11d13bdd712ea9233adec0f89fbd7b9bd8/granite-speech-4.1-2b-nar-Q6_K.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-nar-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "90535988815bc7408c491b1e46f7c1dfc5d5359badffe98804bb9f7e54bdc6a3",
+     "size": 2498105504,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-nar-gguf/resolve/36325d11d13bdd712ea9233adec0f89fbd7b9bd8/granite-speech-4.1-2b-nar-Q8_0.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-nar-F16.gguf",
+     "quant": "F16",
+     "sha256": "32105ef24132fdeff8d06bc89059b146f3c13e4df6e00dcf9e8e41c6d4528754",
+     "size": 4515792800,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-nar-gguf/resolve/36325d11d13bdd712ea9233adec0f89fbd7b9bd8/granite-speech-4.1-2b-nar-F16.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-nar-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "6f0d6649ae341fe78408cb9dbed10b31d19244c12edfd1a77351b741c1006122",
+     "size": 4514736064,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-nar-gguf/resolve/36325d11d13bdd712ea9233adec0f89fbd7b9bd8/granite-speech-4.1-2b-nar-BF16.gguf"
+    }
+   ],
+   "id": "granite-speech-4.1-2b-nar",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "pt"
+   ],
+   "license": "apache-2.0",
+   "name": "granite-speech-4.1-2b-nar",
+   "params": 2257896400,
+   "repo": "handy-computer/granite-speech-4.1-2b-nar-gguf",
+   "rtf_cpu": 2.15,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.29,
+    "F16": 1.29,
+    "Q4_K_M": 1.34,
+    "Q5_K_M": 1.28,
+    "Q6_K": 1.29,
+    "Q8_0": 1.29
+   }
+  },
+  {
+   "base_model": "ibm-granite/granite-speech-4.1-2b-plus",
+   "files": [
+    {
+     "file": "granite-speech-4.1-2b-plus-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "4324dece3cc7f4d877e335f9d90a86e4ddf55a4d0976ee1c7293be7677dd8a74",
+     "size": 1489663552,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-plus-gguf/resolve/d511bd6c8ea27005eeb4865ab2545480a3e9541d/granite-speech-4.1-2b-plus-Q4_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-plus-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "74be0ba0aad9b743378458b34c8ec97bf997d315ef89f535b9698d1aed4e564d",
+     "size": 1691297216,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-plus-gguf/resolve/d511bd6c8ea27005eeb4865ab2545480a3e9541d/granite-speech-4.1-2b-plus-Q5_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-plus-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "361639bbcbb0411de22587240f6a8b463151cdf8e858e1ed0752e102e8fdd67a",
+     "size": 1859821632,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-plus-gguf/resolve/d511bd6c8ea27005eeb4865ab2545480a3e9541d/granite-speech-4.1-2b-plus-Q6_K.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-plus-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "2948d80df04531fe68b0e09948b758cd17c12d10648a26c2504eb814172714d6",
+     "size": 2345973280,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-plus-gguf/resolve/d511bd6c8ea27005eeb4865ab2545480a3e9541d/granite-speech-4.1-2b-plus-Q8_0.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-plus-F16.gguf",
+     "quant": "F16",
+     "sha256": "d164a8b3dee24c5a01d3a5ab75033f808dd4f3590ae42c08198d2d9af360d318",
+     "size": 4229971936,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-plus-gguf/resolve/d511bd6c8ea27005eeb4865ab2545480a3e9541d/granite-speech-4.1-2b-plus-F16.gguf"
+    },
+    {
+     "file": "granite-speech-4.1-2b-plus-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "f82e74e4d2b481a57d464bc264459198cd59f1487ba95bb5651e4830e7445c0c",
+     "size": 4228988896,
+     "url": "https://huggingface.co/handy-computer/granite-speech-4.1-2b-plus-gguf/resolve/d511bd6c8ea27005eeb4865ab2545480a3e9541d/granite-speech-4.1-2b-plus-BF16.gguf"
+    }
+   ],
+   "id": "granite-speech-4.1-2b-plus",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "pt"
+   ],
+   "license": "apache-2.0",
+   "name": "granite-speech-4.1-2b-plus",
+   "params": 2114985968,
+   "repo": "handy-computer/granite-speech-4.1-2b-plus-gguf",
+   "rtf_cpu": 2.6,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.49,
+    "F16": 1.48,
+    "Q4_K_M": 1.56,
+    "Q5_K_M": 1.48,
+    "Q6_K": 1.46,
+    "Q8_0": 1.5
+   }
+  },
+  {
+   "base_model": "ibm-granite/granite-speech-5.0-470m-turboctc",
+   "files": [
+    {
+     "file": "granite-speech-5.0-470m-turboctc-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "3f30525381d72246b7f99e49b6cb66b249cf1b990c6c3d0e031a7765735f513e",
+     "size": 279114080,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-gguf/resolve/0cf5be9f4bcd479989e6a24d142094d34d552daa/granite-speech-5.0-470m-turboctc-Q4_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "a18c6882ff9dbcefbe674ccb8f8653578ed7dbc3fa9a955f036f3617b9627cce",
+     "size": 335737184,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-gguf/resolve/0cf5be9f4bcd479989e6a24d142094d34d552daa/granite-speech-5.0-470m-turboctc-Q5_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "b01301a564e2d86872572c304884332b2a7140ffd3d646cb718018aa9693eb46",
+     "size": 391836000,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-gguf/resolve/0cf5be9f4bcd479989e6a24d142094d34d552daa/granite-speech-5.0-470m-turboctc-Q6_K.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "0408fe0b33be19af5be423d8ba6b43768608b6f065e1ac97b78c84b55c140738",
+     "size": 505606496,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-gguf/resolve/0cf5be9f4bcd479989e6a24d142094d34d552daa/granite-speech-5.0-470m-turboctc-Q8_0.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-F16.gguf",
+     "quant": "F16",
+     "sha256": "ce9fa4971549def08b6bcb78fd61f7dec326158d5a13576a1f995e0a04b732a7",
+     "size": 947824480,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-gguf/resolve/0cf5be9f4bcd479989e6a24d142094d34d552daa/granite-speech-5.0-470m-turboctc-F16.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "8b17c76fd4a519f2906eef0974e3c4a34efdae159278c4ed364f853cfe404a66",
+     "size": 947824480,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-gguf/resolve/0cf5be9f4bcd479989e6a24d142094d34d552daa/granite-speech-5.0-470m-turboctc-BF16.gguf"
+    }
+   ],
+   "id": "granite-speech-5.0-470m-turboctc",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "apache-2.0",
+   "name": "granite-speech-5.0-470m-turboctc",
+   "params": 473912240,
+   "repo": "handy-computer/granite-speech-5.0-470m-turboctc-gguf",
+   "rtf_cpu": 17.24,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.34,
+    "F16": 1.33,
+    "Q4_K_M": 1.35,
+    "Q5_K_M": 1.34,
+    "Q6_K": 1.33,
+    "Q8_0": 1.33
+   }
+  },
+  {
+   "base_model": "ibm-granite/granite-speech-5.0-470m-turboctc-nc",
+   "files": [
+    {
+     "file": "granite-speech-5.0-470m-turboctc-nc-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "b79b5b39c36f3d0596774ff352d132483b659a43927015864ad5e149ac85470a",
+     "size": 279393440,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-nc-gguf/resolve/73e511af2e488994672379a3e5f9307b51d173c9/granite-speech-5.0-470m-turboctc-nc-Q4_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-nc-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "0ad269ed1cacab002b4cc26fa4c12d134e7a90b395e6ddcb4ca0cba3bb710973",
+     "size": 336016544,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-nc-gguf/resolve/73e511af2e488994672379a3e5f9307b51d173c9/granite-speech-5.0-470m-turboctc-nc-Q5_K_M.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-nc-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "51ffd6f76904ee343e748736afd4cc9cf32caaf79b21cda85af395b2b0cbe56b",
+     "size": 392115360,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-nc-gguf/resolve/73e511af2e488994672379a3e5f9307b51d173c9/granite-speech-5.0-470m-turboctc-nc-Q6_K.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-nc-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "383ab69dc940f441fb7064e8aa41f71ac2d24d5bc4c64b6d17167a044c68c03d",
+     "size": 505885856,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-nc-gguf/resolve/73e511af2e488994672379a3e5f9307b51d173c9/granite-speech-5.0-470m-turboctc-nc-Q8_0.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-nc-F16.gguf",
+     "quant": "F16",
+     "sha256": "baceebaaf85210f50463dfec059eb46ae6dbea8ea9a090500fbdee4f92b0c302",
+     "size": 948562592,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-nc-gguf/resolve/73e511af2e488994672379a3e5f9307b51d173c9/granite-speech-5.0-470m-turboctc-nc-F16.gguf"
+    },
+    {
+     "file": "granite-speech-5.0-470m-turboctc-nc-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "5a6b4c796207e5b20ee164ccc380df3f5ad2ea368bf414ba6814e820237879bc",
+     "size": 948103840,
+     "url": "https://huggingface.co/handy-computer/granite-speech-5.0-470m-turboctc-nc-gguf/resolve/73e511af2e488994672379a3e5f9307b51d173c9/granite-speech-5.0-470m-turboctc-nc-BF16.gguf"
+    }
+   ],
+   "id": "granite-speech-5.0-470m-turboctc-nc",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-nc-sa-4.0",
+   "name": "granite-speech-5.0-470m-turboctc-nc",
+   "params": 474281296,
+   "repo": "handy-computer/granite-speech-5.0-470m-turboctc-nc-gguf",
+   "rtf_cpu": 17.25,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.29,
+    "F16": 1.28,
+    "Q4_K_M": 1.34,
+    "Q5_K_M": 1.29,
+    "Q6_K": 1.29,
+    "Q8_0": 1.29
+   }
+  },
+  {
+   "base_model": "google/medasr",
+   "files": [
+    {
+     "file": "medasr-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "b23b52db7e1e17a5a21c24f3b78add04e1055bbe026b7c7196324c34ab6f3e2f",
+     "size": 83082432,
+     "url": "https://huggingface.co/handy-computer/medasr-gguf/resolve/f17cb2ed8e1fe7943a3108b2fa43b289893b4427/medasr-Q4_K_M.gguf"
+    },
+    {
+     "file": "medasr-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "873c90a9a78d98446b5e02506073108496df6ff2d062d26f5f7b90f6f1368f1f",
+     "size": 94239936,
+     "url": "https://huggingface.co/handy-computer/medasr-gguf/resolve/f17cb2ed8e1fe7943a3108b2fa43b289893b4427/medasr-Q5_K_M.gguf"
+    },
+    {
+     "file": "medasr-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "59be9d324cde3a64c813383e7090b3009713e261bf7fdce90b48e2f7bcbc28fa",
+     "size": 106094784,
+     "url": "https://huggingface.co/handy-computer/medasr-gguf/resolve/f17cb2ed8e1fe7943a3108b2fa43b289893b4427/medasr-Q6_K.gguf"
+    },
+    {
+     "file": "medasr-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "5a391a2154416b96241b829ac2c7eed8b64d197f00372512c9bbf63f4849c978",
+     "size": 127712448,
+     "url": "https://huggingface.co/handy-computer/medasr-gguf/resolve/f17cb2ed8e1fe7943a3108b2fa43b289893b4427/medasr-Q8_0.gguf"
+    },
+    {
+     "file": "medasr-F16.gguf",
+     "quant": "F16",
+     "sha256": "70e51cf5da1d3ea0838cf6d94a19f3dc1fdf28b24d8665589f43c50eaf429580",
+     "size": 211455168,
+     "url": "https://huggingface.co/handy-computer/medasr-gguf/resolve/f17cb2ed8e1fe7943a3108b2fa43b289893b4427/medasr-F16.gguf"
+    },
+    {
+     "file": "medasr-F32.gguf",
+     "quant": "F32",
+     "sha256": "4b1b5b3a3092b96299624788b4eb28d04f7c66c447f0953c0216285c518f2ed5",
+     "size": 421301440,
+     "url": "https://huggingface.co/handy-computer/medasr-gguf/resolve/f17cb2ed8e1fe7943a3108b2fa43b289893b4427/medasr-F32.gguf"
+    }
+   ],
+   "id": "medasr",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "other",
+   "name": "medasr",
+   "params": 105727584,
+   "repo": "handy-computer/medasr-gguf",
+   "rtf_cpu": 25.87,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 17.88,
+    "F32": 17.88,
+    "Q4_K_M": 18.14,
+    "Q5_K_M": 17.91,
+    "Q6_K": 17.93,
+    "Q8_0": 17.86
+   }
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-base",
+   "files": [
+    {
+     "file": "moonshine-base-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "7f0027dfd857d310b63a85ef57cadf183da712cc374f85a648f8bc18aaa2efc8",
+     "size": 77476480,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-gguf/resolve/124f8cf8d3c1c56ad0f6ebc44aaafc0622e62d97/moonshine-base-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-base-F16.gguf",
+     "quant": "F16",
+     "sha256": "c7a158ae0ad47c887041372e97c874e98c11eb0d8eff01279723dde65b358702",
+     "size": 131789440,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-gguf/resolve/124f8cf8d3c1c56ad0f6ebc44aaafc0622e62d97/moonshine-base-F16.gguf"
+    },
+    {
+     "file": "moonshine-base-F32.gguf",
+     "quant": "F32",
+     "sha256": "b19a36db5a91e4f25cc527c5ed87f774fd037aee8ceec774397c19b7198199fb",
+     "size": 247657088,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-gguf/resolve/124f8cf8d3c1c56ad0f6ebc44aaafc0622e62d97/moonshine-base-F32.gguf"
+    }
+   ],
+   "id": "moonshine-base",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "mit",
+   "name": "moonshine-base",
+   "params": 65894720,
+   "repo": "handy-computer/moonshine-base-gguf",
+   "rtf_cpu": 23.49,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 3.28,
+    "F32": 3.28,
+    "Q8_0": 3.26
+   }
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-base-ar",
+   "files": [
+    {
+     "file": "moonshine-base-ar-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "0724aee48dc1ec95c6faf8249ebd5f4bf71dd709ec3ca33ccf6d9d466119da69",
+     "size": 77476544,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-ar-gguf/resolve/05f839ce58ee34eef666fb9725e2ef83dd81bb09/moonshine-base-ar-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-base-ar-F16.gguf",
+     "quant": "F16",
+     "sha256": "97195a5830c2a6c8719476d5c1109c2328cd7c7c7bc86938f18ff5bfc933c44f",
+     "size": 131789504,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-ar-gguf/resolve/05f839ce58ee34eef666fb9725e2ef83dd81bb09/moonshine-base-ar-F16.gguf"
+    },
+    {
+     "file": "moonshine-base-ar-F32.gguf",
+     "quant": "F32",
+     "sha256": "6027467ca69de2e318f3fef3b94e53b1fe7a23279f5c2c55d674f43fed7849c6",
+     "size": 247657152,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-ar-gguf/resolve/05f839ce58ee34eef666fb9725e2ef83dd81bb09/moonshine-base-ar-F32.gguf"
+    }
+   ],
+   "id": "moonshine-base-ar",
+   "lang_detect": false,
+   "languages": [
+    "ar"
+   ],
+   "license": "other",
+   "name": "moonshine-base-ar",
+   "params": 65894752,
+   "repo": "handy-computer/moonshine-base-ar-gguf",
+   "rtf_cpu": 11,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-base-ja",
+   "files": [
+    {
+     "file": "moonshine-base-ja-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "097c88175904208e0f22311212b9d95dee70cd84882a2a4fc04fa3f5a1165654",
+     "size": 77476544,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-ja-gguf/resolve/1674f5f93b7655000951d25d496dcfac947b3968/moonshine-base-ja-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-base-ja-F16.gguf",
+     "quant": "F16",
+     "sha256": "02501243bf4ffed4bdbe9d86cf19e693c6893e515d3a18614cdaba0b0d7a7ae2",
+     "size": 131789504,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-ja-gguf/resolve/1674f5f93b7655000951d25d496dcfac947b3968/moonshine-base-ja-F16.gguf"
+    },
+    {
+     "file": "moonshine-base-ja-F32.gguf",
+     "quant": "F32",
+     "sha256": "81676e6fbfaeead6372510b816e67a2fc6c52c165a1a83b8722925e12d157fec",
+     "size": 247657152,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-ja-gguf/resolve/1674f5f93b7655000951d25d496dcfac947b3968/moonshine-base-ja-F32.gguf"
+    }
+   ],
+   "id": "moonshine-base-ja",
+   "lang_detect": false,
+   "languages": [
+    "ja"
+   ],
+   "license": "other",
+   "name": "moonshine-base-ja",
+   "params": 65894752,
+   "repo": "handy-computer/moonshine-base-ja-gguf",
+   "rtf_cpu": 14.88,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-base-ko",
+   "files": [
+    {
+     "file": "moonshine-base-ko-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "f500024f8362c84baab53067d5b2946afbeec9d170ffc348d75690ca051a799f",
+     "size": 77476544,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-ko-gguf/resolve/f18fb612b8ec33fc50a7afdb69a1fed9cb3ef46d/moonshine-base-ko-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-base-ko-F16.gguf",
+     "quant": "F16",
+     "sha256": "c1f7689b361dbbaa1081f0c25fac4d4c3e51352c17b20f4ac77762f5e52e9aae",
+     "size": 131789504,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-ko-gguf/resolve/f18fb612b8ec33fc50a7afdb69a1fed9cb3ef46d/moonshine-base-ko-F16.gguf"
+    },
+    {
+     "file": "moonshine-base-ko-F32.gguf",
+     "quant": "F32",
+     "sha256": "a854be12522c7f01e87a4a11220e89ee5f4bef2b5c2cdbcaa464cf2622a98d26",
+     "size": 247657152,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-ko-gguf/resolve/f18fb612b8ec33fc50a7afdb69a1fed9cb3ef46d/moonshine-base-ko-F32.gguf"
+    }
+   ],
+   "id": "moonshine-base-ko",
+   "lang_detect": false,
+   "languages": [
+    "ko"
+   ],
+   "license": "other",
+   "name": "moonshine-base-ko",
+   "params": 65894752,
+   "repo": "handy-computer/moonshine-base-ko-gguf",
+   "rtf_cpu": 11.22,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-base-uk",
+   "files": [
+    {
+     "file": "moonshine-base-uk-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "186ca7089ee0606cb9952c73a130f7ba54895fd3053a34278aa0082ecb3c50ec",
+     "size": 77476544,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-uk-gguf/resolve/ab049e2593f5752db27e12d5d560a60082f1be8f/moonshine-base-uk-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-base-uk-F16.gguf",
+     "quant": "F16",
+     "sha256": "b1a2b81fa2cc0f867944f6c781df29af53ed5e88c9bb56668653b5ca50b1096e",
+     "size": 131789504,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-uk-gguf/resolve/ab049e2593f5752db27e12d5d560a60082f1be8f/moonshine-base-uk-F16.gguf"
+    },
+    {
+     "file": "moonshine-base-uk-F32.gguf",
+     "quant": "F32",
+     "sha256": "a4caa4372bc752f451ed6639b5c9fa95f9643d70ee8fb7c1487e668dcbf444fd",
+     "size": 247657152,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-uk-gguf/resolve/ab049e2593f5752db27e12d5d560a60082f1be8f/moonshine-base-uk-F32.gguf"
+    }
+   ],
+   "id": "moonshine-base-uk",
+   "lang_detect": false,
+   "languages": [
+    "uk"
+   ],
+   "license": "other",
+   "name": "moonshine-base-uk",
+   "params": 65894752,
+   "repo": "handy-computer/moonshine-base-uk-gguf",
+   "rtf_cpu": 17.38,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-base-vi",
+   "files": [
+    {
+     "file": "moonshine-base-vi-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "5197e3cbb7f6cac5a854b9d2ad23a4ead9b3f63cb79c131108424200316c4732",
+     "size": 77476544,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-vi-gguf/resolve/9350464011cc379a91bfdcff6b63c150681320ec/moonshine-base-vi-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-base-vi-F16.gguf",
+     "quant": "F16",
+     "sha256": "810042d0776caea4920c33cc883deea7609bc4eef6f29cd4e955fe94632ffad6",
+     "size": 131789504,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-vi-gguf/resolve/9350464011cc379a91bfdcff6b63c150681320ec/moonshine-base-vi-F16.gguf"
+    },
+    {
+     "file": "moonshine-base-vi-F32.gguf",
+     "quant": "F32",
+     "sha256": "163d3e23bb0ca7f4fdfb270972c808fbfbdcc6a3df46b39a1145d8fec36aeb2e",
+     "size": 247657152,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-vi-gguf/resolve/9350464011cc379a91bfdcff6b63c150681320ec/moonshine-base-vi-F32.gguf"
+    }
+   ],
+   "id": "moonshine-base-vi",
+   "lang_detect": false,
+   "languages": [
+    "vi"
+   ],
+   "license": "other",
+   "name": "moonshine-base-vi",
+   "params": 65894752,
+   "repo": "handy-computer/moonshine-base-vi-gguf",
+   "rtf_cpu": 15.04,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-base-zh",
+   "files": [
+    {
+     "file": "moonshine-base-zh-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "f2d0e167827aa2b17219902c4f524863913be25c33beffb42b416352d3194771",
+     "size": 77476544,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-zh-gguf/resolve/0af85e91f10c82328194ee8fd0062c88b7045a30/moonshine-base-zh-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-base-zh-F16.gguf",
+     "quant": "F16",
+     "sha256": "506f0d7e880ecae0b08080863f457163353cb0cbf862801133be43ce223bdaeb",
+     "size": 131789504,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-zh-gguf/resolve/0af85e91f10c82328194ee8fd0062c88b7045a30/moonshine-base-zh-F16.gguf"
+    },
+    {
+     "file": "moonshine-base-zh-F32.gguf",
+     "quant": "F32",
+     "sha256": "fd4efadcf4f299fc10e47cb6a969f8aefb85c607175eeef7685b5898777b77ed",
+     "size": 247657152,
+     "url": "https://huggingface.co/handy-computer/moonshine-base-zh-gguf/resolve/0af85e91f10c82328194ee8fd0062c88b7045a30/moonshine-base-zh-F32.gguf"
+    }
+   ],
+   "id": "moonshine-base-zh",
+   "lang_detect": false,
+   "languages": [
+    "zh"
+   ],
+   "license": "other",
+   "name": "moonshine-base-zh",
+   "params": 65894752,
+   "repo": "handy-computer/moonshine-base-zh-gguf",
+   "rtf_cpu": 18.29,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-streaming-medium",
+   "files": [
+    {
+     "file": "moonshine-streaming-medium-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "f7c9564249b508f6012927ec4f9e536087da53a7047f858ca9975bea5f75299e",
+     "size": 295793568,
+     "url": "https://huggingface.co/handy-computer/moonshine-streaming-medium-gguf/resolve/56302cde2ae162d1357a833d91775bcd06e91e1b/moonshine-streaming-medium-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-streaming-medium-F16.gguf",
+     "quant": "F16",
+     "sha256": "cf2ab2c366df44e8885e1c127c23275dc9a0aa0d10557c2fec325506058b9de8",
+     "size": 533781408,
+     "url": "https://huggingface.co/handy-computer/moonshine-streaming-medium-gguf/resolve/56302cde2ae162d1357a833d91775bcd06e91e1b/moonshine-streaming-medium-F16.gguf"
+    },
+    {
+     "file": "moonshine-streaming-medium-F32.gguf",
+     "quant": "F32",
+     "sha256": "70b4fad683358feba54631e440b4ee9d813a416e239c4cf163f422189dfef03f",
+     "size": 1065204640,
+     "url": "https://huggingface.co/handy-computer/moonshine-streaming-medium-gguf/resolve/56302cde2ae162d1357a833d91775bcd06e91e1b/moonshine-streaming-medium-F32.gguf"
+    }
+   ],
+   "id": "moonshine-streaming-medium",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "mit",
+   "name": "moonshine-streaming-medium",
+   "params": 266890704,
+   "repo": "handy-computer/moonshine-streaming-medium-gguf",
+   "rtf_cpu": 9.67,
+   "streaming": true,
+   "translate": false,
+   "wer_en": {
+    "F16": 2.16,
+    "F32": 2.16,
+    "Q8_0": 2.16
+   }
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-streaming-small",
+   "files": [
+    {
+     "file": "moonshine-streaming-small-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
+     "size": 198506848,
+     "url": "https://huggingface.co/handy-computer/moonshine-streaming-small-gguf/resolve/e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-streaming-small-F16.gguf",
+     "quant": "F16",
+     "sha256": "4e0b872dd11072c3b6ae06a25e832d4eb29281ae0d6931992d1c58889c65eb2f",
+     "size": 282092128,
+     "url": "https://huggingface.co/handy-computer/moonshine-streaming-small-gguf/resolve/e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-F16.gguf"
+    },
+    {
+     "file": "moonshine-streaming-small-F32.gguf",
+     "quant": "F32",
+     "sha256": "cb231274a2c402d42376e5f25378d17f8b229f530cb06cef6e6cf812d39a5dc3",
+     "size": 562146912,
+     "url": "https://huggingface.co/handy-computer/moonshine-streaming-small-gguf/resolve/e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-F32.gguf"
+    }
+   ],
+   "id": "moonshine-streaming-small",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "mit",
+   "name": "moonshine-streaming-small",
+   "params": 141046064,
+   "repo": "handy-computer/moonshine-streaming-small-gguf",
+   "rtf_cpu": 13.54,
+   "streaming": true,
+   "translate": false,
+   "wer_en": {
+    "F16": 2.53,
+    "F32": 2.53,
+    "Q8_0": 2.54
+   }
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-streaming-tiny",
+   "files": [
+    {
+     "file": "moonshine-streaming-tiny-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "930e4622ad3a24158b91406c30c977fa6a26b34cb32d6ac3e57cfb23383a869e",
+     "size": 50462816,
+     "url": "https://huggingface.co/handy-computer/moonshine-streaming-tiny-gguf/resolve/4125c28c22a76494162094ab3566387cd92fb2f5/moonshine-streaming-tiny-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-streaming-tiny-F16.gguf",
+     "quant": "F16",
+     "sha256": "cfe64aacd68b0c4244369c04dab9828e324f005e4799af5ec33bbc1d37ebd681",
+     "size": 89784416,
+     "url": "https://huggingface.co/handy-computer/moonshine-streaming-tiny-gguf/resolve/4125c28c22a76494162094ab3566387cd92fb2f5/moonshine-streaming-tiny-F16.gguf"
+    },
+    {
+     "file": "moonshine-streaming-tiny-F32.gguf",
+     "quant": "F32",
+     "sha256": "38ad83ec7a9db0b23be02f71fea1615ef8403eb28e79a915668d26026415d5f6",
+     "size": 177817696,
+     "url": "https://huggingface.co/handy-computer/moonshine-streaming-tiny-gguf/resolve/4125c28c22a76494162094ab3566387cd92fb2f5/moonshine-streaming-tiny-F32.gguf"
+    }
+   ],
+   "id": "moonshine-streaming-tiny",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "mit",
+   "name": "moonshine-streaming-tiny",
+   "params": 44892208,
+   "repo": "handy-computer/moonshine-streaming-tiny-gguf",
+   "rtf_cpu": 56.27,
+   "streaming": true,
+   "translate": false,
+   "wer_en": {
+    "F16": 4.53,
+    "F32": 4.53,
+    "Q8_0": 4.52
+   }
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-tiny",
+   "files": [
+    {
+     "file": "moonshine-tiny-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "2fd348d7b38f97d309cc3ec6848f3f57f537b80244950f07d2637e463f95a3a1",
+     "size": 35466912,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-gguf/resolve/c71a93b8f1cb2b7f7336f31bb54bc96960c16f41/moonshine-tiny-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-tiny-F16.gguf",
+     "quant": "F16",
+     "sha256": "d115694627d146c347ac5209db69db48b3125b07971026a6119b1888db7563d3",
+     "size": 59244192,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-gguf/resolve/c71a93b8f1cb2b7f7336f31bb54bc96960c16f41/moonshine-tiny-F16.gguf"
+    },
+    {
+     "file": "moonshine-tiny-F32.gguf",
+     "quant": "F32",
+     "sha256": "67e50023e13f295d6efb8500b69a538019ff7c2dd4b577e425260048e8035418",
+     "size": 109969056,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-gguf/resolve/c71a93b8f1cb2b7f7336f31bb54bc96960c16f41/moonshine-tiny-F32.gguf"
+    }
+   ],
+   "id": "moonshine-tiny",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "mit",
+   "name": "moonshine-tiny",
+   "params": 29622096,
+   "repo": "handy-computer/moonshine-tiny-gguf",
+   "rtf_cpu": 41.32,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 4.58,
+    "F32": 4.58,
+    "Q8_0": 4.6
+   }
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-tiny-ar",
+   "files": [
+    {
+     "file": "moonshine-tiny-ar-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "6fefb5fd1a1bad78f1f2e946996313d5e343c902ddb5c4d42e6e42d2599ca953",
+     "size": 35466976,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-ar-gguf/resolve/797a90bdb410bb11bee3fc44f0e13b79836ca93c/moonshine-tiny-ar-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-tiny-ar-F16.gguf",
+     "quant": "F16",
+     "sha256": "2786b380393ae11d52e17dca12b6792e223b61b8a8eca49cc73bd9f4e54a5c10",
+     "size": 59244256,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-ar-gguf/resolve/797a90bdb410bb11bee3fc44f0e13b79836ca93c/moonshine-tiny-ar-F16.gguf"
+    },
+    {
+     "file": "moonshine-tiny-ar-F32.gguf",
+     "quant": "F32",
+     "sha256": "61f0bab78e3fa9d1605cbd5f63c9c5a05245e1dc62638aa6f005945d2b12394d",
+     "size": 109969120,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-ar-gguf/resolve/797a90bdb410bb11bee3fc44f0e13b79836ca93c/moonshine-tiny-ar-F32.gguf"
+    }
+   ],
+   "id": "moonshine-tiny-ar",
+   "lang_detect": false,
+   "languages": [
+    "ar"
+   ],
+   "license": "other",
+   "name": "moonshine-tiny-ar",
+   "params": 29622128,
+   "repo": "handy-computer/moonshine-tiny-ar-gguf",
+   "rtf_cpu": 19.72,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-tiny-ja",
+   "files": [
+    {
+     "file": "moonshine-tiny-ja-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "0983221896a7271aa48341cb04d7f00c91f561493c423d3086189ed0eeec679a",
+     "size": 35466976,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-ja-gguf/resolve/9bddc8011cdade1b88bfdb73921d061972ea578c/moonshine-tiny-ja-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-tiny-ja-F16.gguf",
+     "quant": "F16",
+     "sha256": "e092a8c336546e8a45b0ce0ab8eaf753430dd94408cca77dbdf17d1bb247ff23",
+     "size": 59244256,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-ja-gguf/resolve/9bddc8011cdade1b88bfdb73921d061972ea578c/moonshine-tiny-ja-F16.gguf"
+    },
+    {
+     "file": "moonshine-tiny-ja-F32.gguf",
+     "quant": "F32",
+     "sha256": "a5565b829ac6ad75ee0dddfc4a2daa02060997eb51c5e9802d4a9362f822536a",
+     "size": 109969120,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-ja-gguf/resolve/9bddc8011cdade1b88bfdb73921d061972ea578c/moonshine-tiny-ja-F32.gguf"
+    }
+   ],
+   "id": "moonshine-tiny-ja",
+   "lang_detect": false,
+   "languages": [
+    "ja"
+   ],
+   "license": "other",
+   "name": "moonshine-tiny-ja",
+   "params": 29622128,
+   "repo": "handy-computer/moonshine-tiny-ja-gguf",
+   "rtf_cpu": 27.02,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-tiny-ko",
+   "files": [
+    {
+     "file": "moonshine-tiny-ko-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "8f237a01aca8c89b85c88b3483f31a21d26e997477cb2bd410daadaede05d7a9",
+     "size": 35466976,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-ko-gguf/resolve/d090db2d9467b0c4cb91b9112b2da2d337a23ecc/moonshine-tiny-ko-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-tiny-ko-F16.gguf",
+     "quant": "F16",
+     "sha256": "b3713566e68e60baa926982b8c5571fd453a43c209f49ca508b5bfcd67cd8af9",
+     "size": 59244256,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-ko-gguf/resolve/d090db2d9467b0c4cb91b9112b2da2d337a23ecc/moonshine-tiny-ko-F16.gguf"
+    },
+    {
+     "file": "moonshine-tiny-ko-F32.gguf",
+     "quant": "F32",
+     "sha256": "cbf9cfd94d489fe8164d7a60d1b964d7a9b3168f7a257924b0f038354f391ea1",
+     "size": 109969120,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-ko-gguf/resolve/d090db2d9467b0c4cb91b9112b2da2d337a23ecc/moonshine-tiny-ko-F32.gguf"
+    }
+   ],
+   "id": "moonshine-tiny-ko",
+   "lang_detect": false,
+   "languages": [
+    "ko"
+   ],
+   "license": "other",
+   "name": "moonshine-tiny-ko",
+   "params": 29622128,
+   "repo": "handy-computer/moonshine-tiny-ko-gguf",
+   "rtf_cpu": 20.5,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-tiny-uk",
+   "files": [
+    {
+     "file": "moonshine-tiny-uk-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "748eeee3a5892022e47c9fb30fd5d4089e335851fbd5728c2991bc6f3836353f",
+     "size": 35466976,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-uk-gguf/resolve/da669450485c6ba60a2e33cf7d0d17e85c2dd523/moonshine-tiny-uk-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-tiny-uk-F16.gguf",
+     "quant": "F16",
+     "sha256": "de14b3ac235b4f57a8c4dde33fff011b8bdfcbff443e84be9999a7d755255177",
+     "size": 59244256,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-uk-gguf/resolve/da669450485c6ba60a2e33cf7d0d17e85c2dd523/moonshine-tiny-uk-F16.gguf"
+    },
+    {
+     "file": "moonshine-tiny-uk-F32.gguf",
+     "quant": "F32",
+     "sha256": "2fdd9bc257cd20d06d369061eb76b780adc9e59c6f3dbceb841e352af1d4159f",
+     "size": 109969120,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-uk-gguf/resolve/da669450485c6ba60a2e33cf7d0d17e85c2dd523/moonshine-tiny-uk-F32.gguf"
+    }
+   ],
+   "id": "moonshine-tiny-uk",
+   "lang_detect": false,
+   "languages": [
+    "uk"
+   ],
+   "license": "other",
+   "name": "moonshine-tiny-uk",
+   "params": 29622128,
+   "repo": "handy-computer/moonshine-tiny-uk-gguf",
+   "rtf_cpu": 30.71,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-tiny-vi",
+   "files": [
+    {
+     "file": "moonshine-tiny-vi-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "40729a03b6dc5ceaf51ddab399fc8fc74c1b08c655ea610f4a2f49b0e407bc5d",
+     "size": 35466976,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-vi-gguf/resolve/4944164bf4fd69452ece61247f4a673de51e5a44/moonshine-tiny-vi-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-tiny-vi-F16.gguf",
+     "quant": "F16",
+     "sha256": "c3d2c789cac625cd8591ffb5fabe26b522b3d438c3a8c01b1697b1f3d344381f",
+     "size": 59244256,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-vi-gguf/resolve/4944164bf4fd69452ece61247f4a673de51e5a44/moonshine-tiny-vi-F16.gguf"
+    },
+    {
+     "file": "moonshine-tiny-vi-F32.gguf",
+     "quant": "F32",
+     "sha256": "a9255530bf5fca2057990bfa9ebebe1d1dcda45825917382c901b766d5b81281",
+     "size": 109969120,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-vi-gguf/resolve/4944164bf4fd69452ece61247f4a673de51e5a44/moonshine-tiny-vi-F32.gguf"
+    }
+   ],
+   "id": "moonshine-tiny-vi",
+   "lang_detect": false,
+   "languages": [
+    "vi"
+   ],
+   "license": "other",
+   "name": "moonshine-tiny-vi",
+   "params": 29622128,
+   "repo": "handy-computer/moonshine-tiny-vi-gguf",
+   "rtf_cpu": 26.96,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "UsefulSensors/moonshine-tiny-zh",
+   "files": [
+    {
+     "file": "moonshine-tiny-zh-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "3dbe630122d3c90a332da35942c09fc4ef1b320e3e6539c0f10faa6ae1a22121",
+     "size": 35466976,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-zh-gguf/resolve/6dbc7db4b3bc8aec307df4302f26f2fc7b30daee/moonshine-tiny-zh-Q8_0.gguf"
+    },
+    {
+     "file": "moonshine-tiny-zh-F16.gguf",
+     "quant": "F16",
+     "sha256": "5fc54e2e7a8301fd2f2ef1f9bcff56e2f99c5ec22778479e249a227b45cc6d18",
+     "size": 59244256,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-zh-gguf/resolve/6dbc7db4b3bc8aec307df4302f26f2fc7b30daee/moonshine-tiny-zh-F16.gguf"
+    },
+    {
+     "file": "moonshine-tiny-zh-F32.gguf",
+     "quant": "F32",
+     "sha256": "28053ddcce6b79bffa6fe85462aae71b30a8c87833d83c226907b78da8facec8",
+     "size": 109969120,
+     "url": "https://huggingface.co/handy-computer/moonshine-tiny-zh-gguf/resolve/6dbc7db4b3bc8aec307df4302f26f2fc7b30daee/moonshine-tiny-zh-F32.gguf"
+    }
+   ],
+   "id": "moonshine-tiny-zh",
+   "lang_detect": false,
+   "languages": [
+    "zh"
+   ],
+   "license": "other",
+   "name": "moonshine-tiny-zh",
+   "params": 29622128,
+   "repo": "handy-computer/moonshine-tiny-zh-gguf",
+   "rtf_cpu": 28.42,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {}
+  },
+  {
+   "base_model": "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+   "files": [
+    {
+     "file": "MOSS-Transcribe-Diarize-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "f582b83a60a9b85212c84117b3516882340dee4de1ce2d817b32a333e89f60b4",
+     "size": 617345728,
+     "url": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/resolve/5780e665a3eb60694e0402ed25b6775ee587681b/MOSS-Transcribe-Diarize-Q4_K_M.gguf"
+    },
+    {
+     "file": "MOSS-Transcribe-Diarize-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "1f492eaf6ab449dfa44726b072bef0268f2c0b71055576ef53c2f91bd9d47df2",
+     "size": 700314304,
+     "url": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/resolve/5780e665a3eb60694e0402ed25b6775ee587681b/MOSS-Transcribe-Diarize-Q5_K_M.gguf"
+    },
+    {
+     "file": "MOSS-Transcribe-Diarize-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "0facd1e89c5a36c0bf24cdfee828a042ac5568302316a668deac2f2a59fcb63a",
+     "size": 768152256,
+     "url": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/resolve/5780e665a3eb60694e0402ed25b6775ee587681b/MOSS-Transcribe-Diarize-Q6_K.gguf"
+    },
+    {
+     "file": "MOSS-Transcribe-Diarize-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "6bc3afe18c18ceec90f8c7e22300942db27ff0549c08f8e864f7168866445944",
+     "size": 986900160,
+     "url": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/resolve/5780e665a3eb60694e0402ed25b6775ee587681b/MOSS-Transcribe-Diarize-Q8_0.gguf"
+    },
+    {
+     "file": "MOSS-Transcribe-Diarize-F16.gguf",
+     "quant": "F16",
+     "sha256": "9f1d00e22cf9bb8154bad6f05372e0a95ebd0da8e103fd2eb0b22dc17285ff1e",
+     "size": 1833666240,
+     "url": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/resolve/5780e665a3eb60694e0402ed25b6775ee587681b/MOSS-Transcribe-Diarize-F16.gguf"
+    },
+    {
+     "file": "MOSS-Transcribe-Diarize-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "155eb3ed6390300c7891edc56cce0c9fb5103a8dcc09a708a2fb7502d99b8a30",
+     "size": 1826883264,
+     "url": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/resolve/5780e665a3eb60694e0402ed25b6775ee587681b/MOSS-Transcribe-Diarize-BF16.gguf"
+    }
+   ],
+   "id": "moss-transcribe-diarize",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "zh"
+   ],
+   "license": "apache-2.0",
+   "name": "moss-transcribe-diarize",
+   "params": 916833120,
+   "repo": "handy-computer/moss-transcribe-diarize-gguf",
+   "rtf_cpu": 1.57,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 2.08,
+    "F16": 2.07,
+    "Q4_K_M": 2.59,
+    "Q5_K_M": 1.99,
+    "Q6_K": 1.96,
+    "Q8_0": 1.93
+   }
+  },
+  {
+   "base_model": "nvidia/multitalker-parakeet-streaming-0.6b-v1",
+   "files": [
+    {
+     "file": "multitalker-parakeet-streaming-0.6b-v1-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "d24307ac22e9e691c146a7e2339891638a44a8492a765e4b6c11cff8960cd998",
+     "size": 617132160,
+     "url": "https://huggingface.co/handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf/resolve/d9ed2931bc10058f79809bd88139a27c2ef09a53/multitalker-parakeet-streaming-0.6b-v1-Q4_K_M.gguf"
+    },
+    {
+     "file": "multitalker-parakeet-streaming-0.6b-v1-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "38c98bc0715ee95b4271952630661050a8c3c37f64b8b178c62b8b699668cbdb",
+     "size": 681209984,
+     "url": "https://huggingface.co/handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf/resolve/d9ed2931bc10058f79809bd88139a27c2ef09a53/multitalker-parakeet-streaming-0.6b-v1-Q5_K_M.gguf"
+    },
+    {
+     "file": "multitalker-parakeet-streaming-0.6b-v1-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "d8db95ba257e370d910f42e8197dfc65fb5b879e09e4b13aefaac06af3555fa1",
+     "size": 743197824,
+     "url": "https://huggingface.co/handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf/resolve/d9ed2931bc10058f79809bd88139a27c2ef09a53/multitalker-parakeet-streaming-0.6b-v1-Q6_K.gguf"
+    },
+    {
+     "file": "multitalker-parakeet-streaming-0.6b-v1-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "cf83cedc6777d2528a4d2a8a4bf476174ef7e5c65b86bc6c955f4cc9f5951ac5",
+     "size": 873443456,
+     "url": "https://huggingface.co/handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf/resolve/d9ed2931bc10058f79809bd88139a27c2ef09a53/multitalker-parakeet-streaming-0.6b-v1-Q8_0.gguf"
+    },
+    {
+     "file": "multitalker-parakeet-streaming-0.6b-v1-F16.gguf",
+     "quant": "F16",
+     "sha256": "18116241c595891bccf44cd0207cd749e9ba9e6025ee73ab59606633ec730304",
+     "size": 1482674272,
+     "url": "https://huggingface.co/handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf/resolve/d9ed2931bc10058f79809bd88139a27c2ef09a53/multitalker-parakeet-streaming-0.6b-v1-F16.gguf"
+    },
+    {
+     "file": "multitalker-parakeet-streaming-0.6b-v1-F32.gguf",
+     "quant": "F32",
+     "sha256": "1ae09d63777dc4ae061f1f92b8aa0f7336f51bd995860946cc1f120b7e010f16",
+     "size": 2960100448,
+     "url": "https://huggingface.co/handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf/resolve/d9ed2931bc10058f79809bd88139a27c2ef09a53/multitalker-parakeet-streaming-0.6b-v1-F32.gguf"
+    }
+   ],
+   "id": "multitalker-parakeet-streaming-0.6b-v1",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "other",
+   "name": "multitalker-parakeet-streaming-0.6b-v1",
+   "params": 741337136,
+   "repo": "handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf",
+   "rtf_cpu": 13.41,
+   "streaming": true,
+   "translate": false,
+   "wer_en": {
+    "F16": 2.19,
+    "F32": 2.19,
+    "Q4_K_M": 2.18,
+    "Q5_K_M": 2.18,
+    "Q6_K": 2.2,
+    "Q8_0": 2.18
+   }
+  },
+  {
+   "base_model": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+   "files": [
+    {
+     "file": "nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "41c99fa5fb6f3d35f68e79adc3e755eca2232a8d921178bd647b71194792b8fd",
+     "size": 495831520,
+     "url": "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf"
+    },
+    {
+     "file": "nemotron-3.5-asr-streaming-0.6b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "86429e8c4f7fdcf9b3312269ad1ca6669478ba7805331c4aea7a2e33e9910d65",
+     "size": 559647200,
+     "url": "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q5_K_M.gguf"
+    },
+    {
+     "file": "nemotron-3.5-asr-streaming-0.6b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "4ff802c6207c4a7df23242003fd2aa849a1ab02bba6bc80c3db02e7e82606c28",
+     "size": 621356512,
+     "url": "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q6_K.gguf"
+    },
+    {
+     "file": "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
+     "size": 751094240,
+     "url": "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
+    },
+    {
+     "file": "nemotron-3.5-asr-streaming-0.6b-F16.gguf",
+     "quant": "F16",
+     "sha256": "f21a0cea64d232981def7f8f2b7ab322459703a2e89359962c042c57159755b1",
+     "size": 1277750240,
+     "url": "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-F16.gguf"
+    },
+    {
+     "file": "nemotron-3.5-asr-streaming-0.6b-F32.gguf",
+     "quant": "F32",
+     "sha256": "fbbc82e8e1084301a670fbc4d79c69c0c8980da506352fd83e74a182f38f5b78",
+     "size": 2552277984,
+     "url": "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-F32.gguf"
+    }
+   ],
+   "id": "nemotron-3.5-asr-streaming-0.6b",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "es",
+    "fr",
+    "it",
+    "pt",
+    "nl",
+    "de",
+    "tr",
+    "ru",
+    "ar",
+    "hi",
+    "ja",
+    "ko",
+    "vi",
+    "uk",
+    "pl",
+    "sv",
+    "cs",
+    "nb",
+    "da",
+    "bg",
+    "fi",
+    "hr",
+    "sk",
+    "zh",
+    "hu",
+    "ro",
+    "et"
+   ],
+   "license": "other",
+   "name": "nemotron-3.5-asr-streaming-0.6b",
+   "params": 638875120,
+   "repo": "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+   "rtf_cpu": 10.59,
+   "streaming": true,
+   "translate": false,
+   "wer_en": {
+    "F16": 3.04,
+    "F32": 3.04,
+    "Q4_K_M": 3.3,
+    "Q5_K_M": 3.1,
+    "Q6_K": 3.08,
+    "Q8_0": 3.05
+   }
+  },
+  {
+   "base_model": "nvidia/nemotron-speech-streaming-en-0.6b",
+   "files": [
+    {
+     "file": "nemotron-speech-streaming-en-0.6b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "dc959ca31499b114e395c44eb4f0778968f20e5cfb03305a08a39925b2da8e1e",
+     "size": 475436032,
+     "url": "https://huggingface.co/handy-computer/nemotron-speech-streaming-en-0.6b-gguf/resolve/7df420cc3fb915a3b334560dac712af44fc41ef5/nemotron-speech-streaming-en-0.6b-Q4_K_M.gguf"
+    },
+    {
+     "file": "nemotron-speech-streaming-en-0.6b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "d6b8b36f9aca6a751779d064a29f6583f3e82c0c15646904383c8436a25c1489",
+     "size": 538989568,
+     "url": "https://huggingface.co/handy-computer/nemotron-speech-streaming-en-0.6b-gguf/resolve/7df420cc3fb915a3b334560dac712af44fc41ef5/nemotron-speech-streaming-en-0.6b-Q5_K_M.gguf"
+    },
+    {
+     "file": "nemotron-speech-streaming-en-0.6b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "b31fcc5e9f3b00cb33c10ff0f05d7e71265f160eeed6b497a65cd296dddd21f3",
+     "size": 600420352,
+     "url": "https://huggingface.co/handy-computer/nemotron-speech-streaming-en-0.6b-gguf/resolve/7df420cc3fb915a3b334560dac712af44fc41ef5/nemotron-speech-streaming-en-0.6b-Q6_K.gguf"
+    },
+    {
+     "file": "nemotron-speech-streaming-en-0.6b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "90d8c89714cd31efc88be62a40c6b2bea57e0cc2063af1ffe2c28f1a228ca110",
+     "size": 729650176,
+     "url": "https://huggingface.co/handy-computer/nemotron-speech-streaming-en-0.6b-gguf/resolve/7df420cc3fb915a3b334560dac712af44fc41ef5/nemotron-speech-streaming-en-0.6b-Q8_0.gguf"
+    },
+    {
+     "file": "nemotron-speech-streaming-en-0.6b-F16.gguf",
+     "quant": "F16",
+     "sha256": "dc8c4bd7dce6e1805b4e00bef391c3870aca4fa99a563ec02a6f5e0f15d2f489",
+     "size": 1237652608,
+     "url": "https://huggingface.co/handy-computer/nemotron-speech-streaming-en-0.6b-gguf/resolve/7df420cc3fb915a3b334560dac712af44fc41ef5/nemotron-speech-streaming-en-0.6b-F16.gguf"
+    },
+    {
+     "file": "nemotron-speech-streaming-en-0.6b-F32.gguf",
+     "quant": "F32",
+     "sha256": "53bdc1d4d21e419d4da513d2df31ce88784e25cc908841386490658854b13b41",
+     "size": 2472386176,
+     "url": "https://huggingface.co/handy-computer/nemotron-speech-streaming-en-0.6b-gguf/resolve/7df420cc3fb915a3b334560dac712af44fc41ef5/nemotron-speech-streaming-en-0.6b-F32.gguf"
+    }
+   ],
+   "id": "nemotron-speech-streaming-en-0.6b",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "other",
+   "name": "nemotron-speech-streaming-en-0.6b",
+   "params": 618826304,
+   "repo": "handy-computer/nemotron-speech-streaming-en-0.6b-gguf",
+   "rtf_cpu": 13.57,
+   "streaming": true,
+   "translate": false,
+   "wer_en": {
+    "F16": 2.31,
+    "F32": 2.31,
+    "Q4_K_M": 2.38,
+    "Q5_K_M": 2.34,
+    "Q6_K": 2.29,
+    "Q8_0": 2.31
+   }
+  },
+  {
+   "base_model": "oruk/orukeet",
+   "files": [
+    {
+     "file": "orukeet-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "ead20f27cef24a39c2c8ad262bff88c3b5e0d4b514ff761cf7a08c5e172ccd9e",
+     "size": 485425632,
+     "url": "https://huggingface.co/handy-computer/orukeet-gguf/resolve/c5511a3850fce1cbbfa5d94ef815966e1d99275f/orukeet-Q4_K_M.gguf"
+    },
+    {
+     "file": "orukeet-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "9c05613300c17ed293c6a7ec7058883dc3ffa22c7e13250fba0e94d76522b486",
+     "size": 548946400,
+     "url": "https://huggingface.co/handy-computer/orukeet-gguf/resolve/c5511a3850fce1cbbfa5d94ef815966e1d99275f/orukeet-Q5_K_M.gguf"
+    },
+    {
+     "file": "orukeet-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "187d2dfcd14fdfc01fbca14d3a05ede4de7fe70cd5111a46bca979366ff26da1",
+     "size": 610342368,
+     "url": "https://huggingface.co/handy-computer/orukeet-gguf/resolve/c5511a3850fce1cbbfa5d94ef815966e1d99275f/orukeet-Q6_K.gguf"
+    },
+    {
+     "file": "orukeet-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "68cd64b2a6c3c747f0a9f109884ed75b277c266c0fb8e5888c5a9f4d824fb9f7",
+     "size": 739508704,
+     "url": "https://huggingface.co/handy-computer/orukeet-gguf/resolve/c5511a3850fce1cbbfa5d94ef815966e1d99275f/orukeet-Q8_0.gguf"
+    },
+    {
+     "file": "orukeet-F16.gguf",
+     "quant": "F16",
+     "sha256": "cd10c7a65197a7d3c07fe182652ed2af0699c1b7a375809a6426dd7a126c1621",
+     "size": 1255869984,
+     "url": "https://huggingface.co/handy-computer/orukeet-gguf/resolve/c5511a3850fce1cbbfa5d94ef815966e1d99275f/orukeet-F16.gguf"
+    },
+    {
+     "file": "orukeet-F32.gguf",
+     "quant": "F32",
+     "sha256": "ad77e42fb2819cb03e86f00f1c02e50ef0340021e4022cd93d8f2cfbf7bb121a",
+     "size": 2508435744,
+     "url": "https://huggingface.co/handy-computer/orukeet-gguf/resolve/c5511a3850fce1cbbfa5d94ef815966e1d99275f/orukeet-F32.gguf"
+    }
+   ],
+   "id": "orukeet",
+   "lang_detect": true,
+   "languages": [
+    "bg",
+    "hr",
+    "cs",
+    "da",
+    "nl",
+    "en",
+    "et",
+    "fi",
+    "fr",
+    "de",
+    "el",
+    "hu",
+    "it",
+    "lv",
+    "lt",
+    "mt",
+    "pl",
+    "pt",
+    "ro",
+    "ru",
+    "sk",
+    "sl",
+    "es",
+    "sv",
+    "uk"
+   ],
+   "license": "cc-by-sa-4.0",
+   "name": "orukeet",
+   "params": 627934992,
+   "repo": "handy-computer/orukeet-gguf",
+   "rtf_cpu": 13.62,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.86,
+    "F32": 1.86,
+    "Q4_K_M": 1.95,
+    "Q5_K_M": 1.83,
+    "Q6_K": 1.86,
+    "Q8_0": 1.86
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-ctc-0.6b",
+   "files": [
+    {
+     "file": "parakeet-ctc-0.6b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "2a0dc545d06184b30cd3441a38811f09867a1d6b7b89f008f16bd75c1030ccdb",
+     "size": 469302464,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-0.6b-gguf/resolve/437fa3bded0ca9bb67cae801964396c913256c16/parakeet-ctc-0.6b-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-ctc-0.6b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "8837b9489682f870dae15e126940956d4c0a03fbe884d82edcd8b8c8b1dc0f22",
+     "size": 532544704,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-0.6b-gguf/resolve/437fa3bded0ca9bb67cae801964396c913256c16/parakeet-ctc-0.6b-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-ctc-0.6b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "3ecb616005ea4bffa67fb5e94a02f155a48b52cb40a466af7982a4a4173692f6",
+     "size": 593644736,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-0.6b-gguf/resolve/437fa3bded0ca9bb67cae801964396c913256c16/parakeet-ctc-0.6b-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-ctc-0.6b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "e47ae86c1b34dbaf054334592575c29aee7de3546e75d1f0ccee05904c5c49ae",
+     "size": 722271424,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-0.6b-gguf/resolve/437fa3bded0ca9bb67cae801964396c913256c16/parakeet-ctc-0.6b-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-ctc-0.6b-F16.gguf",
+     "quant": "F16",
+     "sha256": "9529e692dce3cd2c84dd63c576095d02cbed245fb4ccbe264783fdf59677f1b5",
+     "size": 1220181184,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-0.6b-gguf/resolve/437fa3bded0ca9bb67cae801964396c913256c16/parakeet-ctc-0.6b-F16.gguf"
+    },
+    {
+     "file": "parakeet-ctc-0.6b-F32.gguf",
+     "quant": "F32",
+     "sha256": "2956c41281192c0657da23ab24ab20a961278e3a4e8e038eab2cdb33145acd75",
+     "size": 2435482816,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-0.6b-gguf/resolve/437fa3bded0ca9bb67cae801964396c913256c16/parakeet-ctc-0.6b-F32.gguf"
+    }
+   ],
+   "id": "parakeet-ctc-0.6b",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-ctc-0.6b",
+   "params": 610090592,
+   "repo": "handy-computer/parakeet-ctc-0.6b-gguf",
+   "rtf_cpu": 15.16,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.87,
+    "F32": 1.87,
+    "Q4_K_M": 1.9,
+    "Q5_K_M": 1.87,
+    "Q6_K": 1.84,
+    "Q8_0": 1.87
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-ctc-1.1b",
+   "files": [
+    {
+     "file": "parakeet-ctc-1.1b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "9e4c104086067ee3afefbf7d41929024261682926cf0a57cc5a1f557fc5b69e5",
+     "size": 818156576,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-1.1b-gguf/resolve/93c267c7c5c97dddc7ce98648b086422419e948b/parakeet-ctc-1.1b-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-ctc-1.1b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "8b38f60bb1c56b518953a39703068adc09991993b5aab52782e038a86a6c04cc",
+     "size": 928584736,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-1.1b-gguf/resolve/93c267c7c5c97dddc7ce98648b086422419e948b/parakeet-ctc-1.1b-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-ctc-1.1b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "23a6fd82f39cba5ef97873cb1228dbe7acc2ffd6425276ad668c2d48b020b6eb",
+     "size": 1035248672,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-1.1b-gguf/resolve/93c267c7c5c97dddc7ce98648b086422419e948b/parakeet-ctc-1.1b-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-ctc-1.1b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "4f66c66bdef2c6901384a218a01d8a614698010e880bbdfe44f3bcf0b11ae0f2",
+     "size": 1259869216,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-1.1b-gguf/resolve/93c267c7c5c97dddc7ce98648b086422419e948b/parakeet-ctc-1.1b-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-ctc-1.1b-F16.gguf",
+     "quant": "F16",
+     "sha256": "1f4e4e6301d341655cf35f329852c7211a3fbcfa7564afd1dc9384b5142d3e32",
+     "size": 2129368096,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-1.1b-gguf/resolve/93c267c7c5c97dddc7ce98648b086422419e948b/parakeet-ctc-1.1b-F16.gguf"
+    },
+    {
+     "file": "parakeet-ctc-1.1b-F32.gguf",
+     "quant": "F32",
+     "sha256": "dbbc3ed2ccf7a0633b4aaa18e930113973f79dd98a2f2f79b5d4f1ef0db4ff05",
+     "size": 4250639392,
+     "url": "https://huggingface.co/handy-computer/parakeet-ctc-1.1b-gguf/resolve/93c267c7c5c97dddc7ce98648b086422419e948b/parakeet-ctc-1.1b-F32.gguf"
+    }
+   ],
+   "id": "parakeet-ctc-1.1b",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-ctc-1.1b",
+   "params": 1064684048,
+   "repo": "handy-computer/parakeet-ctc-1.1b-gguf",
+   "rtf_cpu": 8.93,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.85,
+    "F32": 1.85,
+    "Q4_K_M": 1.9,
+    "Q5_K_M": 1.84,
+    "Q6_K": 1.85,
+    "Q8_0": 1.85
+   }
+  },
+  {
+   "base_model": "primeline/parakeet-primeline",
+   "files": [
+    {
+     "file": "parakeet-primeline-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "8b01f1893fa1db166d8b08375f8300c140fc7f110af7e9b68480a27b145dad7d",
+     "size": 485425568,
+     "url": "https://huggingface.co/handy-computer/parakeet-primeline-gguf/resolve/cf04224dee82c8ad7184e99562680f2926c82bf7/parakeet-primeline-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-primeline-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "a1dd12b7f374c33d5e33a61c8a852035d27064cefe53f8cdfc3410cddf3b31c8",
+     "size": 548946336,
+     "url": "https://huggingface.co/handy-computer/parakeet-primeline-gguf/resolve/cf04224dee82c8ad7184e99562680f2926c82bf7/parakeet-primeline-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-primeline-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "62301f4a2c393421a4162864718e85edac7eb85ce8ed82c343a4b994b6d85594",
+     "size": 610342304,
+     "url": "https://huggingface.co/handy-computer/parakeet-primeline-gguf/resolve/cf04224dee82c8ad7184e99562680f2926c82bf7/parakeet-primeline-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-primeline-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "dbd1ec2985aea64d16550a0068ea9153c0bc01955bf2a5c18b74ca213546d3cd",
+     "size": 739508640,
+     "url": "https://huggingface.co/handy-computer/parakeet-primeline-gguf/resolve/cf04224dee82c8ad7184e99562680f2926c82bf7/parakeet-primeline-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-primeline-F16.gguf",
+     "quant": "F16",
+     "sha256": "a6f626fa7263cf55a27eda312d1f91dfe6edfeb8de85a5536fbb3cb93af064e1",
+     "size": 1255869920,
+     "url": "https://huggingface.co/handy-computer/parakeet-primeline-gguf/resolve/cf04224dee82c8ad7184e99562680f2926c82bf7/parakeet-primeline-F16.gguf"
+    },
+    {
+     "file": "parakeet-primeline-F32.gguf",
+     "quant": "F32",
+     "sha256": "6075ededee05ad520b3402bf089d00cd87819025b8509f746587c822d99a9a2d",
+     "size": 2508435680,
+     "url": "https://huggingface.co/handy-computer/parakeet-primeline-gguf/resolve/cf04224dee82c8ad7184e99562680f2926c82bf7/parakeet-primeline-F32.gguf"
+    }
+   ],
+   "id": "parakeet-primeline",
+   "lang_detect": true,
+   "languages": [
+    "bg",
+    "hr",
+    "cs",
+    "da",
+    "nl",
+    "en",
+    "et",
+    "fi",
+    "fr",
+    "de",
+    "el",
+    "hu",
+    "it",
+    "lv",
+    "lt",
+    "mt",
+    "pl",
+    "pt",
+    "ro",
+    "ru",
+    "sk",
+    "sl",
+    "es",
+    "sv",
+    "uk"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-primeline",
+   "params": 627934960,
+   "repo": "handy-computer/parakeet-primeline-gguf",
+   "rtf_cpu": 13.63,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 2.19,
+    "F32": 2.2,
+    "Q4_K_M": 2.26,
+    "Q5_K_M": 2.2,
+    "Q6_K": 2.19,
+    "Q8_0": 2.2
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-rnnt-0.6b",
+   "files": [
+    {
+     "file": "parakeet-rnnt-0.6b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "70b32229e2b576a3be66176ebc484476f3d715d911c11a4e17167790ce378cf7",
+     "size": 476390816,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-0.6b-gguf/resolve/3373d1aeee5a5257c94c2fa6c4b12302ce7be2aa/parakeet-rnnt-0.6b-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-0.6b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "b2910e4f81f35cc99ce830847040ac469c07aa27d289e9e517d6b73b47a4d7d5",
+     "size": 539714976,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-0.6b-gguf/resolve/3373d1aeee5a5257c94c2fa6c4b12302ce7be2aa/parakeet-rnnt-0.6b-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-0.6b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "fcc8fd8e1b21311eefcc6ebabc2cc059df30cbbd296dc3013aa7727f070a3530",
+     "size": 600902048,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-0.6b-gguf/resolve/3373d1aeee5a5257c94c2fa6c4b12302ce7be2aa/parakeet-rnnt-0.6b-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-0.6b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "06da5ba773736984e0513037b27ff9300e95c55eaa2b79dbc688efc34b25df51",
+     "size": 729687456,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-0.6b-gguf/resolve/3373d1aeee5a5257c94c2fa6c4b12302ce7be2aa/parakeet-rnnt-0.6b-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-0.6b-F16.gguf",
+     "quant": "F16",
+     "sha256": "5adef2718a57b02745db5717c245b90aae8b450139ccbfb2cf5ed2fb955192c0",
+     "size": 1235969568,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-0.6b-gguf/resolve/3373d1aeee5a5257c94c2fa6c4b12302ce7be2aa/parakeet-rnnt-0.6b-F16.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-0.6b-F32.gguf",
+     "quant": "F32",
+     "sha256": "9312f95f6a2271eae0f04d4e499647bfb8dcf1447e41d77709435f8d4df61f52",
+     "size": 2467033120,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-0.6b-gguf/resolve/3373d1aeee5a5257c94c2fa6c4b12302ce7be2aa/parakeet-rnnt-0.6b-F32.gguf"
+    }
+   ],
+   "id": "parakeet-rnnt-0.6b",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-rnnt-0.6b",
+   "params": 617984784,
+   "repo": "handy-computer/parakeet-rnnt-0.6b-gguf",
+   "rtf_cpu": 14.85,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.62,
+    "F32": 1.62,
+    "Q4_K_M": 1.66,
+    "Q5_K_M": 1.62,
+    "Q6_K": 1.62,
+    "Q8_0": 1.62
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-rnnt-1.1b",
+   "files": [
+    {
+     "file": "parakeet-rnnt-1.1b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "9e8636f491867751ca5b5c18ca91adf52014b1ae406b46516a9a8680ba1049a1",
+     "size": 825244928,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-1.1b-gguf/resolve/ed23dc01082573cc3d220a4bf12f31797f55eaf6/parakeet-rnnt-1.1b-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-1.1b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "8ee2ead0c30773440743591cd8a9f8ac180c27f450c9b053805b2bab6bf352cb",
+     "size": 935755008,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-1.1b-gguf/resolve/ed23dc01082573cc3d220a4bf12f31797f55eaf6/parakeet-rnnt-1.1b-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-1.1b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "14378bc2ccd71be446d7c869fb369ec856dcd02ca5a895194da6855b1d529665",
+     "size": 1042505984,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-1.1b-gguf/resolve/ed23dc01082573cc3d220a4bf12f31797f55eaf6/parakeet-rnnt-1.1b-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-1.1b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "e1918556aa0e2b857c12cb365cff4f33b0f1cbcc0e0769499ec38948c8363775",
+     "size": 1267285248,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-1.1b-gguf/resolve/ed23dc01082573cc3d220a4bf12f31797f55eaf6/parakeet-rnnt-1.1b-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-1.1b-F16.gguf",
+     "quant": "F16",
+     "sha256": "d4608d90b26a3ff3f741b091d74ee0d0d9f9d30a7888914f251cb8821c2e1358",
+     "size": 2145156480,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-1.1b-gguf/resolve/ed23dc01082573cc3d220a4bf12f31797f55eaf6/parakeet-rnnt-1.1b-F16.gguf"
+    },
+    {
+     "file": "parakeet-rnnt-1.1b-F32.gguf",
+     "quant": "F32",
+     "sha256": "875406c56378dcc355c7fb3ac1d9ba2e7a0ab76432b7840839f02cdf2ef60901",
+     "size": 4282189696,
+     "url": "https://huggingface.co/handy-computer/parakeet-rnnt-1.1b-gguf/resolve/ed23dc01082573cc3d220a4bf12f31797f55eaf6/parakeet-rnnt-1.1b-F32.gguf"
+    }
+   ],
+   "id": "parakeet-rnnt-1.1b",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-rnnt-1.1b",
+   "params": 1072578240,
+   "repo": "handy-computer/parakeet-rnnt-1.1b-gguf",
+   "rtf_cpu": 8.59,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.45,
+    "F32": 1.45,
+    "Q4_K_M": 1.41,
+    "Q5_K_M": 1.43,
+    "Q6_K": 1.43,
+    "Q8_0": 1.46
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-tdt-0.6b-v2",
+   "files": [
+    {
+     "file": "parakeet-tdt-0.6b-v2-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "4853f9653f641d376e6f7de65d73c7a34a73677704a606727bf51acc83f999f3",
+     "size": 475491840,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v2-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "dfa904520b95451599683613fea47766c378c5fdf5d8cddf48151226b6eaec85",
+     "size": 539012608,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v2-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "44c7c363438e03b613cf8ced8b7e6fd1beb2b3805008136fe5e922ab3c79eea9",
+     "size": 600408576,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v2-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "f0d0e99cebb6d3b83f1f7069b82b5d3c2e39a54545b0da039cb4bafd9c4e5caa",
+     "size": 729574912,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v2-F16.gguf",
+     "quant": "F16",
+     "sha256": "8440125213cb92625e3993ec751c3919dd329da9ae9149951cd6f95dd8bafe81",
+     "size": 1237334592,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-F16.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v2-F32.gguf",
+     "quant": "F32",
+     "sha256": "501ba1e61965cdb28689614c648d2c560d75895b47a2948b9010b4e8c9cf1325",
+     "size": 2471550272,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-F32.gguf"
+    }
+   ],
+   "id": "parakeet-tdt-0.6b-v2",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-tdt-0.6b-v2",
+   "params": 618667296,
+   "repo": "handy-computer/parakeet-tdt-0.6b-v2-gguf",
+   "rtf_cpu": 14.27,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.68,
+    "F32": 1.68,
+    "Q4_K_M": 1.72,
+    "Q5_K_M": 1.7,
+    "Q6_K": 1.7,
+    "Q8_0": 1.69
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-tdt-0.6b-v3",
+   "files": [
+    {
+     "file": "parakeet-tdt-0.6b-v3-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "b68557be1e3c40207fd7c4bd9d63f1d3316b963f15325bfb0cc16a8bb0ffd181",
+     "size": 485425504,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v3-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "cc722e76adc1a629fc0b2535de879d99b8160d07ad4c0215e2ca7d7ea0ae4b8f",
+     "size": 548946272,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v3-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "ab1bbcbe3e1c4c2ec12ca1df1aeafd22e9043ce7262e4b5f5c5d7d76418a9ae8",
+     "size": 610342240,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v3-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7",
+     "size": 739508576,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v3-F16.gguf",
+     "quant": "F16",
+     "sha256": "d9ec7e2c39da7b4fec3e01e71e82c7f7bbe97741e08c0c054091bf3d520a41d3",
+     "size": 1255869856,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-F16.gguf"
+    },
+    {
+     "file": "parakeet-tdt-0.6b-v3-F32.gguf",
+     "quant": "F32",
+     "sha256": "bbd36acd8c6fbb817e658e3acc9f75002cb6a74932c687e74fefccfcc7b9f47e",
+     "size": 2508435616,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-F32.gguf"
+    }
+   ],
+   "id": "parakeet-tdt-0.6b-v3",
+   "lang_detect": true,
+   "languages": [
+    "bg",
+    "hr",
+    "cs",
+    "da",
+    "nl",
+    "en",
+    "et",
+    "fi",
+    "fr",
+    "de",
+    "el",
+    "hu",
+    "it",
+    "lv",
+    "lt",
+    "mt",
+    "pl",
+    "pt",
+    "ro",
+    "ru",
+    "sk",
+    "sl",
+    "es",
+    "sv",
+    "uk"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-tdt-0.6b-v3",
+   "params": 627934928,
+   "repo": "handy-computer/parakeet-tdt-0.6b-v3-gguf",
+   "rtf_cpu": 13.66,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.95,
+    "F32": 1.95,
+    "Q4_K_M": 1.98,
+    "Q5_K_M": 1.92,
+    "Q6_K": 1.93,
+    "Q8_0": 1.94
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-tdt-1.1b",
+   "files": [
+    {
+     "file": "parakeet-tdt-1.1b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "38e85773763afe7b79c8538fbd091367b4644123358ea209eeb665879e3fcb13",
+     "size": 825248416,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-1.1b-gguf/resolve/bc3855fb729e7d925e1e19c99f7b4f0fe195fb44/parakeet-tdt-1.1b-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt-1.1b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "18c22888fed10676fde72fdd5b833fab9175a6abf4e0cb390eb0a59b0b107cd3",
+     "size": 935758496,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-1.1b-gguf/resolve/bc3855fb729e7d925e1e19c99f7b4f0fe195fb44/parakeet-tdt-1.1b-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt-1.1b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "7481b215629957031205893c99e9b6472278bc713354f723c682562c39ef52f4",
+     "size": 1042509472,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-1.1b-gguf/resolve/bc3855fb729e7d925e1e19c99f7b4f0fe195fb44/parakeet-tdt-1.1b-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-tdt-1.1b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "8479e1ed0b7244e293ed81f547c69074a38c00e17511d8ecae2d273bc7b2ceda",
+     "size": 1267288736,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-1.1b-gguf/resolve/bc3855fb729e7d925e1e19c99f7b4f0fe195fb44/parakeet-tdt-1.1b-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-tdt-1.1b-F16.gguf",
+     "quant": "F16",
+     "sha256": "5d5e36992fa5102a1eac29c4356b51e6de8577c5d8e55e250cfd792a018dc8f2",
+     "size": 2145162976,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-1.1b-gguf/resolve/bc3855fb729e7d925e1e19c99f7b4f0fe195fb44/parakeet-tdt-1.1b-F16.gguf"
+    },
+    {
+     "file": "parakeet-tdt-1.1b-F32.gguf",
+     "quant": "F32",
+     "sha256": "627ba3def22f056fa48d62bcdb70455b75c81d5fb7f30028f63682fb9ffe1684",
+     "size": 4282202592,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt-1.1b-gguf/resolve/bc3855fb729e7d925e1e19c99f7b4f0fe195fb44/parakeet-tdt-1.1b-F32.gguf"
+    }
+   ],
+   "id": "parakeet-tdt-1.1b",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-tdt-1.1b",
+   "params": 1072581488,
+   "repo": "handy-computer/parakeet-tdt-1.1b-gguf",
+   "rtf_cpu": 8.8,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.39,
+    "F32": 1.39,
+    "Q4_K_M": 1.42,
+    "Q5_K_M": 1.39,
+    "Q6_K": 1.4,
+    "Q8_0": 1.38
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-tdt_ctc-1.1b",
+   "files": [
+    {
+     "file": "parakeet-tdt_ctc-1.1b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "5c27d9289e23019c459b1cef87baa5b672343733ccd3762796e68aec447169cd",
+     "size": 825248000,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-1.1b-gguf/resolve/3c3c2d921217597c4b3027e4012b524bad9c8bdc/parakeet-tdt_ctc-1.1b-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-1.1b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "da23eb8c78fe3813b88f616db85e8191cfbfffdbc2b8bb8bd74a94eb8987caee",
+     "size": 935758080,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-1.1b-gguf/resolve/3c3c2d921217597c4b3027e4012b524bad9c8bdc/parakeet-tdt_ctc-1.1b-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-1.1b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "961ac90755f0d0bff3515a1b09eaf1fee6049af46c03b733f94ffff6b857b917",
+     "size": 1042509056,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-1.1b-gguf/resolve/3c3c2d921217597c4b3027e4012b524bad9c8bdc/parakeet-tdt_ctc-1.1b-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-1.1b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "56e826b96d0a625eb41f18d8f51d8600e8ec5959bf5278fe3929e5efefe787d6",
+     "size": 1267288320,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-1.1b-gguf/resolve/3c3c2d921217597c4b3027e4012b524bad9c8bdc/parakeet-tdt_ctc-1.1b-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-1.1b-F16.gguf",
+     "quant": "F16",
+     "sha256": "185565daaf0352c33464d421ae3cab8e6057890f7d6ead9d5e2b8333cc7ecff7",
+     "size": 2145162560,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-1.1b-gguf/resolve/3c3c2d921217597c4b3027e4012b524bad9c8bdc/parakeet-tdt_ctc-1.1b-F16.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-1.1b-F32.gguf",
+     "quant": "F32",
+     "sha256": "16bdd9ecd6ae993e2b89edfa103ddc7ffc6e63a63d07e4f858038b8190a5972c",
+     "size": 4282202176,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-1.1b-gguf/resolve/3c3c2d921217597c4b3027e4012b524bad9c8bdc/parakeet-tdt_ctc-1.1b-F32.gguf"
+    }
+   ],
+   "id": "parakeet-tdt_ctc-1.1b",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-tdt_ctc-1.1b",
+   "params": 1072581280,
+   "repo": "handy-computer/parakeet-tdt_ctc-1.1b-gguf",
+   "rtf_cpu": 9.31,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.87,
+    "F32": 1.87,
+    "Q4_K_M": 1.91,
+    "Q5_K_M": 1.87,
+    "Q6_K": 1.87,
+    "Q8_0": 1.87
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-tdt_ctc-110m",
+   "files": [
+    {
+     "file": "parakeet-tdt_ctc-110m-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "486414fd90185a8c8a4ced7c123cfb133ff4f7958426c6b8bd9049946b56b448",
+     "size": 89989600,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-110m-gguf/resolve/1c3f0d5378fdd358905cc410a93ed9e64f52d170/parakeet-tdt_ctc-110m-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-110m-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "1552e707fddb59e3741b66ea917fc91a9381e336a4730739b1d2d448cb013a2e",
+     "size": 101335520,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-110m-gguf/resolve/1c3f0d5378fdd358905cc410a93ed9e64f52d170/parakeet-tdt_ctc-110m-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-110m-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "c20520c245adf82e5166005f599cb3b95e7cf5192117e845be4bbcd39226d483",
+     "size": 112311264,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-110m-gguf/resolve/1c3f0d5378fdd358905cc410a93ed9e64f52d170/parakeet-tdt_ctc-110m-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-110m-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "7dd44c74a331d788a4e5f8b16913b3feb29ced22cf5613aad0e0f6cd30516296",
+     "size": 135373280,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-110m-gguf/resolve/1c3f0d5378fdd358905cc410a93ed9e64f52d170/parakeet-tdt_ctc-110m-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-110m-F16.gguf",
+     "quant": "F16",
+     "sha256": "965cc3f8e171286ecb4d4e6646b407a1782a97da9aed22f88d1e0ec6c96b2358",
+     "size": 229334560,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-110m-gguf/resolve/1c3f0d5378fdd358905cc410a93ed9e64f52d170/parakeet-tdt_ctc-110m-F16.gguf"
+    },
+    {
+     "file": "parakeet-tdt_ctc-110m-F32.gguf",
+     "quant": "F32",
+     "sha256": "99701a7de4b2435e63efdf43db060f3dce723294fe028afc6f0852f406060d93",
+     "size": 456524064,
+     "url": "https://huggingface.co/handy-computer/parakeet-tdt_ctc-110m-gguf/resolve/1c3f0d5378fdd358905cc410a93ed9e64f52d170/parakeet-tdt_ctc-110m-F32.gguf"
+    }
+   ],
+   "id": "parakeet-tdt_ctc-110m",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-tdt_ctc-110m",
+   "params": 114667280,
+   "repo": "handy-computer/parakeet-tdt_ctc-110m-gguf",
+   "rtf_cpu": 50.03,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 2.43,
+    "F32": 2.43,
+    "Q4_K_M": 2.53,
+    "Q5_K_M": 2.47,
+    "Q6_K": 2.44,
+    "Q8_0": 2.43
+   }
+  },
+  {
+   "base_model": "moondream/parakeet-ultra",
+   "files": [
+    {
+     "file": "parakeet-ultra-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "c69b7a5f9071a7afd8a1818ef7ae542c386c4b01ed0cac380c19a99947646bf9",
+     "size": 486280096,
+     "url": "https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-ultra-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "f6e3d8172547a3bb468e92ff395696e6d2e0371a9e52690a27741b4e8561c997",
+     "size": 549800864,
+     "url": "https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-ultra-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "ba146253d9b5eb7c729dfa897174cb5bad0a7d05129863805e0caf7d571c7493",
+     "size": 611196832,
+     "url": "https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-ultra-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59",
+     "size": 740363168,
+     "url": "https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-ultra-F16.gguf",
+     "quant": "F16",
+     "sha256": "cd97f94fa50a034a9019a47e2ed7a2de3963eed8316d1df4de9efdccca6fe78d",
+     "size": 1256724448,
+     "url": "https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-F16.gguf"
+    },
+    {
+     "file": "parakeet-ultra-F32.gguf",
+     "quant": "F32",
+     "sha256": "ae1df0bc1abd85407718b9be718634aad81cbba44ae18da078cc0dfa2d6eb5de",
+     "size": 2509290240,
+     "url": "https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/a1539be1b849ea7463b88343e5277b373d0c4ea9/parakeet-ultra-F32.gguf"
+    }
+   ],
+   "id": "parakeet-ultra",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "de",
+    "fr",
+    "es",
+    "it",
+    "pt",
+    "ru",
+    "uk",
+    "hr",
+    "sl",
+    "lv",
+    "lt",
+    "et",
+    "fi",
+    "sv",
+    "da",
+    "nl",
+    "pl",
+    "cs",
+    "sk",
+    "hu",
+    "ro",
+    "bg",
+    "el",
+    "mt"
+   ],
+   "license": "cc-by-4.0",
+   "name": "parakeet-ultra",
+   "params": 628362224,
+   "repo": "handy-computer/parakeet-ultra-gguf",
+   "rtf_cpu": 13.29,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.8,
+    "F32": 1.8,
+    "Q4_K_M": 1.82,
+    "Q5_K_M": 1.81,
+    "Q6_K": 1.81,
+    "Q8_0": 1.8
+   }
+  },
+  {
+   "base_model": "nvidia/parakeet-unified-en-0.6b",
+   "files": [
+    {
+     "file": "parakeet-unified-en-0.6b-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "a8bf3de2b393bd14ead5a858c3748d5e3b07a20fdeabdd3b498fba4f463fa929",
+     "size": 477274496,
+     "url": "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/843b1b175ace04f5a89d379c79e2518c0d065b25/parakeet-unified-en-0.6b-Q4_K_M.gguf"
+    },
+    {
+     "file": "parakeet-unified-en-0.6b-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "f9def6f9b4e83ab7d006df3e1b676dfa1f973a3b6da232a9c99fcaa66bcd2836",
+     "size": 540795264,
+     "url": "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/843b1b175ace04f5a89d379c79e2518c0d065b25/parakeet-unified-en-0.6b-Q5_K_M.gguf"
+    },
+    {
+     "file": "parakeet-unified-en-0.6b-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "912c42ec3fd1afa31b7eda45684577feadf413249ca767fa912a89c4810e38d0",
+     "size": 602191232,
+     "url": "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/843b1b175ace04f5a89d379c79e2518c0d065b25/parakeet-unified-en-0.6b-Q6_K.gguf"
+    },
+    {
+     "file": "parakeet-unified-en-0.6b-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
+     "size": 731357568,
+     "url": "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/843b1b175ace04f5a89d379c79e2518c0d065b25/parakeet-unified-en-0.6b-Q8_0.gguf"
+    },
+    {
+     "file": "parakeet-unified-en-0.6b-F16.gguf",
+     "quant": "F16",
+     "sha256": "4a284b229bff9dc66aa00666fdcc2419c0f82a5adb5a36f7a48a4e0713c35492",
+     "size": 1239114240,
+     "url": "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/843b1b175ace04f5a89d379c79e2518c0d065b25/parakeet-unified-en-0.6b-F16.gguf"
+    },
+    {
+     "file": "parakeet-unified-en-0.6b-F32.gguf",
+     "quant": "F32",
+     "sha256": "81d3a8c7676324a4dae977dac0f5900dc1468755fdf3b5369261bb759f17fdf3",
+     "size": 2473323520,
+     "url": "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/843b1b175ace04f5a89d379c79e2518c0d065b25/parakeet-unified-en-0.6b-F32.gguf"
+    }
+   ],
+   "id": "parakeet-unified-en-0.6b",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "other",
+   "name": "parakeet-unified-en-0.6b",
+   "params": 619557120,
+   "repo": "handy-computer/parakeet-unified-en-0.6b-gguf",
+   "rtf_cpu": 13.96,
+   "streaming": true,
+   "translate": false,
+   "wer_en": {
+    "F16": 1.59,
+    "F32": 1.59,
+    "Q4_K_M": 1.62,
+    "Q5_K_M": 1.58,
+    "Q6_K": 1.61,
+    "Q8_0": 1.6
+   }
+  },
+  {
+   "base_model": "Qwen/Qwen3-ASR-0.6B",
+   "files": [
+    {
+     "file": "Qwen3-ASR-0.6B-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "5b58f32a58ffa2c8783e0b0963485623e286e6272d953dfc9e28bc3447dee0c0",
+     "size": 589560480,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-Q4_K_M.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-0.6B-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "062a7bcb18675c2fe5ffd0e8b354eac6a1ceada9b2af9ef7168746ae16b54358",
+     "size": 645356192,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-Q5_K_M.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-0.6B-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "3b051f108f03c0c91bbe1a3b2c1ee15e3ed51e4caec2a48751b01f2a21441cc3",
+     "size": 690417824,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-Q6_K.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-0.6B-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
+     "size": 850423456,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-Q8_0.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-0.6B-F16.gguf",
+     "quant": "F16",
+     "sha256": "5c90e4b1a72a4c59cd12afa5ebb0cc8628848148f2b337d025cc5121ae4d2eea",
+     "size": 1579793056,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-F16.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-0.6B-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "dadb8196937aa6b998a94124a043fce694e0ab6c3c6eb0ae1669fa49d04aab84",
+     "size": 1571490016,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-BF16.gguf"
+    }
+   ],
+   "id": "qwen3-asr-0.6b",
+   "lang_detect": true,
+   "languages": [
+    "zh",
+    "en",
+    "yue",
+    "ar",
+    "de",
+    "fr",
+    "es",
+    "pt",
+    "id",
+    "it",
+    "ko",
+    "ru",
+    "th",
+    "vi",
+    "ja",
+    "tr",
+    "hi",
+    "ms",
+    "nl",
+    "sv",
+    "da",
+    "fi",
+    "pl",
+    "cs",
+    "fil",
+    "fa",
+    "el",
+    "ro",
+    "hu",
+    "mk"
+   ],
+   "license": "apache-2.0",
+   "name": "Qwen3-ASR-0.6B",
+   "params": 789896528,
+   "repo": "handy-computer/Qwen3-ASR-0.6B-gguf",
+   "rtf_cpu": 5.29,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 2.12,
+    "F16": 2.12,
+    "Q4_K_M": 2.26,
+    "Q5_K_M": 2.21,
+    "Q6_K": 2.11,
+    "Q8_0": 2.11
+   }
+  },
+  {
+   "base_model": "Qwen/Qwen3-ASR-1.7B",
+   "files": [
+    {
+     "file": "Qwen3-ASR-1.7B-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "b7afe3674f653fa84f712ed2440353c6e7cf7f93697fef76b05a26538b24844e",
+     "size": 1319830496,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f/Qwen3-ASR-1.7B-Q4_K_M.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-1.7B-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "034c557fe92ff8fcd9a9c041cbdaad347be0a86a58d3a348f63cf3f0180879d0",
+     "size": 1517290464,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f/Qwen3-ASR-1.7B-Q5_K_M.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-1.7B-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "c75a961b7134a6c952d89797865cb0d0376876185aee04ef6d12c31c2952e4e1",
+     "size": 1692554208,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f/Qwen3-ASR-1.7B-Q6_K.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-1.7B-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+     "size": 2185030624,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f/Qwen3-ASR-1.7B-Q8_0.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-1.7B-F16.gguf",
+     "quant": "F16",
+     "sha256": "edb09c29b8f73822c639168d5ef72aa2dccdf8b4e48fc4b8518885352ff62c71",
+     "size": 4091390944,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f/Qwen3-ASR-1.7B-F16.gguf"
+    },
+    {
+     "file": "Qwen3-ASR-1.7B-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "57db745f8ec3ad2ea391b0205661e7d74f76158877a33f151e4d4624ed2b7cc9",
+     "size": 4083087904,
+     "url": "https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f/Qwen3-ASR-1.7B-BF16.gguf"
+    }
+   ],
+   "id": "qwen3-asr-1.7b",
+   "lang_detect": true,
+   "languages": [
+    "zh",
+    "en",
+    "yue",
+    "ar",
+    "de",
+    "fr",
+    "es",
+    "pt",
+    "id",
+    "it",
+    "ko",
+    "ru",
+    "th",
+    "vi",
+    "ja",
+    "tr",
+    "hi",
+    "ms",
+    "nl",
+    "sv",
+    "da",
+    "fi",
+    "pl",
+    "cs",
+    "fil",
+    "fa",
+    "el",
+    "ro",
+    "hu",
+    "mk"
+   ],
+   "license": "apache-2.0",
+   "name": "Qwen3-ASR-1.7B",
+   "params": 2045695472,
+   "repo": "handy-computer/Qwen3-ASR-1.7B-gguf",
+   "rtf_cpu": 2.47,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "BF16": 1.62,
+    "F16": 1.62,
+    "Q4_K_M": 1.81,
+    "Q5_K_M": 1.65,
+    "Q6_K": 1.65,
+    "Q8_0": 1.62
+   }
+  },
+  {
+   "base_model": "FunAudioLLM/SenseVoiceSmall",
+   "files": [
+    {
+     "file": "SenseVoiceSmall-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "9d775303e6b4e793d049ef226214c400b2b1746c734ed017146a1a085b13d02b",
+     "size": 145738304,
+     "url": "https://huggingface.co/handy-computer/SenseVoiceSmall-gguf/resolve/ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/SenseVoiceSmall-Q4_K_M.gguf"
+    },
+    {
+     "file": "SenseVoiceSmall-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "622a819ef9b37dc5506f0079ddedca6ec22e272bb9b4fe950d8f13422d1ccd0b",
+     "size": 172474880,
+     "url": "https://huggingface.co/handy-computer/SenseVoiceSmall-gguf/resolve/ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/SenseVoiceSmall-Q5_K_M.gguf"
+    },
+    {
+     "file": "SenseVoiceSmall-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "5724d2ff6329f4355a29cee6a2432ecd1f60547a0a4ef7726cfceda7dafb394f",
+     "size": 196438336,
+     "url": "https://huggingface.co/handy-computer/SenseVoiceSmall-gguf/resolve/ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/SenseVoiceSmall-Q6_K.gguf"
+    },
+    {
+     "file": "SenseVoiceSmall-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "6c759ee4c9748c9b3f7a5a60ca74f0f7e685fb9d45d1378fce7cfd62f59adf29",
+     "size": 252684608,
+     "url": "https://huggingface.co/handy-computer/SenseVoiceSmall-gguf/resolve/ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/SenseVoiceSmall-Q8_0.gguf"
+    },
+    {
+     "file": "SenseVoiceSmall-F16.gguf",
+     "quant": "F16",
+     "sha256": "dc172fd5ffaff0a396393cd4edd82e18403c53f8f5873bcc544ba012b70598f6",
+     "size": 470412128,
+     "url": "https://huggingface.co/handy-computer/SenseVoiceSmall-gguf/resolve/ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/SenseVoiceSmall-F16.gguf"
+    },
+    {
+     "file": "SenseVoiceSmall-F32.gguf",
+     "quant": "F32",
+     "sha256": "dda511c3eac009568643b5c64541468d62be2e2a59700113f49c72675464d13d",
+     "size": 936617824,
+     "url": "https://huggingface.co/handy-computer/SenseVoiceSmall-gguf/resolve/ff8f085a8fa2e5ccae0e849ef19ebc6dc18e608b/SenseVoiceSmall-F32.gguf"
+    }
+   ],
+   "id": "sensevoicesmall",
+   "lang_detect": true,
+   "languages": [
+    "zh",
+    "yue",
+    "en",
+    "ja",
+    "ko"
+   ],
+   "license": "other",
+   "name": "SenseVoiceSmall",
+   "params": 235206064,
+   "repo": "handy-computer/SenseVoiceSmall-gguf",
+   "rtf_cpu": 19.73,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 3.13,
+    "F32": 3.13,
+    "Q4_K_M": 3.45,
+    "Q5_K_M": 3.18,
+    "Q6_K": 3.14,
+    "Q8_0": 3.13
+   }
+  },
+  {
+   "base_model": "mistralai/Voxtral-Mini-3B-2507",
+   "files": [
+    {
+     "file": "Voxtral-Mini-3B-2507-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "3a6717aa8f8989108d260cbd237584289eec43cc987e10133c33643515936205",
+     "size": 2984721056,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf/resolve/3d4e8e74a2ada47b400b2957575b2a9c058efe80/Voxtral-Mini-3B-2507-Q4_K_M.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-3B-2507-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "9ea2eb85359f7771270715849dc2b0e80381a59dab09d9c5d85352ab9c53f675",
+     "size": 3464182432,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf/resolve/3d4e8e74a2ada47b400b2957575b2a9c058efe80/Voxtral-Mini-3B-2507-Q5_K_M.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-3B-2507-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "0be733fd436c2a89483b96ed8d398abbc3ce5bcaa7aac64e886f5eb9d9066a43",
+     "size": 3869489824,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf/resolve/3d4e8e74a2ada47b400b2957575b2a9c058efe80/Voxtral-Mini-3B-2507-Q6_K.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-3B-2507-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "06b4dd04e32953ccab0d417125bdd728ec031431596ed5e80123c3c66f29ddc2",
+     "size": 5000084128,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf/resolve/3d4e8e74a2ada47b400b2957575b2a9c058efe80/Voxtral-Mini-3B-2507-Q8_0.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-3B-2507-F16.gguf",
+     "quant": "F16",
+     "sha256": "a7f0bebce988a32ce7e736acffe19a48d9bc739789dfab7d13ca6b622d23dd6e",
+     "size": 9376578208,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf/resolve/3d4e8e74a2ada47b400b2957575b2a9c058efe80/Voxtral-Mini-3B-2507-F16.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-3B-2507-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "ddfa5eb2e5e56343ee9b3262d5581f9b48085bdecefba71c0092901cf0183ccb",
+     "size": 9365764768,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf/resolve/3d4e8e74a2ada47b400b2957575b2a9c058efe80/Voxtral-Mini-3B-2507-BF16.gguf"
+    }
+   ],
+   "id": "voxtral-mini-3b-2507",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "it",
+    "pt",
+    "nl",
+    "hi"
+   ],
+   "license": "apache-2.0",
+   "name": "Voxtral-Mini-3B-2507",
+   "params": 4688289104,
+   "repo": "handy-computer/Voxtral-Mini-3B-2507-gguf",
+   "rtf_cpu": 0.56,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "BF16": 1.88,
+    "F16": 1.89,
+    "Q4_K_M": 1.94,
+    "Q5_K_M": 1.91,
+    "Q6_K": 1.87,
+    "Q8_0": 1.87
+   }
+  },
+  {
+   "base_model": "mistralai/Voxtral-Mini-4B-Realtime-2602",
+   "files": [
+    {
+     "file": "Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "39dc1f65539373a406edea7490505822d77c12edff521744678717eef4da4723",
+     "size": 2830493984,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/7fd3d424fc558edca2c53808578b0541ef52a81a/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-4B-Realtime-2602-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "e20a7582c5cf8159454c909b7f57b184b287cb3d7c3ec85744727a2cec51b08f",
+     "size": 3281439008,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/7fd3d424fc558edca2c53808578b0541ef52a81a/Voxtral-Mini-4B-Realtime-2602-Q5_K_M.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-4B-Realtime-2602-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "92038784cffa20ea8ee925f10fd28c110285124d94730eacce48bab6c214fa48",
+     "size": 3661018912,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/7fd3d424fc558edca2c53808578b0541ef52a81a/Voxtral-Mini-4B-Realtime-2602-Q6_K.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-4B-Realtime-2602-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "6fb22249463c1e7a600d920ad732e2dd0a231510e9db59fb8061d3d1d48d0c67",
+     "size": 4731791648,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/7fd3d424fc558edca2c53808578b0541ef52a81a/Voxtral-Mini-4B-Realtime-2602-Q8_0.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-4B-Realtime-2602-F16.gguf",
+     "quant": "F16",
+     "sha256": "243258ae0ad80f748b18cfd9c8141998157d74eb32fbb131ba8f69e0c01564d7",
+     "size": 8879114528,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/7fd3d424fc558edca2c53808578b0541ef52a81a/Voxtral-Mini-4B-Realtime-2602-F16.gguf"
+    },
+    {
+     "file": "Voxtral-Mini-4B-Realtime-2602-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "dca6a7bece55858472e1b2df1f928642bdc1e964b1a91f3378c3a4e72fc5bc04",
+     "size": 8868301088,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/7fd3d424fc558edca2c53808578b0541ef52a81a/Voxtral-Mini-4B-Realtime-2602-BF16.gguf"
+    }
+   ],
+   "id": "voxtral-mini-4b-realtime-2602",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "fr",
+    "es",
+    "de",
+    "ru",
+    "zh",
+    "ja",
+    "it",
+    "pt",
+    "nl",
+    "ar",
+    "hi",
+    "ko"
+   ],
+   "license": "apache-2.0",
+   "name": "Voxtral-Mini-4B-Realtime-2602",
+   "params": 4439557264,
+   "repo": "handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf",
+   "rtf_cpu": 0.58,
+   "streaming": true,
+   "translate": false,
+   "wer_en": {
+    "BF16": 2.08,
+    "F16": 2.09,
+    "Q4_K_M": 2.08,
+    "Q5_K_M": 2.08,
+    "Q6_K": 2.08,
+    "Q8_0": 2.07
+   }
+  },
+  {
+   "base_model": "mistralai/Voxtral-Small-24B-2507",
+   "files": [
+    {
+     "file": "Voxtral-Small-24B-2507-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "0da1b866c0eb2ce805678c18a7fb1e413320e4ad3ccbef7160707b65bae937a3",
+     "size": 14302261728,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Small-24B-2507-gguf/resolve/a90f97f24e3d4252647d79f6046ef19d04ad1c5d/Voxtral-Small-24B-2507-Q4_K_M.gguf"
+    },
+    {
+     "file": "Voxtral-Small-24B-2507-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "a53f73a5f63b7663fe155977616a636acac567dac898f6ef82ca519017e8b6e7",
+     "size": 17138659808,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Small-24B-2507-gguf/resolve/a90f97f24e3d4252647d79f6046ef19d04ad1c5d/Voxtral-Small-24B-2507-Q5_K_M.gguf"
+    },
+    {
+     "file": "Voxtral-Small-24B-2507-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "e85950b9576d3913d2664abaac1cdcb3a967dbbc8a60febacaf137a7f4d216f0",
+     "size": 19936473568,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Small-24B-2507-gguf/resolve/a90f97f24e3d4252647d79f6046ef19d04ad1c5d/Voxtral-Small-24B-2507-Q6_K.gguf"
+    },
+    {
+     "file": "Voxtral-Small-24B-2507-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "ab0964350131990a364dca53e3cac5f4d9cc176dce2f273066be3ef71e252fb2",
+     "size": 25810383328,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Small-24B-2507-gguf/resolve/a90f97f24e3d4252647d79f6046ef19d04ad1c5d/Voxtral-Small-24B-2507-Q8_0.gguf"
+    },
+    {
+     "file": "Voxtral-Small-24B-2507-F16.gguf",
+     "quant": "F16",
+     "sha256": "d5cc73553d9422dada176dd02c1920dc72a888a01eed34e20816b0bab8db207e",
+     "size": 48548098528,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Small-24B-2507-gguf/resolve/a90f97f24e3d4252647d79f6046ef19d04ad1c5d/Voxtral-Small-24B-2507-F16.gguf"
+    },
+    {
+     "file": "Voxtral-Small-24B-2507-BF16.gguf",
+     "quant": "BF16",
+     "sha256": "5c38ff2d6dbb413d70dec37430825ff129862536f74149e015b3bc42c11c5745",
+     "size": 48537285088,
+     "url": "https://huggingface.co/handy-computer/Voxtral-Small-24B-2507-gguf/resolve/a90f97f24e3d4252647d79f6046ef19d04ad1c5d/Voxtral-Small-24B-2507-BF16.gguf"
+    }
+   ],
+   "id": "voxtral-small-24b-2507",
+   "lang_detect": true,
+   "languages": [
+    "en",
+    "fr",
+    "de",
+    "es",
+    "it",
+    "pt",
+    "nl",
+    "hi"
+   ],
+   "license": "apache-2.0",
+   "name": "Voxtral-Small-24B-2507",
+   "params": 24274049264,
+   "repo": "handy-computer/Voxtral-Small-24B-2507-gguf",
+   "rtf_cpu": null,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "BF16": 1.56,
+    "F16": 1.57,
+    "Q4_K_M": 2.11,
+    "Q5_K_M": 1.6,
+    "Q6_K": 1.58,
+    "Q8_0": 1.56
+   }
+  },
+  {
+   "base_model": "openai/whisper-base",
+   "files": [
+    {
+     "file": "whisper-base-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "78bc9a8cb7e16a3354b262a4c71c0ed4892f6a66b681068f474dfada0729c0ae",
+     "size": 58870848,
+     "url": "https://huggingface.co/handy-computer/whisper-base-gguf/resolve/42fcd2077de47c36d779309e0e91b76ec620f56d/whisper-base-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-base-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "8e0feb7bc35780353cf31821018e601bb7b7cff6c9a0e17ada5a5db23f4db867",
+     "size": 63786048,
+     "url": "https://huggingface.co/handy-computer/whisper-base-gguf/resolve/42fcd2077de47c36d779309e0e91b76ec620f56d/whisper-base-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-base-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "6e4ac95aef48f28b5dd11b0be26a65e785ffbf3682cb076560a27e72206ea740",
+     "size": 67865664,
+     "url": "https://huggingface.co/handy-computer/whisper-base-gguf/resolve/42fcd2077de47c36d779309e0e91b76ec620f56d/whisper-base-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-base-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "81c069428bc8a24551a8169cf31cf09bcfd9d4cf50389ae281323c9aa9648c81",
+     "size": 84962880,
+     "url": "https://huggingface.co/handy-computer/whisper-base-gguf/resolve/42fcd2077de47c36d779309e0e91b76ec620f56d/whisper-base-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-base-F16.gguf",
+     "quant": "F16",
+     "sha256": "38ab6b0ed742e9eded4d5a2ba7fc34d44fc28cdb71d6360f6321d4b306ef8039",
+     "size": 151145760,
+     "url": "https://huggingface.co/handy-computer/whisper-base-gguf/resolve/42fcd2077de47c36d779309e0e91b76ec620f56d/whisper-base-F16.gguf"
+    },
+    {
+     "file": "whisper-base-F32.gguf",
+     "quant": "F32",
+     "sha256": "ab30724d251b16383fdbcf88698bcca6649eb98c4e102d6a7271a44d608bb4c6",
+     "size": 292335904,
+     "url": "https://huggingface.co/handy-computer/whisper-base-gguf/resolve/42fcd2077de47c36d779309e0e91b76ec620f56d/whisper-base-F32.gguf"
+    }
+   ],
+   "id": "whisper-base",
+   "lang_detect": true,
+   "languages": [
+    "af",
+    "am",
+    "ar",
+    "as",
+    "az",
+    "ba",
+    "be",
+    "bg",
+    "bn",
+    "bo",
+    "br",
+    "bs",
+    "ca",
+    "cs",
+    "cy",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "et",
+    "eu",
+    "fa",
+    "fi",
+    "fo",
+    "fr",
+    "gl",
+    "gu",
+    "haw",
+    "ha",
+    "he",
+    "hi",
+    "hr",
+    "ht",
+    "hu",
+    "hy",
+    "id",
+    "is",
+    "it",
+    "ja",
+    "jw",
+    "ka",
+    "kk",
+    "km",
+    "kn",
+    "ko",
+    "la",
+    "lb",
+    "ln",
+    "lo",
+    "lt",
+    "lv",
+    "mg",
+    "mi",
+    "mk",
+    "ml",
+    "mn",
+    "mr",
+    "ms",
+    "mt",
+    "my",
+    "ne",
+    "nl",
+    "nn",
+    "no",
+    "oc",
+    "pa",
+    "pl",
+    "ps",
+    "pt",
+    "ro",
+    "ru",
+    "sa",
+    "sd",
+    "si",
+    "sk",
+    "sl",
+    "sn",
+    "so",
+    "sq",
+    "sr",
+    "su",
+    "sv",
+    "sw",
+    "ta",
+    "te",
+    "tg",
+    "th",
+    "tk",
+    "tl",
+    "tr",
+    "tt",
+    "uk",
+    "ur",
+    "uz",
+    "vi",
+    "yi",
+    "yo",
+    "zh"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-base",
+   "params": 75572880,
+   "repo": "handy-computer/whisper-base-gguf",
+   "rtf_cpu": 19.33,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 5.1,
+    "F32": 5.11,
+    "Q4_K_M": 5.36,
+    "Q5_K_M": 5.19,
+    "Q6_K": 5.11,
+    "Q8_0": 5.12
+   }
+  },
+  {
+   "base_model": "openai/whisper-base.en",
+   "files": [
+    {
+     "file": "whisper-base.en-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "fd19959ff81f96c2b66f26fad97aada090ed6b3af681cf5b569bef3d7a073da5",
+     "size": 58794272,
+     "url": "https://huggingface.co/handy-computer/whisper-base.en-gguf/resolve/0dd374130837de419035c77d76440aad61ca135c/whisper-base.en-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-base.en-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "549e6e991588cd748dc6bf53b8fe47629dc08ed9038b8955270ee98fbc5e4c54",
+     "size": 63709472,
+     "url": "https://huggingface.co/handy-computer/whisper-base.en-gguf/resolve/0dd374130837de419035c77d76440aad61ca135c/whisper-base.en-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-base.en-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "5de8fc00f70f538af2811c9992de502513d6d60336f32ed975b4b6eb91b69e73",
+     "size": 67789088,
+     "url": "https://huggingface.co/handy-computer/whisper-base.en-gguf/resolve/0dd374130837de419035c77d76440aad61ca135c/whisper-base.en-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-base.en-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "3b46ca40bccbf7609c68d88a36d96077a04ca7c87f2060ede06f129fac3e7652",
+     "size": 84886208,
+     "url": "https://huggingface.co/handy-computer/whisper-base.en-gguf/resolve/0dd374130837de419035c77d76440aad61ca135c/whisper-base.en-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-base.en-F16.gguf",
+     "quant": "F16",
+     "sha256": "e6c447b0cc761e8ac3fc2f5e0e6918f604e415a41cff97825f1503ccde376e1e",
+     "size": 151068608,
+     "url": "https://huggingface.co/handy-computer/whisper-base.en-gguf/resolve/0dd374130837de419035c77d76440aad61ca135c/whisper-base.en-F16.gguf"
+    },
+    {
+     "file": "whisper-base.en-F32.gguf",
+     "quant": "F32",
+     "sha256": "f694f59682d44bafe4e74b8b9cc395dfdc3737a4d5e1910e399d45683729ad2d",
+     "size": 292257728,
+     "url": "https://huggingface.co/handy-computer/whisper-base.en-gguf/resolve/0dd374130837de419035c77d76440aad61ca135c/whisper-base.en-F32.gguf"
+    }
+   ],
+   "id": "whisper-base.en",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-base.en",
+   "params": 75534304,
+   "repo": "handy-computer/whisper-base.en-gguf",
+   "rtf_cpu": 20.6,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 4.13,
+    "F32": 4.3,
+    "Q4_K_M": 4.29,
+    "Q5_K_M": 4.16,
+    "Q6_K": 4.15,
+    "Q8_0": 4.16
+   }
+  },
+  {
+   "base_model": "openai/whisper-large",
+   "files": [
+    {
+     "file": "whisper-large-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "7d7693afc06096de46f2a41309ac479909e131824e78dae4e205f35463aaec09",
+     "size": 996526048,
+     "url": "https://huggingface.co/handy-computer/whisper-large-gguf/resolve/3fd31d8c72ee5fd06ecc6b4a74f85a951c106173/whisper-large-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-large-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "b1dfb9fa0e9b0574d8c822f51662b8e59915831e1a3ca0d191f18ff8ba742639",
+     "size": 1160366048,
+     "url": "https://huggingface.co/handy-computer/whisper-large-gguf/resolve/3fd31d8c72ee5fd06ecc6b4a74f85a951c106173/whisper-large-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-large-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "04756b664385d0ec26af1ef43b94bccdaf2d6dce83b52f482d2232b67642b6bc",
+     "size": 1296353248,
+     "url": "https://huggingface.co/handy-computer/whisper-large-gguf/resolve/3fd31d8c72ee5fd06ecc6b4a74f85a951c106173/whisper-large-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-large-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "0b9c63f73c68327d6ba2386e40c4a4dc46a9e7114a78c93a464b48b72c001547",
+     "size": 1667964192,
+     "url": "https://huggingface.co/handy-computer/whisper-large-gguf/resolve/3fd31d8c72ee5fd06ecc6b4a74f85a951c106173/whisper-large-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-large-F16.gguf",
+     "quant": "F16",
+     "sha256": "2c6198aeb009e01bf03cce9a30374b86ecd3484cd53b245e4a9f5bf7a670c498",
+     "size": 3106458176,
+     "url": "https://huggingface.co/handy-computer/whisper-large-gguf/resolve/3fd31d8c72ee5fd06ecc6b4a74f85a951c106173/whisper-large-F16.gguf"
+    },
+    {
+     "file": "whisper-large-F32.gguf",
+     "quant": "F32",
+     "sha256": "fafb2d4c6f865fc6cd745be8781eaf87d8d7a289cf3556283849fb1cc6741717",
+     "size": 6175245376,
+     "url": "https://huggingface.co/handy-computer/whisper-large-gguf/resolve/3fd31d8c72ee5fd06ecc6b4a74f85a951c106173/whisper-large-F32.gguf"
+    }
+   ],
+   "id": "whisper-large",
+   "lang_detect": true,
+   "languages": [
+    "af",
+    "am",
+    "ar",
+    "as",
+    "az",
+    "ba",
+    "be",
+    "bg",
+    "bn",
+    "bo",
+    "br",
+    "bs",
+    "ca",
+    "cs",
+    "cy",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "et",
+    "eu",
+    "fa",
+    "fi",
+    "fo",
+    "fr",
+    "gl",
+    "gu",
+    "haw",
+    "ha",
+    "he",
+    "hi",
+    "hr",
+    "ht",
+    "hu",
+    "hy",
+    "id",
+    "is",
+    "it",
+    "ja",
+    "jw",
+    "ka",
+    "kk",
+    "km",
+    "kn",
+    "ko",
+    "la",
+    "lb",
+    "ln",
+    "lo",
+    "lt",
+    "lv",
+    "mg",
+    "mi",
+    "mk",
+    "ml",
+    "mn",
+    "mr",
+    "ms",
+    "mt",
+    "my",
+    "ne",
+    "nl",
+    "nn",
+    "no",
+    "oc",
+    "pa",
+    "pl",
+    "ps",
+    "pt",
+    "ro",
+    "ru",
+    "sa",
+    "sd",
+    "si",
+    "sk",
+    "sl",
+    "sn",
+    "so",
+    "sq",
+    "sr",
+    "su",
+    "sv",
+    "sw",
+    "ta",
+    "te",
+    "tg",
+    "th",
+    "tk",
+    "tl",
+    "tr",
+    "tt",
+    "uk",
+    "ur",
+    "uz",
+    "vi",
+    "yi",
+    "yo",
+    "zh"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-large",
+   "params": 1553229088,
+   "repo": "handy-computer/whisper-large-gguf",
+   "rtf_cpu": 0.96,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 2.72,
+    "F32": 2.72,
+    "Q4_K_M": 2.67,
+    "Q5_K_M": 2.84,
+    "Q6_K": 2.62,
+    "Q8_0": 2.71
+   }
+  },
+  {
+   "base_model": "openai/whisper-large-v2",
+   "files": [
+    {
+     "file": "whisper-large-v2-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "76aa37b205abc1fb7a9e7aaf0655b8747995b81e6bb72c18f4b1acf59e222f79",
+     "size": 996526080,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v2-gguf/resolve/86dd8fbcd7324624f86d826e7fc241f4922ee987/whisper-large-v2-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-large-v2-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "94fab1289a98d26bf375174a8daa00f44c7b16a9944726dde05361e5a8bd07ff",
+     "size": 1160366080,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v2-gguf/resolve/86dd8fbcd7324624f86d826e7fc241f4922ee987/whisper-large-v2-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-large-v2-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "d216cb645a4a0b158a465f55c18a8317872788c38b3dbc0895c00d5c3bba72c8",
+     "size": 1296353280,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v2-gguf/resolve/86dd8fbcd7324624f86d826e7fc241f4922ee987/whisper-large-v2-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-large-v2-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "704603cff0f82ddd7f7f51045e12e5c8f85a37a9edec72ab10fd8ede32220702",
+     "size": 1667964224,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v2-gguf/resolve/86dd8fbcd7324624f86d826e7fc241f4922ee987/whisper-large-v2-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-large-v2-F16.gguf",
+     "quant": "F16",
+     "sha256": "c8ffa39202367b896cdf642cd28c28fb9ac4d90f7f12795a219952c70bc63f04",
+     "size": 3106458208,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v2-gguf/resolve/86dd8fbcd7324624f86d826e7fc241f4922ee987/whisper-large-v2-F16.gguf"
+    },
+    {
+     "file": "whisper-large-v2-F32.gguf",
+     "quant": "F32",
+     "sha256": "eed42074ca931551b6bb9c80e658bb0d646c80da06acb03a49cb6326d2a57ced",
+     "size": 6175245408,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v2-gguf/resolve/86dd8fbcd7324624f86d826e7fc241f4922ee987/whisper-large-v2-F32.gguf"
+    }
+   ],
+   "id": "whisper-large-v2",
+   "lang_detect": true,
+   "languages": [
+    "af",
+    "am",
+    "ar",
+    "as",
+    "az",
+    "ba",
+    "be",
+    "bg",
+    "bn",
+    "bo",
+    "br",
+    "bs",
+    "ca",
+    "cs",
+    "cy",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "et",
+    "eu",
+    "fa",
+    "fi",
+    "fo",
+    "fr",
+    "gl",
+    "gu",
+    "haw",
+    "ha",
+    "he",
+    "hi",
+    "hr",
+    "ht",
+    "hu",
+    "hy",
+    "id",
+    "is",
+    "it",
+    "ja",
+    "jw",
+    "ka",
+    "kk",
+    "km",
+    "kn",
+    "ko",
+    "la",
+    "lb",
+    "ln",
+    "lo",
+    "lt",
+    "lv",
+    "mg",
+    "mi",
+    "mk",
+    "ml",
+    "mn",
+    "mr",
+    "ms",
+    "mt",
+    "my",
+    "ne",
+    "nl",
+    "nn",
+    "no",
+    "oc",
+    "pa",
+    "pl",
+    "ps",
+    "pt",
+    "ro",
+    "ru",
+    "sa",
+    "sd",
+    "si",
+    "sk",
+    "sl",
+    "sn",
+    "so",
+    "sq",
+    "sr",
+    "su",
+    "sv",
+    "sw",
+    "ta",
+    "te",
+    "tg",
+    "th",
+    "tk",
+    "tl",
+    "tr",
+    "tt",
+    "uk",
+    "ur",
+    "uz",
+    "vi",
+    "yi",
+    "yo",
+    "zh"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-large-v2",
+   "params": 1553229104,
+   "repo": "handy-computer/whisper-large-v2-gguf",
+   "rtf_cpu": 0.96,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 2.68,
+    "F32": 2.67,
+    "Q4_K_M": 2.46,
+    "Q5_K_M": 2.71,
+    "Q6_K": 2.83,
+    "Q8_0": 2.97
+   }
+  },
+  {
+   "base_model": "openai/whisper-large-v3",
+   "files": [
+    {
+     "file": "whisper-large-v3-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "6fe933811cec4cd3159debc46520ecd3aac6c7e322ece2ac61fcfdab184e1fe0",
+     "size": 997303008,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-gguf/resolve/274ad1d1cf680b7ee53cc70f78461394cd3a344b/whisper-large-v3-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-large-v3-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "6053d0fd69a0fd48b8fea5ea7a52b9e0cde389343566fa30e453a1b2b258dc38",
+     "size": 1161143008,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-gguf/resolve/274ad1d1cf680b7ee53cc70f78461394cd3a344b/whisper-large-v3-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-large-v3-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "88e6dc60bd0538da145a50c19f4778e4a106fe28713adeeca43163215ee02805",
+     "size": 1297130208,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-gguf/resolve/274ad1d1cf680b7ee53cc70f78461394cd3a344b/whisper-large-v3-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-large-v3-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "2fa1a5f179f8a511a53e2108db270aa4af3ce08cd976af4180e2854666bb4ba3",
+     "size": 1668741440,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-gguf/resolve/274ad1d1cf680b7ee53cc70f78461394cd3a344b/whisper-large-v3-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-large-v3-F16.gguf",
+     "quant": "F16",
+     "sha256": "e633ab1d74b0e98f4f57daedaee34291297dbbf01389bda3d890766600c1c584",
+     "size": 3107236640,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-gguf/resolve/274ad1d1cf680b7ee53cc70f78461394cd3a344b/whisper-large-v3-F16.gguf"
+    }
+   ],
+   "id": "whisper-large-v3",
+   "lang_detect": true,
+   "languages": [
+    "af",
+    "am",
+    "ar",
+    "as",
+    "az",
+    "ba",
+    "be",
+    "bg",
+    "bn",
+    "bo",
+    "br",
+    "bs",
+    "ca",
+    "cs",
+    "cy",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "et",
+    "eu",
+    "fa",
+    "fi",
+    "fo",
+    "fr",
+    "gl",
+    "gu",
+    "haw",
+    "ha",
+    "he",
+    "hi",
+    "hr",
+    "ht",
+    "hu",
+    "hy",
+    "id",
+    "is",
+    "it",
+    "ja",
+    "jw",
+    "ka",
+    "kk",
+    "km",
+    "kn",
+    "ko",
+    "la",
+    "lb",
+    "ln",
+    "lo",
+    "lt",
+    "lv",
+    "mg",
+    "mi",
+    "mk",
+    "ml",
+    "mn",
+    "mr",
+    "ms",
+    "mt",
+    "my",
+    "ne",
+    "nl",
+    "nn",
+    "no",
+    "oc",
+    "pa",
+    "pl",
+    "ps",
+    "pt",
+    "ro",
+    "ru",
+    "sa",
+    "sd",
+    "si",
+    "sk",
+    "sl",
+    "sn",
+    "so",
+    "sq",
+    "sr",
+    "su",
+    "sv",
+    "sw",
+    "ta",
+    "te",
+    "tg",
+    "th",
+    "tk",
+    "tl",
+    "tr",
+    "tt",
+    "uk",
+    "ur",
+    "uz",
+    "vi",
+    "yi",
+    "yo",
+    "yue",
+    "zh"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-large-v3",
+   "params": 1553618320,
+   "repo": "handy-computer/whisper-large-v3-gguf",
+   "rtf_cpu": 0.97,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 1.81,
+    "Q4_K_M": 1.86,
+    "Q5_K_M": 1.84,
+    "Q6_K": 1.83,
+    "Q8_0": 1.82
+   }
+  },
+  {
+   "base_model": "openai/whisper-large-v3-turbo",
+   "files": [
+    {
+     "file": "whisper-large-v3-turbo-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "c6e172d0074f0fa9440b88247854b50643cd4bb58b8515c797bbed16d858c7df",
+     "size": 536069696,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/18ada752005f5fddef499256f9a458d0b37a203a/whisper-large-v3-turbo-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-large-v3-turbo-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "06fc9923c09fb3ae878ea12c34d1be3ed18fad039ab14b4b045c7b6c40af56b2",
+     "size": 619628096,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/18ada752005f5fddef499256f9a458d0b37a203a/whisper-large-v3-turbo-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-large-v3-turbo-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "b8b4d57e1a6fc49bcd7843faadf224c27cb27707e13db7e6dbfbfffe39878103",
+     "size": 692536896,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/18ada752005f5fddef499256f9a458d0b37a203a/whisper-large-v3-turbo-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-large-v3-turbo-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "257aa7ec9121c22c167d5e2c49e3e76b4ba0e6e27ebc13074eba0a80f8190220",
+     "size": 886381728,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/18ada752005f5fddef499256f9a458d0b37a203a/whisper-large-v3-turbo-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-large-v3-turbo-F16.gguf",
+     "quant": "F16",
+     "sha256": "c8506ddfa3d4eb9279170d722a75422db00dbdbd7618531bbb81926e0598eb8f",
+     "size": 1625935488,
+     "url": "https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/18ada752005f5fddef499256f9a458d0b37a203a/whisper-large-v3-turbo-F16.gguf"
+    }
+   ],
+   "id": "whisper-large-v3-turbo",
+   "lang_detect": true,
+   "languages": [
+    "af",
+    "am",
+    "ar",
+    "as",
+    "az",
+    "ba",
+    "be",
+    "bg",
+    "bn",
+    "bo",
+    "br",
+    "bs",
+    "ca",
+    "cs",
+    "cy",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "et",
+    "eu",
+    "fa",
+    "fi",
+    "fo",
+    "fr",
+    "gl",
+    "gu",
+    "haw",
+    "ha",
+    "he",
+    "hi",
+    "hr",
+    "ht",
+    "hu",
+    "hy",
+    "id",
+    "is",
+    "it",
+    "ja",
+    "jw",
+    "ka",
+    "kk",
+    "km",
+    "kn",
+    "ko",
+    "la",
+    "lb",
+    "ln",
+    "lo",
+    "lt",
+    "lv",
+    "mg",
+    "mi",
+    "mk",
+    "ml",
+    "mn",
+    "mr",
+    "ms",
+    "mt",
+    "my",
+    "ne",
+    "nl",
+    "nn",
+    "no",
+    "oc",
+    "pa",
+    "pl",
+    "ps",
+    "pt",
+    "ro",
+    "ru",
+    "sa",
+    "sd",
+    "si",
+    "sk",
+    "sl",
+    "sn",
+    "so",
+    "sq",
+    "sr",
+    "su",
+    "sv",
+    "sw",
+    "ta",
+    "te",
+    "tg",
+    "th",
+    "tk",
+    "tl",
+    "tr",
+    "tt",
+    "uk",
+    "ur",
+    "uz",
+    "vi",
+    "yi",
+    "yo",
+    "yue",
+    "zh"
+   ],
+   "license": "mit",
+   "name": "whisper-large-v3-turbo",
+   "params": 812967744,
+   "repo": "handy-computer/whisper-large-v3-turbo-gguf",
+   "rtf_cpu": 1.43,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 2.01,
+    "Q4_K_M": 2.04,
+    "Q5_K_M": 2.03,
+    "Q6_K": 2.01,
+    "Q8_0": 2.01
+   }
+  },
+  {
+   "base_model": "openai/whisper-medium",
+   "files": [
+    {
+     "file": "whisper-medium-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "6c9cad9c41d1fa0fcc624898f7ee3485b66127627878081a5655c6f6f3ce20ab",
+     "size": 504102848,
+     "url": "https://huggingface.co/handy-computer/whisper-medium-gguf/resolve/60cfb00405a9a5bb85ee347ef93b68df7a311dc5/whisper-medium-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-medium-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "4e2a8904a866b3aa7ef70d7640ec6abc5f0a05524cd950ea4b66ace12122bf53",
+     "size": 582746048,
+     "url": "https://huggingface.co/handy-computer/whisper-medium-gguf/resolve/60cfb00405a9a5bb85ee347ef93b68df7a311dc5/whisper-medium-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-medium-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "8718bafef4f595b5cacd9d9409fb7e19ce99b1afe4c6a450198d692fa58bd380",
+     "size": 648019904,
+     "url": "https://huggingface.co/handy-computer/whisper-medium-gguf/resolve/60cfb00405a9a5bb85ee347ef93b68df7a311dc5/whisper-medium-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-medium-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "09e6a65e7de377aa5b10bae24608bc6f8ca2ed04b3993ef10d4a02bcd9a82adf",
+     "size": 831538144,
+     "url": "https://huggingface.co/handy-computer/whisper-medium-gguf/resolve/60cfb00405a9a5bb85ee347ef93b68df7a311dc5/whisper-medium-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-medium-F16.gguf",
+     "quant": "F16",
+     "sha256": "62338e5194cb9ccc6734adf6f42694805a98a158028b2022e39ec060559bd517",
+     "size": 1541931424,
+     "url": "https://huggingface.co/handy-computer/whisper-medium-gguf/resolve/60cfb00405a9a5bb85ee347ef93b68df7a311dc5/whisper-medium-F16.gguf"
+    },
+    {
+     "file": "whisper-medium-F32.gguf",
+     "quant": "F32",
+     "sha256": "d716aa436e8d1d3164898d1fd6f4bde0f7cbbb7059b8c276b18f78cbca2faf6b",
+     "size": 3057437088,
+     "url": "https://huggingface.co/handy-computer/whisper-medium-gguf/resolve/60cfb00405a9a5bb85ee347ef93b68df7a311dc5/whisper-medium-F32.gguf"
+    }
+   ],
+   "id": "whisper-medium",
+   "lang_detect": true,
+   "languages": [
+    "af",
+    "am",
+    "ar",
+    "as",
+    "az",
+    "ba",
+    "be",
+    "bg",
+    "bn",
+    "bo",
+    "br",
+    "bs",
+    "ca",
+    "cs",
+    "cy",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "et",
+    "eu",
+    "fa",
+    "fi",
+    "fo",
+    "fr",
+    "gl",
+    "gu",
+    "haw",
+    "ha",
+    "he",
+    "hi",
+    "hr",
+    "ht",
+    "hu",
+    "hy",
+    "id",
+    "is",
+    "it",
+    "ja",
+    "jw",
+    "ka",
+    "kk",
+    "km",
+    "kn",
+    "ko",
+    "la",
+    "lb",
+    "ln",
+    "lo",
+    "lt",
+    "lv",
+    "mg",
+    "mi",
+    "mk",
+    "ml",
+    "mn",
+    "mr",
+    "ms",
+    "mt",
+    "my",
+    "ne",
+    "nl",
+    "nn",
+    "no",
+    "oc",
+    "pa",
+    "pl",
+    "ps",
+    "pt",
+    "ro",
+    "ru",
+    "sa",
+    "sd",
+    "si",
+    "sk",
+    "sl",
+    "sn",
+    "so",
+    "sq",
+    "sr",
+    "su",
+    "sv",
+    "sw",
+    "ta",
+    "te",
+    "tg",
+    "th",
+    "tk",
+    "tl",
+    "tr",
+    "tt",
+    "uk",
+    "ur",
+    "uz",
+    "vi",
+    "yi",
+    "yo",
+    "zh"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-medium",
+   "params": 770965712,
+   "repo": "handy-computer/whisper-medium-gguf",
+   "rtf_cpu": 1.92,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 2.63,
+    "F32": 2.64,
+    "Q4_K_M": 2.59,
+    "Q5_K_M": 2.62,
+    "Q6_K": 2.59,
+    "Q8_0": 2.64
+   }
+  },
+  {
+   "base_model": "openai/whisper-medium.en",
+   "files": [
+    {
+     "file": "whisper-medium.en-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "8a0eb0bb20019af88fc0ccda06d97dc949a6a0cdf35d3f2c316b967e76cd4077",
+     "size": 504025856,
+     "url": "https://huggingface.co/handy-computer/whisper-medium.en-gguf/resolve/e6370f41cfa6d73e2a89969f4f5055f8c7e4dbb6/whisper-medium.en-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-medium.en-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "8c90b55725036f1362fc5a583432a4e63370304dbf0f96b6245685f8a588174f",
+     "size": 582669056,
+     "url": "https://huggingface.co/handy-computer/whisper-medium.en-gguf/resolve/e6370f41cfa6d73e2a89969f4f5055f8c7e4dbb6/whisper-medium.en-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-medium.en-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "9abdf673a4096ccb8bd210a3c68d73665c3ac8450bdeb54fd35c255a28b63d55",
+     "size": 647942912,
+     "url": "https://huggingface.co/handy-computer/whisper-medium.en-gguf/resolve/e6370f41cfa6d73e2a89969f4f5055f8c7e4dbb6/whisper-medium.en-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-medium.en-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "03d7257fef498750ce272631bc6a34de322fc2b438aab5c268ff49dfd1b64c49",
+     "size": 831460928,
+     "url": "https://huggingface.co/handy-computer/whisper-medium.en-gguf/resolve/e6370f41cfa6d73e2a89969f4f5055f8c7e4dbb6/whisper-medium.en-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-medium.en-F16.gguf",
+     "quant": "F16",
+     "sha256": "c8be41b68306ad35382af749d4681b33da403b7d82eb3b6d3225a01a02dc1196",
+     "size": 1541853248,
+     "url": "https://huggingface.co/handy-computer/whisper-medium.en-gguf/resolve/e6370f41cfa6d73e2a89969f4f5055f8c7e4dbb6/whisper-medium.en-F16.gguf"
+    },
+    {
+     "file": "whisper-medium.en-F32.gguf",
+     "quant": "F32",
+     "sha256": "6a0bcb8c3360dbc8101a1ebcf2776d1e3463538c4b9486da97b8f21e462e6039",
+     "size": 3057356864,
+     "url": "https://huggingface.co/handy-computer/whisper-medium.en-gguf/resolve/e6370f41cfa6d73e2a89969f4f5055f8c7e4dbb6/whisper-medium.en-F32.gguf"
+    }
+   ],
+   "id": "whisper-medium.en",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-medium.en",
+   "params": 770926624,
+   "repo": "handy-computer/whisper-medium.en-gguf",
+   "rtf_cpu": 2.06,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 2.73,
+    "F32": 2.74,
+    "Q4_K_M": 2.91,
+    "Q5_K_M": 2.75,
+    "Q6_K": 2.82,
+    "Q8_0": 2.72
+   }
+  },
+  {
+   "base_model": "openai/whisper-small",
+   "files": [
+    {
+     "file": "whisper-small-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "b204d2005a3e5d4fe6153bd61e5e8b32e757ff7b017ac8f61c6f051c2f80e939",
+     "size": 171630656,
+     "url": "https://huggingface.co/handy-computer/whisper-small-gguf/resolve/4afdc7942ecf1997f359deae48a63506b062eac4/whisper-small-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-small-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "326cd00c3e7217c751667c7c1600eaf7e0de174e186ca2c16b4bf590251c3c3b",
+     "size": 193749056,
+     "url": "https://huggingface.co/handy-computer/whisper-small-gguf/resolve/4afdc7942ecf1997f359deae48a63506b062eac4/whisper-small-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-small-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "4d14215a972101fff787fc59e30b908ee511c725600317e02c9032cb8799f32d",
+     "size": 212107328,
+     "url": "https://huggingface.co/handy-computer/whisper-small-gguf/resolve/4afdc7942ecf1997f359deae48a63506b062eac4/whisper-small-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-small-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "9b9c8811bbcc82a7766f0fb0925614bdacb0923b2cc630daeac17108b655b860",
+     "size": 269751136,
+     "url": "https://huggingface.co/handy-computer/whisper-small-gguf/resolve/4afdc7942ecf1997f359deae48a63506b062eac4/whisper-small-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-small-F16.gguf",
+     "quant": "F16",
+     "sha256": "bef65e1ac9d012269453243243aac0d0f67792693ba6c99b584a124e0ee326fc",
+     "size": 492888480,
+     "url": "https://huggingface.co/handy-computer/whisper-small-gguf/resolve/4afdc7942ecf1997f359deae48a63506b062eac4/whisper-small-F16.gguf"
+    },
+    {
+     "file": "whisper-small-F32.gguf",
+     "quant": "F32",
+     "sha256": "6bc797078fdddcc890999130dfc33dfc30d82de5a9115a840ec73853262a9d21",
+     "size": 968914848,
+     "url": "https://huggingface.co/handy-computer/whisper-small-gguf/resolve/4afdc7942ecf1997f359deae48a63506b062eac4/whisper-small-F32.gguf"
+    }
+   ],
+   "id": "whisper-small",
+   "lang_detect": true,
+   "languages": [
+    "af",
+    "am",
+    "ar",
+    "as",
+    "az",
+    "ba",
+    "be",
+    "bg",
+    "bn",
+    "bo",
+    "br",
+    "bs",
+    "ca",
+    "cs",
+    "cy",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "et",
+    "eu",
+    "fa",
+    "fi",
+    "fo",
+    "fr",
+    "gl",
+    "gu",
+    "haw",
+    "ha",
+    "he",
+    "hi",
+    "hr",
+    "ht",
+    "hu",
+    "hy",
+    "id",
+    "is",
+    "it",
+    "ja",
+    "jw",
+    "ka",
+    "kk",
+    "km",
+    "kn",
+    "ko",
+    "la",
+    "lb",
+    "ln",
+    "lo",
+    "lt",
+    "lv",
+    "mg",
+    "mi",
+    "mk",
+    "ml",
+    "mn",
+    "mr",
+    "ms",
+    "mt",
+    "my",
+    "ne",
+    "nl",
+    "nn",
+    "no",
+    "oc",
+    "pa",
+    "pl",
+    "ps",
+    "pt",
+    "ro",
+    "ru",
+    "sa",
+    "sd",
+    "si",
+    "sk",
+    "sl",
+    "sn",
+    "so",
+    "sq",
+    "sr",
+    "su",
+    "sv",
+    "sw",
+    "ta",
+    "te",
+    "tg",
+    "th",
+    "tk",
+    "tl",
+    "tr",
+    "tt",
+    "uk",
+    "ur",
+    "uz",
+    "vi",
+    "yi",
+    "yo",
+    "zh"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-small",
+   "params": 246444240,
+   "repo": "handy-computer/whisper-small-gguf",
+   "rtf_cpu": 5.86,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 3.33,
+    "F32": 3.34,
+    "Q4_K_M": 3.4,
+    "Q5_K_M": 3.37,
+    "Q6_K": 3.33,
+    "Q8_0": 3.33
+   }
+  },
+  {
+   "base_model": "openai/whisper-small.en",
+   "files": [
+    {
+     "file": "whisper-small.en-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "7bf9ebce1e6332b3d18d4c27032e3097148fc124befed3e70022e0d70539a365",
+     "size": 171553856,
+     "url": "https://huggingface.co/handy-computer/whisper-small.en-gguf/resolve/ab86448a84fcc15a96a9a2216d93a8dac8427da3/whisper-small.en-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-small.en-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "e96a679e57d36f80bb26512f3893185d219ddd8880cdac4c433e5af13a001b47",
+     "size": 193672256,
+     "url": "https://huggingface.co/handy-computer/whisper-small.en-gguf/resolve/ab86448a84fcc15a96a9a2216d93a8dac8427da3/whisper-small.en-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-small.en-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "3703d6f9e4d78b5b2f196f9c3cfab5c1b6b268fe42fff311cb89137506f92019",
+     "size": 212030528,
+     "url": "https://huggingface.co/handy-computer/whisper-small.en-gguf/resolve/ab86448a84fcc15a96a9a2216d93a8dac8427da3/whisper-small.en-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-small.en-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "9614e6b7fda2d26018e4f268aece8ca25a83296ea0b534169a585b740bfd71ef",
+     "size": 269674144,
+     "url": "https://huggingface.co/handy-computer/whisper-small.en-gguf/resolve/ab86448a84fcc15a96a9a2216d93a8dac8427da3/whisper-small.en-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-small.en-F16.gguf",
+     "quant": "F16",
+     "sha256": "59eade60e072bd289c9ff39313ef14b565691bfe373275ea904ecea497e47c8a",
+     "size": 492810784,
+     "url": "https://huggingface.co/handy-computer/whisper-small.en-gguf/resolve/ab86448a84fcc15a96a9a2216d93a8dac8427da3/whisper-small.en-F16.gguf"
+    },
+    {
+     "file": "whisper-small.en-F32.gguf",
+     "quant": "F32",
+     "sha256": "fce06c84aa930d0652d292781b4470fb4d5631527e211fd4f402703f63ee7291",
+     "size": 968835616,
+     "url": "https://huggingface.co/handy-computer/whisper-small.en-gguf/resolve/ab86448a84fcc15a96a9a2216d93a8dac8427da3/whisper-small.en-F32.gguf"
+    }
+   ],
+   "id": "whisper-small.en",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-small.en",
+   "params": 246405392,
+   "repo": "handy-computer/whisper-small.en-gguf",
+   "rtf_cpu": 6.26,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 2.97,
+    "F32": 3.11,
+    "Q4_K_M": 3.09,
+    "Q5_K_M": 3.11,
+    "Q6_K": 2.97,
+    "Q8_0": 3.09
+   }
+  },
+  {
+   "base_model": "openai/whisper-tiny",
+   "files": [
+    {
+     "file": "whisper-tiny-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "86e1100470df173fa9079f941e33e4d52d11c03923407dd1ec51fd1937d8e609",
+     "size": 43621792,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/1bd61cda36bbd22c88fc5a33842498a6e1d30f45/whisper-tiny-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-tiny-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "72cfa8ee436a635a5b6fb373cc056a828b9efe96d32d6eb8769ed3cc5b429719",
+     "size": 44211616,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/1bd61cda36bbd22c88fc5a33842498a6e1d30f45/whisper-tiny-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-tiny-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "e23e79dbc42e90171e050b0e7da00f07e41343547ef09d86588324b3c5672413",
+     "size": 44838304,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/1bd61cda36bbd22c88fc5a33842498a6e1d30f45/whisper-tiny-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-tiny-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "325b9c7997cd1eff81ef709d55766565e71be696130cc3a3d444713798706834",
+     "size": 45981088,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/1bd61cda36bbd22c88fc5a33842498a6e1d30f45/whisper-tiny-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-tiny-F16.gguf",
+     "quant": "F16",
+     "sha256": "5b44043278b47d3b6e56fb16c6bc5bb0aa16f2e69086f4d67175ed0a30d6a987",
+     "size": 80135360,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/1bd61cda36bbd22c88fc5a33842498a6e1d30f45/whisper-tiny-F16.gguf"
+    },
+    {
+     "file": "whisper-tiny-F32.gguf",
+     "quant": "F32",
+     "sha256": "f5e0ecdd9967173fdede25ceb7e5159b3294f05b8dc0c87b0876fccd36f18982",
+     "size": 152997824,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny-gguf/resolve/1bd61cda36bbd22c88fc5a33842498a6e1d30f45/whisper-tiny-F32.gguf"
+    }
+   ],
+   "id": "whisper-tiny",
+   "lang_detect": true,
+   "languages": [
+    "af",
+    "am",
+    "ar",
+    "as",
+    "az",
+    "ba",
+    "be",
+    "bg",
+    "bn",
+    "bo",
+    "br",
+    "bs",
+    "ca",
+    "cs",
+    "cy",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "et",
+    "eu",
+    "fa",
+    "fi",
+    "fo",
+    "fr",
+    "gl",
+    "gu",
+    "haw",
+    "ha",
+    "he",
+    "hi",
+    "hr",
+    "ht",
+    "hu",
+    "hy",
+    "id",
+    "is",
+    "it",
+    "ja",
+    "jw",
+    "ka",
+    "kk",
+    "km",
+    "kn",
+    "ko",
+    "la",
+    "lb",
+    "ln",
+    "lo",
+    "lt",
+    "lv",
+    "mg",
+    "mi",
+    "mk",
+    "ml",
+    "mn",
+    "mr",
+    "ms",
+    "mt",
+    "my",
+    "ne",
+    "nl",
+    "nn",
+    "no",
+    "oc",
+    "pa",
+    "pl",
+    "ps",
+    "pt",
+    "ro",
+    "ru",
+    "sa",
+    "sd",
+    "si",
+    "sk",
+    "sl",
+    "sn",
+    "so",
+    "sq",
+    "sr",
+    "su",
+    "sv",
+    "sw",
+    "ta",
+    "te",
+    "tg",
+    "th",
+    "tk",
+    "tl",
+    "tr",
+    "tt",
+    "uk",
+    "ur",
+    "uz",
+    "vi",
+    "yi",
+    "yo",
+    "zh"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-tiny",
+   "params": 40067680,
+   "repo": "handy-computer/whisper-tiny-gguf",
+   "rtf_cpu": 39.75,
+   "streaming": false,
+   "translate": true,
+   "wer_en": {
+    "F16": 7.48,
+    "F32": 7.49,
+    "Q4_K_M": 7.78,
+    "Q5_K_M": 7.82,
+    "Q6_K": 7.54,
+    "Q8_0": 7.52
+   }
+  },
+  {
+   "base_model": "openai/whisper-tiny.en",
+   "files": [
+    {
+     "file": "whisper-tiny.en-Q4_K_M.gguf",
+     "quant": "Q4_K_M",
+     "sha256": "3bfa6200aa12a21409445401f7871b5c733546dc45a29eb4871fcb3c7954e08b",
+     "size": 43545248,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny.en-gguf/resolve/9dd46e00ef0577e354e658c07b3ac5580e9cd211/whisper-tiny.en-Q4_K_M.gguf"
+    },
+    {
+     "file": "whisper-tiny.en-Q5_K_M.gguf",
+     "quant": "Q5_K_M",
+     "sha256": "610a75700023ffd74df1ab538353525d0a82a3e35702b923e955e69422519740",
+     "size": 44135072,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny.en-gguf/resolve/9dd46e00ef0577e354e658c07b3ac5580e9cd211/whisper-tiny.en-Q5_K_M.gguf"
+    },
+    {
+     "file": "whisper-tiny.en-Q6_K.gguf",
+     "quant": "Q6_K",
+     "sha256": "33b349eabeb0808562060b44dd539264f94365f09ed5317337207b955355abe4",
+     "size": 44761760,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny.en-gguf/resolve/9dd46e00ef0577e354e658c07b3ac5580e9cd211/whisper-tiny.en-Q6_K.gguf"
+    },
+    {
+     "file": "whisper-tiny.en-Q8_0.gguf",
+     "quant": "Q8_0",
+     "sha256": "e8c9b73c06344307d8b346e07fbe93dd88d894627854bcff31523f1ce44394fa",
+     "size": 45904544,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny.en-gguf/resolve/9dd46e00ef0577e354e658c07b3ac5580e9cd211/whisper-tiny.en-Q8_0.gguf"
+    },
+    {
+     "file": "whisper-tiny.en-F16.gguf",
+     "quant": "F16",
+     "sha256": "7ae6eae54d625472e52b6af03b09dec586f0e948ffa5872815bb1988e973ad2b",
+     "size": 80058464,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny.en-gguf/resolve/9dd46e00ef0577e354e658c07b3ac5580e9cd211/whisper-tiny.en-F16.gguf"
+    },
+    {
+     "file": "whisper-tiny.en-F32.gguf",
+     "quant": "F32",
+     "sha256": "4aaf936f214a08f199ff7daecf421eb28be273e4e4b3bba0486b98efed140045",
+     "size": 152920160,
+     "url": "https://huggingface.co/handy-computer/whisper-tiny.en-gguf/resolve/9dd46e00ef0577e354e658c07b3ac5580e9cd211/whisper-tiny.en-F32.gguf"
+    }
+   ],
+   "id": "whisper-tiny.en",
+   "lang_detect": false,
+   "languages": [
+    "en"
+   ],
+   "license": "apache-2.0",
+   "name": "whisper-tiny.en",
+   "params": 40029232,
+   "repo": "handy-computer/whisper-tiny.en-gguf",
+   "rtf_cpu": 41.22,
+   "streaming": false,
+   "translate": false,
+   "wer_en": {
+    "F16": 5.78,
+    "F32": 5.77,
+    "Q4_K_M": 5.96,
+    "Q5_K_M": 5.91,
+    "Q6_K": 5.83,
+    "Q8_0": 5.72
+   }
+  }
+ ],
+ "vad": {
+  "files": [
+   {
+    "file": "silero-vad-v6.2-F32.gguf",
+    "quant": "F32",
+    "sha256": "0d871a800c420fdd5d1b17a3aea4296d1c39608f0ff4a9295eb76457eb1c88e6",
+    "size": 1241056,
+    "url": "https://huggingface.co/handy-computer/silero-vad-v6.2-gguf/resolve/a9b2d61c20ae4ddf3644edb34969e8185a485448/silero-vad-v6.2-F32.gguf"
+   }
+  ],
+  "id": "silero-vad-v6.2",
+  "license": "mit",
+  "repo": "handy-computer/silero-vad-v6.2-gguf"
+ }
+}

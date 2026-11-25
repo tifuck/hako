@@ -239,16 +239,22 @@ impl Feature for HidrawDevice {
     }
 }
 
+/// Longest one request (a profile write waits three times) waits on a busy
+/// device: well inside the worker's 15 s `SET_TIMEOUT`.
+const BUSY_LIMIT: Duration = Duration::from_secs(8);
+
 /// Polls control report 4 after a write: 1 = done, 3 = busy, anything else
 /// is the device refusing it (kernel `roccat_common2_receive_control_status`).
-fn status(dev: &impl Feature, pause: Duration) -> Result<()> {
+/// Busy past `deadline` is an error.
+fn status(dev: &impl Feature, pause: Duration, deadline: Instant) -> Result<()> {
     for _ in 0..40 {
         std::thread::sleep(pause);
         let mut buf = [0x04, 0, 0];
         dev.get(&mut buf)?;
         match buf[1] {
             1 => return Ok(()),
-            3 => std::thread::sleep(pause * 5),
+            3 if Instant::now() < deadline => std::thread::sleep(pause * 5),
+            3 => break,
             v => bail!("device rejected the request (status {v})"),
         }
     }
@@ -267,9 +273,15 @@ fn active_profile(dev: &impl Feature) -> Result<u8> {
 }
 
 /// Reads profile `profile`'s settings block (`len` bytes).
-fn read_settings(dev: &impl Feature, profile: u8, len: usize, pause: Duration) -> Result<Vec<u8>> {
+fn read_settings(
+    dev: &impl Feature,
+    profile: u8,
+    len: usize,
+    pause: Duration,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
     dev.set(&mut [0x04, profile, 0x80])?;
-    status(dev, pause)?;
+    status(dev, pause, deadline)?;
     let mut buf = vec![0u8; len];
     buf[0] = 0x06;
     dev.get(&mut buf)?;
@@ -280,7 +292,8 @@ fn read_settings(dev: &impl Feature, profile: u8, len: usize, pause: Duration) -
 /// [`validate_xtd`] before it is shown.
 fn read_active(dev: &impl Feature, family: Family, pause: Duration) -> Result<Vec<u8>> {
     let profile = active_profile(dev)?;
-    let b = read_settings(dev, profile, family.settings_len(), pause)?;
+    let deadline = Instant::now() + BUSY_LIMIT;
+    let b = read_settings(dev, profile, family.settings_len(), pause, deadline)?;
     if family == Family::Xtd {
         validate_xtd(&b, profile).context("unexpected settings report")?;
     }
@@ -290,8 +303,9 @@ fn read_active(dev: &impl Feature, family: Family, pause: Duration) -> Result<Ve
 /// Read, validate, change, write and read back the active profile of a
 /// Kone XTD. Returns the block now on the device.
 fn write_xtd(dev: &impl Feature, change: Change, pause: Duration) -> Result<Vec<u8>> {
+    let deadline = Instant::now() + BUSY_LIMIT;
     let profile = active_profile(dev)?;
-    let old = read_settings(dev, profile, XTD_LEN, pause)?;
+    let old = read_settings(dev, profile, XTD_LEN, pause, deadline)?;
     validate_xtd(&old, profile).context("not writing: the stored profile looks invalid")?;
     let mut new = apply_xtd(&old, change)?;
     if new == old {
@@ -299,8 +313,8 @@ fn write_xtd(dev: &impl Feature, change: Change, pause: Duration) -> Result<Vec<
     }
     let sent = new.clone();
     dev.set(&mut new)?;
-    status(dev, pause).context("profile write")?;
-    let back = read_settings(dev, profile, XTD_LEN, pause)?;
+    status(dev, pause, deadline).context("profile write")?;
+    let back = read_settings(dev, profile, XTD_LEN, pause, deadline)?;
     ensure!(
         back == sent,
         "read-back differs from the written profile; check the mouse in ROCCAT Swarm"
@@ -748,6 +762,22 @@ mod tests {
         dev.status = 2;
         assert!(write_xtd(&dev, Change::Stage(0, 400), Duration::ZERO).is_err());
         assert!(dev.writes.borrow().is_empty(), "select failed first");
+    }
+
+    #[test]
+    fn a_busy_device_is_given_up_on_at_the_deadline() {
+        let mut dev = Fake::new(&XTD_FACTORY);
+        dev.status = 3;
+        let pause = Duration::from_millis(10);
+        let start = Instant::now();
+        let e = status(&dev, pause, start + Duration::from_millis(50)).unwrap_err();
+        assert!(e.to_string().contains("busy"), "{e}");
+        // 40 busy answers would take 2.4 s.
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

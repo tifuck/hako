@@ -51,7 +51,7 @@ use hako_core::catalog::{SettingKey, SettingMeta, SettingOption, SettingValue, S
 use hako_core::config::get_setting;
 use hako_core::device::{DeviceId, DeviceKind};
 use protocol::{Effect, Transport};
-use tracing::debug;
+use tracing::{debug, warn};
 
 const N_MICE: usize = mouse_models::MICE.len();
 const N_KB: usize = keyboards::KEYBOARDS.len();
@@ -161,12 +161,19 @@ fn open_omni(pid: u16, ctx: &DriverCtx) -> Opened {
         })
     };
     let mut out: Vec<Box<dyn DeviceAdapter>> = Vec::new();
+    let mut mouse_error = None;
     let mouse = paired
         .iter()
         .find_map(|&d| mice::find_omni(d).map(|s| (s, d)));
     if let Some((spec, d)) = mouse.filter(|&(_, d)| !is_open(d)) {
-        let a = mice::MouseAdapter::open_paired(spec, pid, d, ctx.paths.clone())?;
-        out.push(Box::new(a));
+        // A mouse that fails (e.g. its settings file) leaves the keyboard alone.
+        match mice::MouseAdapter::open_paired(spec, pid, d, ctx.paths.clone()) {
+            Ok(a) => out.push(Box::new(a)),
+            Err(e) => {
+                warn!("Omni receiver {path}: mouse {d:04x}: {e:#}");
+                mouse_error = Some(e);
+            }
+        }
     }
     let keyboard = paired
         .iter()
@@ -175,7 +182,10 @@ fn open_omni(pid: u16, ctx: &DriverCtx) -> Opened {
         let a = keyboards::KeyboardAdapter::open_paired(spec, pid, d, ctx.paths.clone())?;
         out.push(Box::new(a));
     }
-    Ok(out)
+    match mouse_error {
+        Some(e) if out.is_empty() => Err(e),
+        _ => Ok(out),
+    }
 }
 
 // ── Lighting settings shared by mice and keyboards ─────────────────────────

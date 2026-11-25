@@ -286,6 +286,26 @@ unsafe extern "C" fn run(handle: *mut c_void, samples: c_ulong) {
             *value = if v.is_finite() { v } else { *default };
         }
     }
+    if out_l == out_r {
+        // Both outputs on one buffer (a host's shared buffer for unlinked
+        // ports): two `&mut` slices of it would alias, so the right channel
+        // runs through a stack block and only the left one is written.
+        let mut scratch = [0.0f32; ALIASED_BLOCK];
+        let mut done = 0;
+        while done < n {
+            let m = (n - done).min(ALIASED_BLOCK);
+            // SAFETY: as below; the right input is read before the left one
+            // is copied over a buffer it may share.
+            let left = unsafe {
+                std::ptr::copy(in_r.add(done), scratch.as_mut_ptr(), m);
+                std::ptr::copy(in_l.add(done), out_l.add(done), m);
+                std::slice::from_raw_parts_mut(out_l.add(done), m)
+            };
+            process(effect.as_mut(), controls, left, &mut scratch[..m]);
+            done += m;
+        }
+        return;
+    }
     // SAFETY: the host connected `n`-sample buffers; inputs may alias outputs
     // (in-place), so copy with memmove semantics before taking the outputs.
     let (left, right) = unsafe {
@@ -296,6 +316,15 @@ unsafe extern "C" fn run(handle: *mut c_void, samples: c_ulong) {
             std::slice::from_raw_parts_mut(out_r, n),
         )
     };
+    process(effect.as_mut(), controls, left, right);
+}
+
+/// Block size `run` processes in when both outputs share a buffer.
+const ALIASED_BLOCK: usize = 256;
+
+/// One block through `effect`, with non-finite samples kept out of it and
+/// out of what it hands on.
+fn process(effect: &mut dyn Effect, controls: &[f32], left: &mut [f32], right: &mut [f32]) {
     // One NaN / Inf would stick in every stage's filters and feedback paths.
     for s in left.iter_mut().chain(right.iter_mut()) {
         *s = if s.is_finite() {
@@ -545,6 +574,50 @@ mod tests {
         }
     }
 
+    /// A host may point both outputs at one buffer (PipeWire's shared buffer for unlinked
+    /// ports): the left output still comes out as with two buffers, from both inputs.
+    #[test]
+    fn outputs_on_one_buffer_still_give_the_left_channel() {
+        let n = 512;
+        let left_in = |i: usize| 0.3 * (std::f32::consts::TAU * 300.0 * i as f32 / 48000.0).sin();
+        let right_in = |i: usize| 0.5 * (std::f32::consts::TAU * 700.0 * i as f32 / 48000.0).sin();
+        let stages = AuxEffectKind::all()
+            .into_iter()
+            .filter_map(|k| k.fx_controls());
+        for (index, (label, controls)) in stages.enumerate() {
+            let desc = unsafe { &*ladspa_descriptor(index as c_ulong) };
+            let mut values: Vec<f32> = controls.iter().map(|(_, v)| *v).collect();
+            let mut outs = [Vec::new(), Vec::new()];
+            for (shared, got) in [false, true].into_iter().zip(&mut outs) {
+                let handle = unsafe { (desc.instantiate)(desc, 48000) };
+                for block in 0..20 {
+                    let range = block * n..(block + 1) * n;
+                    let mut l: Vec<f32> = range.clone().map(left_in).collect();
+                    let mut r: Vec<f32> = range.map(right_in).collect();
+                    let (mut out_l, mut out_r) = (vec![0.0f32; n], vec![0.0f32; n]);
+                    let out_r_ptr = if shared {
+                        out_l.as_mut_ptr()
+                    } else {
+                        out_r.as_mut_ptr()
+                    };
+                    unsafe {
+                        (desc.connect_port)(handle, 0, l.as_mut_ptr());
+                        (desc.connect_port)(handle, 1, r.as_mut_ptr());
+                        (desc.connect_port)(handle, 2, out_l.as_mut_ptr());
+                        (desc.connect_port)(handle, 3, out_r_ptr);
+                        for (i, v) in values.iter_mut().enumerate() {
+                            (desc.connect_port)(handle, 4 + i as c_ulong, v);
+                        }
+                        (desc.run)(handle, n as c_ulong);
+                    }
+                    got.extend(out_l);
+                }
+                unsafe { (desc.cleanup)(handle) };
+            }
+            assert!(outs[0] == outs[1], "{label}");
+        }
+    }
+
     /// Instantiates plugin `label` at `rate` Hz and runs blocks of the `sizes` given of a
     /// vowel plus sibilance in both channels through the C ABI, block `i` on `values(i)`; the
     /// left output.
@@ -674,7 +747,7 @@ mod tests {
                             );
                         }
                     }
-                    for rate in [0.0, 1.0] {
+                    for rate in [0.0, 1.0, 1e12, f32::MAX, f32::INFINITY, f32::NAN] {
                         let mut fx = effect(label, rate).unwrap();
                         let (mut l, mut r) = (vec![0.5; 1024], vec![-0.5; 1024]);
                         fx.process(&defaults, &mut l, &mut r);

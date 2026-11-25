@@ -521,7 +521,8 @@ fn run(
 /// A device file may hold a number its control no longer accepts (hand edits,
 /// an older version's range): the driver already sent it while opening, so
 /// write the nearest valid value back. Only sliders, only values that came
-/// from the file, and never in save-to-device mode (no automatic onboard write).
+/// from the file, and never in save-to-device mode or for a `persistent`
+/// control (no automatic onboard write).
 /// ponytail: the first write at open is not prevented, only corrected.
 fn repair_saved(a: &mut dyn DeviceAdapter, gate: &mut Gate) {
     let snap = gate.view(a);
@@ -532,7 +533,7 @@ fn repair_saved(a: &mut dyn DeviceAdapter, gate: &mut Gate) {
     }
     let file = load_device_settings(&gate.paths, snap.id.vendor_id, snap.id.product_id)
         .unwrap_or_default();
-    for meta in &snap.controls {
+    for meta in snap.controls.iter().filter(|m| !m.persistent) {
         let key = meta.key.as_str();
         let Some(value) = snap.settings.get(key).filter(|v| file.get(key) == Some(*v)) else {
             continue;
@@ -678,6 +679,8 @@ mod tests {
         saving: bool,
         /// Fails to leave save-to-device mode.
         stuck: bool,
+        /// Shown besides `save_to_device` (e.g. loaded from its file).
+        values: hako_core::catalog::SettingsMap,
     }
 
     impl DeviceAdapter for Fake {
@@ -691,11 +694,14 @@ mod tests {
                 name: "Fake".into(),
                 connected: true,
                 batteries: vec![],
-                settings: [(
-                    SettingKey::SaveToDevice.as_str().to_string(),
-                    SettingValue::Bool(self.saving),
-                )]
-                .into(),
+                settings: {
+                    let mut s = self.values.clone();
+                    s.insert(
+                        SettingKey::SaveToDevice.as_str().to_string(),
+                        SettingValue::Bool(self.saving),
+                    );
+                    s
+                },
                 controls: vec![
                     SettingMeta::toggle(SettingKey::SaveToDevice, "Save to device").persistent(),
                     SettingMeta::slider(SettingKey::Dpi, "DPI", 100.0, 1000.0, 1.0),
@@ -753,7 +759,29 @@ mod tests {
             batches: Arc::default(),
             saving: false,
             stuck: false,
+            values: Default::default(),
         }
+    }
+
+    #[test]
+    fn repairing_saved_values_never_writes_onboard_memory() {
+        use SettingKey::{Dpi, DpiStage1, OnboardWrites};
+        let paths = temp_paths("repair");
+        let mut a = fake();
+        let mut gate = Gate::load(paths.clone(), a.id.config_stem());
+        set_checked(&mut a, &mut gate, OnboardWrites, SettingValue::Bool(true)).unwrap();
+        // Both below their sliders' 100, as a hand-edited file may hold.
+        let mut file = hako_core::config::load_device_settings(&paths, 0x1234, 0x5678).unwrap();
+        for key in [Dpi, DpiStage1] {
+            file.insert(key.as_str().into(), SettingValue::Int(5));
+        }
+        hako_core::config::save_device_settings(&paths, 0x1234, 0x5678, &file).unwrap();
+        a.values = file;
+        a.writes.clear();
+        repair_saved(&mut a, &mut gate);
+        // The ordinary slider is repaired; the onboard one is left alone.
+        assert_eq!(a.writes, [Dpi]);
+        let _ = std::fs::remove_dir_all(paths.root);
     }
 
     #[test]

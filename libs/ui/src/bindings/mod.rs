@@ -9,6 +9,7 @@ mod library;
 mod macros;
 mod mouse;
 
+use crate::hotkeys::{self, HotkeysUi, KeyMark};
 use crate::theme::{self, pal};
 use crate::widgets;
 use crate::UiCommand;
@@ -18,16 +19,36 @@ use hako_core::remap::{CaptureRole, DeviceRemaps, EvdevKey, RemapBinding, RemapM
 use layouts::Layout;
 use library::Action;
 
-/// What every part of the page needs: the device, its remaps, the command sink.
+/// What every part of the page needs: the device, its remaps, the app
+/// hotkeys, the command sink.
 pub(crate) struct Cx<'a> {
     pub d: &'a DeviceSnapshot,
     pub remaps: &'a DeviceRemaps,
+    pub hotkeys: &'a mut HotkeysUi,
     pub out: &'a mut Vec<UiCommand>,
+    /// A hotkey's "Voice" link was clicked.
+    pub open_voice: bool,
 }
+
+/// egui memory slot: `(hotkey id, egui time)` whose keys flash on the
+/// Bindings pages (set by "Show on device").
+pub(crate) const HIGHLIGHT_ID: &str = "hotkey_highlight";
+
+/// How long "Show on device" highlights a hotkey's keys.
+const HIGHLIGHT_S: f64 = 4.0;
 
 impl Cx<'_> {
     fn binding(&self, key: EvdevKey) -> Option<&RemapBinding> {
         self.remaps.bindings.iter().find(|b| b.source == key)
+    }
+
+    /// Keys of this device in an app hotkey.
+    fn marks(&self) -> Vec<(u16, KeyMark)> {
+        self.hotkeys
+            .state()
+            .map(|s| &s.file)
+            .map(|f| hotkeys::key_marks(f, self.d.id.vendor_id, self.d.id.product_id))
+            .unwrap_or_default()
     }
 
     fn cancel_capture(&mut self, keep: bool) {
@@ -193,22 +214,104 @@ fn assign(ctx: &egui::Context, cx: &mut Cx, source: EvdevKey, action: Action) {
     }
 }
 
+/// The keyboard's Bindings page; true when a hotkey's Voice link was clicked.
 pub fn keyboard_page(
     ui: &mut Ui,
     d: &DeviceSnapshot,
     remaps: &DeviceRemaps,
+    hotkeys: &mut HotkeysUi,
     out: &mut Vec<UiCommand>,
-) {
-    page(ui, &mut Cx { d, remaps, out });
+) -> bool {
+    let mut cx = Cx {
+        d,
+        remaps,
+        hotkeys,
+        out,
+        open_voice: false,
+    };
+    page(ui, &mut cx);
+    cx.open_voice
 }
 
+/// The mouse's Bindings page; true when a hotkey's Voice link was clicked.
 pub fn mouse_page(
     ui: &mut Ui,
     d: &DeviceSnapshot,
     remaps: &DeviceRemaps,
+    hotkeys: &mut HotkeysUi,
     out: &mut Vec<UiCommand>,
-) {
-    page(ui, &mut Cx { d, remaps, out });
+) -> bool {
+    keyboard_page(ui, d, remaps, hotkeys, out)
+}
+
+/// The hotkey "Show on device" asked to highlight, while it lasts.
+fn highlighted(ui: &Ui) -> Option<String> {
+    let (id, at) = ui
+        .ctx()
+        .data(|m| m.get_temp::<(String, f64)>(egui::Id::new(HIGHLIGHT_ID)))?;
+    let age = ui.input(|i| i.time) - at;
+    (age < HIGHLIGHT_S).then(|| {
+        ui.ctx().request_repaint();
+        id
+    })
+}
+
+/// Every app hotkey that can fire from this device, with a link to its
+/// page and its remap conflicts here.
+fn hotkey_strip(ui: &mut Ui, cx: &mut Cx) {
+    let (v, p) = (cx.d.id.vendor_id, cx.d.id.product_id);
+    let list: Vec<_> = cx
+        .hotkeys
+        .state()
+        .map(|s| s.file.for_device(v, p).cloned().collect())
+        .unwrap_or_default();
+    if list.is_empty() {
+        return;
+    }
+    widgets::section(
+        ui,
+        "Hotkeys",
+        |ui| {
+            widgets::hint(ui, "App actions these keys fire on this device");
+        },
+        |ui| {
+            for b in &list {
+                ui.push_id(&b.id, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(theme::CONTROL_H);
+                        let color = if b.enabled {
+                            theme::HOTKEY
+                        } else {
+                            pal().text_faint
+                        };
+                        hotkeys::chord_caps(ui, &b.keys, b.exact_side, color);
+                        ui.label(egui::RichText::new(hotkeys::summary(b)).color(pal().text));
+                        if !b.enabled {
+                            widgets::pill(ui, "Off", pal().text_faint);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let link = egui::Link::new(
+                                egui::RichText::new(format!("Open {}", b.action.feature()))
+                                    .small()
+                                    .color(pal().accent),
+                            );
+                            if ui.add(link).clicked() {
+                                cx.open_voice = true;
+                            }
+                        });
+                    });
+                    hotkeys::conflicts(
+                        ui,
+                        cx.hotkeys,
+                        b,
+                        Some((v, p)),
+                        std::slice::from_ref(cx.d),
+                        cx.out,
+                    );
+                });
+            }
+        },
+    );
 }
 
 /// Columns grow with their content; nested scroll areas need a finite, generous cap.
@@ -236,6 +339,7 @@ fn page(ui: &mut Ui, cx: &mut Cx) {
         .unwrap_or_else(|| Layout::guess(&cx.d.name));
 
     toolbar(ui, cx, (!mouse).then_some(&mut layout), layout_id);
+    hotkey_strip(ui, cx);
     // Concerns every key (e.g. no permission to grab the device), so it is
     // shown whether or not one is selected.
     if let Some(err) = &cx.remaps.last_error {
@@ -357,6 +461,7 @@ fn legend(ui: &mut Ui) {
             ("Repeat", theme::MODE_REPEAT),
             ("Macro", theme::MODE_MACRO),
             ("Disabled", theme::MODE_OFF),
+            ("Hotkey", theme::HOTKEY),
         ] {
             let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
             ui.painter().rect_filled(r, 2.0, color);
@@ -592,10 +697,13 @@ mod tests {
             ..Default::default()
         };
         let mut out = Vec::new();
+        let mut hotkeys = HotkeysUi::default();
         let mut cx = Cx {
             d: &d,
             remaps: &remaps,
+            hotkeys: &mut hotkeys,
             out: &mut out,
+            open_voice: false,
         };
         assign(&egui::Context::default(), &mut cx, source, action);
         out

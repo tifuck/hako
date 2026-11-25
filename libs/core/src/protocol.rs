@@ -1,9 +1,11 @@
 //! Adapter trait surface shared conceptually with the daemon (types only).
 
 use crate::device::{DeviceId, DeviceSnapshot};
+use crate::hotkey::{HotkeyCaptureState, HotkeysState};
 use crate::mixer::MixerState;
 use crate::net::NetState;
 use crate::remap::{DeviceRemaps, RemapCaptured};
+use crate::voice::{VoicePartial, VoiceState};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +25,10 @@ pub enum AdapterEvent {
     MixerUpdated(Box<MixerState>),
     /// LAN audio state changed.
     NetUpdated(Box<NetState>),
+    HotkeysUpdated(Box<HotkeysState>),
+    HotkeyCapture(HotkeyCaptureState),
+    VoiceUpdated(Box<VoiceState>),
+    VoicePartial(VoicePartial),
     /// Daemon is stopping; subscribers should disconnect.
     ShuttingDown,
 }

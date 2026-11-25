@@ -35,6 +35,7 @@ use tracing::{info, warn};
 pub mod latency;
 pub mod meters;
 pub mod net;
+pub mod stt;
 
 pub const CHATMIX_GAME: &str = "Hako_Game";
 pub const CHATMIX_CHAT: &str = "Hako_Chat";
@@ -1035,7 +1036,7 @@ type SpawnRequest = (Command, mpsc::Sender<io::Result<Child>>);
 /// dies, also outside systemd's cgroup kill). `PR_SET_PDEATHSIG` fires when
 /// the forking *thread* exits, so every such child is forked by one thread
 /// that lives as long as the process.
-fn spawn_owned(mut command: Command) -> io::Result<Child> {
+pub fn spawn_owned(mut command: Command) -> io::Result<Child> {
     static SPAWNER: OnceLock<Option<mpsc::Sender<SpawnRequest>>> = OnceLock::new();
     let spawner = SPAWNER.get_or_init(|| {
         let (requests, receiver) = mpsc::channel::<SpawnRequest>();
@@ -1733,11 +1734,12 @@ fn alsa_card(props: &HashMap<String, String>) -> Option<String> {
         .cloned()
 }
 
-/// `amixer -c <card> <args>` (no shell); `card` must be a card number.
+/// `amixer -c <card> -- <args>` (no shell); `card` must be a card number.
+/// After `--`, a control item starting with `-` is not taken for an option.
 #[cfg(not(test))]
 fn amixer(card: &str, args: &[&str]) -> Result<String> {
     valid_card(card)?;
-    run_cmd("amixer", &[&["-c", card], args].concat())
+    run_cmd("amixer", &[&["-c", card, "--"], args].concat())
 }
 
 /// Unit tests run on the user's machine: they never touch a real card.

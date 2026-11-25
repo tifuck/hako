@@ -47,6 +47,9 @@ pub(super) fn hero(
     let legend = egui::FontId::proportional((unit * 0.27).clamp(8.0, 12.5));
     let sub = egui::FontId::proportional((unit * 0.22).clamp(7.5, 10.0));
     let mut dropped = None;
+    let marks = cx.marks();
+    let flash = super::highlighted(ui);
+    let pulse = 0.5 + 0.5 * (ui.input(|i| i.time) as f32 * 4.0).sin();
 
     for (i, cap) in caps.iter().enumerate() {
         let key = EvdevKey(cap.code);
@@ -66,7 +69,15 @@ pub(super) fn hero(
             live && (resp.hovered() || is_sel || target || resp.has_focus()),
             0.1,
         );
-        let tint = bound.map(|b| mode_color(b.mode));
+        let mark = marks
+            .iter()
+            .find(|(c, _)| *c == cap.code)
+            .map(|(_, m)| m)
+            .filter(|_| live);
+        let flashing = mark.is_some_and(|m| flash.as_ref() == Some(&m.binding));
+        let tint = bound
+            .map(|b| mode_color(b.mode))
+            .or(mark.map(|_| theme::HOTKEY));
 
         // Backlight bleeding out from under the cap.
         p.rect_filled(rect.expand(gap), 5.0, lit.gamma_multiply(0.10 + 0.22 * hot));
@@ -77,6 +88,14 @@ pub(super) fn hero(
                 pal().accent
             };
             glow(&p, rect, 6, 14, ring.gamma_multiply(0.55));
+        } else if flashing {
+            glow(
+                &p,
+                rect,
+                6,
+                16,
+                theme::HOTKEY.gamma_multiply(0.3 + 0.5 * pulse),
+            );
         }
         // Skirt, then the top face lifted a little (more on hover).
         p.rect_filled(rect, 5.0, theme::pal().key_side);
@@ -126,6 +145,13 @@ pub(super) fn hero(
                 ),
                 egui::StrokeKind::Inside,
             );
+        } else if flashing {
+            p.rect_stroke(
+                rect,
+                5.0,
+                Stroke::new(2.0_f32, theme::HOTKEY),
+                egui::StrokeKind::Inside,
+            );
         } else if resp.has_focus() {
             p.rect_stroke(
                 rect,
@@ -171,8 +197,9 @@ pub(super) fn hero(
             );
         }
         // What it does now, printed small when the cap has room for it.
-        if let Some(b) = bound {
-            let galley = p.layout_no_wrap(short(b), sub.clone(), pal().text);
+        let what = bound.map(short).or_else(|| mark.map(|m| m.label.clone()));
+        if let Some(what) = what {
+            let galley = p.layout_no_wrap(what, sub.clone(), pal().text);
             if unit >= 40.0 && galley.size().x <= face.width() - unit * 0.2 {
                 p.galley(
                     pos2(
@@ -197,8 +224,12 @@ pub(super) fn hero(
         if resp.clicked() {
             *selected = Some(key);
         }
+        let mut tip = format!("{} — {}", key_name(key), super::describe(bound));
+        if let Some(m) = mark {
+            tip = format!("{tip}\nHotkey: {}", m.tip);
+        }
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(format!("{} — {}", key_name(key), super::describe(bound)));
+            .on_hover_text(tip);
     }
 
     if cx.remaps.capturing == Some(CaptureRole::Source) {

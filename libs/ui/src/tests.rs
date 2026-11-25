@@ -226,7 +226,7 @@ fn renders_every_device_tab_without_panicking() {
                 settings: Some(settings_with_chain()),
                 ..Default::default()
             };
-            ctx.data_mut(|m| m.insert_temp(egui::Id::new(("tab", d.id.key())), tab));
+            ctx.data_mut(|m| m.insert_temp(egui::Id::new("tab"), tab));
             let mut out = Vec::new();
             for _ in 0..3 {
                 let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
@@ -289,7 +289,7 @@ fn onboard_memory_gate_renders_and_needs_confirmation() {
             selected: Some(d.id.clone()),
             ..Default::default()
         };
-        ctx.data_mut(|m| m.insert_temp(egui::Id::new(("tab", d.id.key())), tab));
+        ctx.data_mut(|m| m.insert_temp(egui::Id::new("tab"), tab));
         // The confirmation dialog is open: rendering it must not switch anything on.
         ctx.data_mut(|m| {
             m.insert_temp(
@@ -419,14 +419,14 @@ fn a_warned_choice_confirms_the_option_picked() {
 }
 
 #[test]
-fn tabs_follow_the_device_kind_and_end_with_device() {
+fn tabs_share_one_order_and_end_with_device() {
     use Tab::*;
     let st = sample_state();
     let tabs = |k| tabs_for(st.devices.iter().find(|d| d.kind == k).unwrap());
-    assert_eq!(tabs(DeviceKind::Keyboard), [Lighting, Bindings, Device]);
+    assert_eq!(tabs(DeviceKind::Keyboard), [Bindings, Lighting, Device]);
     assert_eq!(
         tabs(DeviceKind::Mouse),
-        [Performance, Bindings, Lighting, Device]
+        [Bindings, Lighting, Performance, Device]
     );
     // Microphone folds into Audio, power into Device.
     assert_eq!(tabs(DeviceKind::Headset), [Audio, Device]);
@@ -448,7 +448,7 @@ fn the_headset_page_has_no_line_in_tab() {
     now.controls
         .retain(|c| c.key.group() != SettingGroup::LineIn);
     for d in [old, &now] {
-        let labels: Vec<&str> = tabs_for(d).iter().map(|t| t.label(d.kind)).collect();
+        let labels: Vec<&str> = tabs_for(d).iter().map(|t| t.label()).collect();
         assert_eq!(labels, ["Audio", "Device"]);
     }
     // Only line-in controls (nothing else to show): no page for them either.
@@ -471,7 +471,7 @@ fn drafts_fall_back_to_the_daemon_value_once_answered() {
     let sent = egui::Id::new(("color_sent", kb.id.key()));
     let ctx = egui::Context::default();
     ctx.data_mut(|m| {
-        m.insert_temp(egui::Id::new(("tab", kb.id.key())), Tab::Lighting);
+        m.insert_temp(egui::Id::new("tab"), Tab::Lighting);
         m.insert_temp(slider, 20.0_f32);
         m.insert_temp(color, [1_u8, 2, 3]);
         m.insert_temp(sent, [1_u8, 2, 3]);
@@ -510,7 +510,7 @@ fn a_picked_color_is_one_command() {
     let color = egui::Id::new(("color_draft", kb.id.key()));
     let ctx = egui::Context::default();
     ctx.data_mut(|m| {
-        m.insert_temp(egui::Id::new(("tab", kb.id.key())), Tab::Lighting);
+        m.insert_temp(egui::Id::new("tab"), Tab::Lighting);
         m.insert_temp(color, [1_u8, 2, 3]);
     });
     let mut app = HakoAppUi {
@@ -544,7 +544,7 @@ fn selected_tab_survives_pages_coming_and_going() {
     let mut st = sample_state();
     let id = st.devices[1].id.clone();
     let ctx = egui::Context::default();
-    ctx.data_mut(|m| m.insert_temp(egui::Id::new(("tab", id.key())), Tab::Lighting));
+    ctx.data_mut(|m| m.insert_temp(egui::Id::new("tab"), Tab::Lighting));
     let shown = |st: &HubState| {
         let mut app = HakoAppUi {
             state: Some(st.clone()),
@@ -569,6 +569,37 @@ fn selected_tab_survives_pages_coming_and_going() {
         .controls
         .retain(|m| m.key.group() != SettingGroup::Lighting);
     assert_eq!(shown(&st), page(Tab::Bindings));
+}
+
+/// Switching devices keeps the open page when the next device has it, and a
+/// device without it does not forget it.
+#[test]
+fn selected_tab_carries_over_between_devices() {
+    let st = sample_state();
+    let ctx = egui::Context::default();
+    ctx.data_mut(|m| m.insert_temp(egui::Id::new("tab"), Tab::Lighting));
+    let shown = |kind: DeviceKind| {
+        let d = st.devices.iter().find(|d| d.kind == kind).unwrap();
+        let mut app = HakoAppUi {
+            state: Some(st.clone()),
+            selected: Some(d.id.clone()),
+            daemon_error: None,
+            ..Default::default()
+        };
+        let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut Vec::new()));
+        let page = ctx
+            .data(|m| m.get_temp::<(egui::Id, f64)>(egui::Id::new("page_transition")))
+            .unwrap()
+            .0;
+        tabs_for(d)
+            .into_iter()
+            .find(|&t| egui::Id::new((d.id.key(), t)) == page)
+            .unwrap()
+    };
+    assert_eq!(shown(DeviceKind::Keyboard), Tab::Lighting);
+    assert_eq!(shown(DeviceKind::Mouse), Tab::Lighting);
+    assert_eq!(shown(DeviceKind::Headset), Tab::Audio);
+    assert_eq!(shown(DeviceKind::Keyboard), Tab::Lighting);
 }
 
 #[test]
@@ -740,7 +771,7 @@ fn bind_state(kind: DeviceKind, name: &str, remaps: DeviceRemaps) -> (HubState, 
 /// Open `id` on its bindings tab with `selected` picked (0 = nothing).
 fn bind_app(ctx: &egui::Context, st: &HubState, id: &DeviceId, selected: u16) -> HakoAppUi {
     ctx.data_mut(|m| {
-        m.insert_temp(egui::Id::new(("tab", id.key())), Tab::Bindings);
+        m.insert_temp(egui::Id::new("tab"), Tab::Bindings);
         m.insert_temp(egui::Id::new(("bind_selected", id.key())), selected);
     });
     HakoAppUi {
@@ -1050,10 +1081,10 @@ fn snapshot_audit_gallery() {
             let name = format!(
                 "{:?}_{}",
                 d.kind,
-                tab.label(d.kind).to_lowercase().replace(' ', "_")
+                tab.label().to_lowercase().replace(' ', "_")
             )
             .to_lowercase();
-            let tab_id = egui::Id::new(("tab", d.id.key()));
+            let tab_id = egui::Id::new("tab");
             for (suffix, size) in [("", SHOT), ("_full", [1180.0, 1500.0])] {
                 shoot_app(
                     &format!("{name}{suffix}"),
@@ -1106,7 +1137,7 @@ fn snapshot_audit_gallery() {
     if let Some(headset) = state.devices.iter().find(|d| d.kind == DeviceKind::Headset) {
         let mut on = app(&state, Some(headset.id.clone()));
         on.mixer.receive(sample_mixer());
-        let tab_id = egui::Id::new(("tab", headset.id.key()));
+        let tab_id = egui::Id::new("tab");
         shoot_app(
             "headset_audio_mixer_on",
             SHOT,
@@ -1148,7 +1179,7 @@ fn snapshot_audit_gallery() {
         );
         for d in &state.devices {
             let tabs = tabs_for(d);
-            let tab_id = egui::Id::new(("tab", d.id.key()));
+            let tab_id = egui::Id::new("tab");
             for (tab, label) in [(tabs[0], "main"), (tabs[tabs.len() - 1], "last")] {
                 shoot_app(
                     &format!("theme_{}_{:?}_{label}", t.id, d.kind).to_lowercase(),
@@ -1183,7 +1214,7 @@ fn snapshot_audit_gallery() {
     };
     mem.devices = vec![onboard.clone()];
     for (i, tab) in tabs_for(&onboard).into_iter().enumerate() {
-        let tab_id = egui::Id::new(("tab", onboard.id.key()));
+        let tab_id = egui::Id::new("tab");
         shoot_app(
             &format!("memory_gate_tab{i}"),
             SHOT,
@@ -2139,26 +2170,60 @@ fn the_add_dialog_stops_at_the_source_limit() {
     }
 }
 
-/// A recorded take the daemon would refuse (BTN_MISC can't be emitted) is not
-/// shown as saved: nothing is sent, the changes stay unsaved, and why is shown.
-#[test]
-fn a_macro_the_daemon_would_refuse_stays_unsaved() {
+/// The TKL's macro key selected, with an earlier take still in `recorded`.
+fn record_harness() -> Driven {
     let (st, id) = tkl(DeviceRemaps {
-        recorded: steps(&[0x100]),
+        recorded: steps(&[30]),
         ..remaps(DeviceKind::Keyboard)
     });
     let app = bind_app(&egui::Context::default(), &st, &id, 34);
     let mut h = drive(app);
     h.ctx.data_mut(|m| {
-        m.insert_temp(egui::Id::new(("tab", id.key())), Tab::Bindings);
+        m.insert_temp(egui::Id::new("tab"), Tab::Bindings);
         m.insert_temp(egui::Id::new(("bind_selected", id.key())), 34_u16);
     });
     h.run_steps(4);
+    h
+}
+
+/// The daemon reports a capture state and take.
+fn set_record(h: &mut Driven, capturing: Option<CaptureRole>, recorded: Vec<MacroStep>) {
+    let r = &mut h.state_mut().0.state.as_mut().unwrap().remaps[0];
+    r.capturing = capturing;
+    r.recorded = recorded;
+    h.run_steps(4);
+}
+
+/// Right after Record, `recorded` still holds the previous take: it is not
+/// adopted; the take of the capture the daemon then runs is.
+#[test]
+fn record_adopts_only_the_new_take() {
+    let mut h = record_harness();
     click(&mut h, "     Record");
     assert!(matches!(
         sent(&mut h).as_slice(),
         [UiCommand::StartCapture { .. }]
     ));
+    h.run_steps(4);
+    assert!(!shown(&h, "Unsaved changes"));
+    set_record(&mut h, Some(CaptureRole::Record), Vec::new());
+    assert!(!shown(&h, "Unsaved changes"));
+    set_record(&mut h, None, steps(&[17]));
+    assert!(shown(&h, "Unsaved changes"));
+}
+
+/// A recorded take the daemon would refuse (BTN_MISC can't be emitted) is not
+/// shown as saved: nothing is sent, the changes stay unsaved, and why is shown.
+#[test]
+fn a_macro_the_daemon_would_refuse_stays_unsaved() {
+    let mut h = record_harness();
+    click(&mut h, "     Record");
+    assert!(matches!(
+        sent(&mut h).as_slice(),
+        [UiCommand::StartCapture { .. }]
+    ));
+    set_record(&mut h, Some(CaptureRole::Record), Vec::new());
+    set_record(&mut h, None, steps(&[0x100]));
     assert!(shown(&h, "Unsaved changes"));
     click(&mut h, "Save macro");
     assert!(sent(&mut h).is_empty());
@@ -2321,7 +2386,7 @@ fn snapshot_readme() {
             app,
             move |ctx| {
                 ctx.data_mut(|m| {
-                    m.insert_temp(egui::Id::new(("tab", key.clone())), tab);
+                    m.insert_temp(egui::Id::new("tab"), tab);
                     m.insert_temp(egui::Id::new(("bind_selected", key)), selected);
                 })
             },
@@ -2509,7 +2574,7 @@ fn remap_errors_show_without_a_selected_key() {
             (app, Vec::new()),
         );
     h.ctx.data_mut(|m| {
-        m.insert_temp(egui::Id::new(("tab", id.key())), Tab::Bindings);
+        m.insert_temp(egui::Id::new("tab"), Tab::Bindings);
         m.insert_temp(egui::Id::new(("bind_selected", id.key())), 0u16);
     });
     h.run_steps(4);
@@ -2535,4 +2600,916 @@ fn a_burst_of_toasts_keeps_the_errors() {
         .collect();
     widgets::trim_toasts(&mut list);
     assert_eq!(list[0].text, "e1");
+}
+
+// ── Voice and hotkeys ────────────────────────────────────────────
+
+fn sample_voice() -> hako_core::voice::VoiceState {
+    use hako_core::voice::*;
+    let mut file = VoiceFile {
+        enabled: true,
+        model: Some(ModelChoice::Catalog {
+            id: CATALOG.models[0].id.clone(),
+            quant: CATALOG.models[0].default_quant().into(),
+        }),
+        ..Default::default()
+    };
+    file.text.replacements.push(Replacement {
+        from: "new line".into(),
+        to: "\n".into(),
+    });
+    let m1 = &CATALOG.models[1];
+    VoiceState {
+        file,
+        engine: EngineStatus::Idle,
+        loaded: Some(ModelCaps {
+            backend: "CPU".into(),
+            ..Default::default()
+        }),
+        installed: vec![
+            InstalledModel {
+                id: CATALOG.models[0].id.clone(),
+                quant: CATALOG.models[0].default_quant().into(),
+                file: "a.gguf".into(),
+                size: 1,
+                status: ModelStatus::Ready,
+            },
+            InstalledModel {
+                id: m1.id.clone(),
+                quant: m1.default_quant().into(),
+                file: "b.gguf".into(),
+                size: 1,
+                status: ModelStatus::Corrupt {
+                    reason: "hash mismatch".into(),
+                },
+            },
+        ],
+        custom: vec![CustomModel {
+            file: "mine.gguf".into(),
+            size: 123_000_000,
+        }],
+        vad_ready: false,
+        history: vec![HistoryEntry {
+            at: 1,
+            text: "hello world".into(),
+            model: "m".into(),
+            audio: None,
+        }],
+        outputs: vec![OutputCheck {
+            method: OutputMethod::Paste,
+            ok: false,
+            reason: Some("no clipboard".into()),
+        }],
+        accelerators: vec!["CPU".into(), "Vulkan0".into()],
+        layout: Some("us".into()),
+        sources: vec![("alsa_input.usb".into(), "USB mic".into())],
+        wake_model: None,
+        jarvis_listening: false,
+        last_command: None,
+        problems: vec!["example problem".into()],
+        load_error: None,
+    }
+}
+
+fn voice_app(voice: Option<hako_core::voice::VoiceState>) -> HakoAppUi {
+    let mut app = HakoAppUi {
+        state: Some(sample_state()),
+        daemon_error: None,
+        show_voice: true,
+        settings: Some(AppSettings::default()),
+        ..Default::default()
+    };
+    if let Some(v) = voice {
+        app.voice.receive(v);
+    }
+    app.hotkeys
+        .receive(hako_core::hotkey::HotkeysState::default());
+    app
+}
+
+#[test]
+fn voice_page_renders_every_state() {
+    use hako_core::voice::{EngineStatus, ModelStatus, VoicePartial};
+    let ctx = egui::Context::default();
+    // Every folded section open.
+    ctx.data_mut(|m| {
+        for t in voice::FOLDS {
+            m.insert_temp(voice::fold_id(t), true);
+        }
+    });
+    let mut out = Vec::new();
+    let mut render = |app: &mut HakoAppUi| {
+        for input in [input(), input(), {
+            let mut narrow = input();
+            narrow.screen_rect = Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 600.0),
+            ));
+            narrow
+        }] {
+            let _ = ctx.run(input, |ctx| app.ui(ctx, &mut out));
+        }
+        assert!(out.is_empty(), "rendering sent {out:?}");
+    };
+    // Loading, an older hakod, off.
+    render(&mut voice_app(None));
+    let mut app = voice_app(None);
+    app.voice.unavailable("Voice needs a newer hakod.".into());
+    render(&mut app);
+    let mut off = sample_voice();
+    off.file.enabled = false;
+    off.engine = EngineStatus::Off;
+    render(&mut voice_app(Some(off)));
+    // No model, downloading, idle, recording with a partial, an error.
+    let mut none = sample_voice();
+    none.file.model = None;
+    none.engine = EngineStatus::NoModel;
+    render(&mut voice_app(Some(none)));
+    let mut downloading = sample_voice();
+    downloading.installed[0].status = ModelStatus::Downloading {
+        bytes: 10,
+        total: 100,
+    };
+    let mut app = voice_app(Some(downloading));
+    render(&mut app);
+    assert_eq!(app.voice.rail_status().0, "Downloading 10%");
+    render(&mut voice_app(Some(sample_voice())));
+    let mut rec = sample_voice();
+    rec.engine = EngineStatus::Recording;
+    let mut app = voice_app(Some(rec));
+    app.voice.partial(VoicePartial {
+        session: 1,
+        committed: "hello".into(),
+        tentative: "wor".into(),
+    });
+    render(&mut app);
+    let mut err = sample_voice();
+    err.engine = EngineStatus::Error {
+        message: "worker crashed".into(),
+    };
+    err.load_error = Some("parse error".into());
+    render(&mut voice_app(Some(err)));
+    // Hotkeys unavailable while Voice works.
+    let mut app = voice_app(Some(sample_voice()));
+    app.hotkeys
+        .unavailable("Hotkeys need a newer hakod.".into());
+    render(&mut app);
+}
+
+#[test]
+fn an_older_hakod_is_explained_on_the_voice_page() {
+    let mut app = voice_app(None);
+    app.voice.unavailable("Voice needs a newer hakod.".into());
+    let h = drive(app);
+    assert!(shown(&h, "Voice needs a newer hakod."));
+}
+
+#[test]
+fn voice_turns_on_from_the_off_card() {
+    use hako_core::voice::VoiceOp;
+    let mut off = sample_voice();
+    off.file.enabled = false;
+    let mut h = drive(voice_app(Some(off)));
+    click(&mut h, "Turn on");
+    let sent = sent(&mut h);
+    assert!(
+        matches!(sent.as_slice(), [UiCommand::PatchVoice(ops)] if ops == &[VoiceOp::SetEnabled { on: true }]),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn voice_page_meters_the_picked_microphone_only_while_visible() {
+    let ctx = egui::Context::default();
+    let mut app = voice_app(Some(sample_voice()));
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut Vec::new()));
+    assert_eq!(
+        app.meter_targets,
+        [MeterTargetSpec::Node {
+            name: hako_core::voice::CAPTURE_NODE.into(),
+            monitor_sink: false
+        }]
+    );
+    app.show_voice = false;
+    let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut Vec::new()));
+    assert!(app.meter_targets.is_empty());
+}
+
+#[test]
+fn catalog_filters_and_sorts() {
+    use hako_core::voice::CATALOG;
+    use std::collections::HashMap;
+    use voice::{filter_models, CatalogFilter, SortBy};
+    let models = &CATALOG.models;
+    let quants = HashMap::new();
+    let all = filter_models(models, &CatalogFilter::default(), &quants);
+    assert_eq!(all.len(), models.len());
+    let size = |m: &hako_core::voice::CatalogModel| m.file(m.default_quant()).unwrap().size;
+    assert!(
+        all.windows(2).all(|w| size(w[0]) <= size(w[1])),
+        "smallest first"
+    );
+
+    let f = CatalogFilter {
+        language: Some("de".into()),
+        streaming_only: true,
+        max_size: Some(1_000_000_000),
+        sort: SortBy::Name,
+    };
+    let some = filter_models(models, &f, &quants);
+    assert!(some.len() < all.len());
+    assert!(some
+        .iter()
+        .all(|m| m.streaming && m.languages.iter().any(|l| l == "de") && size(m) <= 1_000_000_000));
+    let names: Vec<String> = some.iter().map(|m| m.name.to_lowercase()).collect();
+    assert!(names.windows(2).all(|w| w[0] <= w[1]));
+
+    let acc = filter_models(
+        models,
+        &CatalogFilter {
+            sort: SortBy::Accuracy,
+            ..Default::default()
+        },
+        &quants,
+    );
+    let wer = |m: &hako_core::voice::CatalogModel| {
+        m.wer_en
+            .get(m.default_quant())
+            .or(m.wer_en.values().next())
+            .copied()
+            .unwrap_or(f64::INFINITY)
+    };
+    assert!(
+        acc.windows(2).all(|w| wer(w[0]) <= wer(w[1])),
+        "unmeasured last"
+    );
+
+    // A picked quant decides the size the filter sees.
+    let big = all.last().unwrap();
+    let small_quant = big.files.iter().min_by_key(|f| f.size).unwrap();
+    let mut quants = HashMap::new();
+    quants.insert(big.id.clone(), small_quant.quant.clone());
+    let f = CatalogFilter {
+        max_size: Some(small_quant.size),
+        ..Default::default()
+    };
+    assert!(filter_models(models, &f, &quants)
+        .iter()
+        .any(|m| m.id == big.id));
+
+    assert_eq!(voice::fmt_params(600_000_000), "0.6B");
+    assert_eq!(voice::fmt_params(44_000_000), "44M");
+    assert_eq!(voice::fmt_params(1_000_000_000), "1B");
+    assert_eq!(voice::fmt_size(731_000_000), "731 MB");
+    assert_eq!(voice::fmt_size(1_600_000_000), "1.6 GB");
+    assert_eq!(voice::languages_label(&["en".into()]), "English");
+    assert_eq!(
+        voice::languages_label(&["en".into(), "de".into()]),
+        "2 languages"
+    );
+}
+
+#[test]
+fn hotkey_edits_are_validated_before_they_are_sent() {
+    use hako_core::hotkey::*;
+    use hako_core::remap::EvdevKey;
+    let mut hk = hotkeys::HotkeysUi::default();
+    hk.receive(HotkeysState::default());
+    hk.sync(false);
+    let mut out = Vec::new();
+    // Esc alone is for cancel only: refused, nothing sent, the reason kept.
+    let mut b = hk.file().unwrap().bindings[0].clone();
+    b.keys = vec![EvdevKey(KEY_ESC)];
+    assert!(!hk.send("dictate", vec![HotkeyOp::Set { binding: b }], &mut out));
+    assert!(out.is_empty());
+
+    // Detect for a new binding: a chord already in use is refused...
+    let new = HotkeyBinding::new("dictate-2", HotkeyAction::VoiceTranscribeAlt, &[]);
+    hk.detect(new.clone(), &mut out);
+    assert!(matches!(out.as_slice(), [UiCommand::StartHotkeyCapture]));
+    out.clear();
+    hk.capture_update(HotkeyCaptureState {
+        held: vec![],
+        chord: vec![EvdevKey(KEY_RIGHTCTRL), EvdevKey(KEY_SPACE)],
+        done: true,
+        cancelled: false,
+    });
+    hk.frame(&mut out);
+    assert!(out.is_empty(), "{out:?}");
+    assert!(hk.detecting().is_none());
+    // ... a free one is added, locally at once.
+    hk.detect(new, &mut out);
+    out.clear();
+    hk.capture_update(HotkeyCaptureState {
+        chord: vec![EvdevKey(183)],
+        done: true,
+        ..Default::default()
+    });
+    hk.frame(&mut out);
+    let [UiCommand::PatchHotkeys(ops)] = out.as_slice() else {
+        panic!("{out:?}");
+    };
+    assert!(matches!(&ops[..], [HotkeyOp::Set { binding }] if binding.keys == [EvdevKey(183)]));
+    assert_eq!(hk.file().unwrap().bindings.len(), 3);
+    // A cancelled capture changes nothing.
+    out.clear();
+    hk.detect(hk.file().unwrap().bindings[0].clone(), &mut out);
+    out.clear();
+    hk.capture_update(HotkeyCaptureState {
+        done: true,
+        cancelled: true,
+        ..Default::default()
+    });
+    hk.frame(&mut out);
+    assert!(out.is_empty());
+    assert_eq!(
+        hotkeys::new_id(hk.file().unwrap(), HotkeyAction::VoiceTranscribe),
+        "dictate-3"
+    );
+    assert_eq!(
+        hotkeys::cap_label(EvdevKey(KEY_RIGHTCTRL), false),
+        hotkeys::cap_label(EvdevKey(KEY_LEFTCTRL), false)
+    );
+}
+
+#[test]
+fn bindings_pages_mark_the_keys_of_hotkeys_covering_the_device() {
+    use hako_core::hotkey::*;
+    let mut file = HotkeysFile::default();
+    // Ctrl + Space on every device; F13 only on another one.
+    let mut other = HotkeyBinding::new("dictate-alt", HotkeyAction::VoiceTranscribeAlt, &[183]);
+    other.scope = HotkeyScope::Device {
+        vendor_id: 9,
+        product_id: 9,
+    };
+    file.bindings.push(other);
+    let marks = hotkeys::key_marks(&file, 1, 1);
+    let label = |code: u16| {
+        marks
+            .iter()
+            .find(|(c, _)| *c == code)
+            .map(|(_, m)| m.label.as_str())
+    };
+    assert_eq!(label(KEY_SPACE), Some("Voice"));
+    assert_eq!(label(KEY_LEFTCTRL), Some("+Voice"));
+    assert_eq!(label(KEY_RIGHTCTRL), Some("+Voice"), "either side");
+    assert_eq!(label(183), None, "scoped to another device");
+    assert!(marks
+        .iter()
+        .find(|(c, _)| *c == KEY_SPACE)
+        .is_some_and(|(_, m)| m.summary == "Voice: Dictate (Smart)"));
+    // A device no hotkey covers gets no marks.
+    file.bindings.retain(|b| b.id == "dictate-alt");
+    assert!(hotkeys::key_marks(&file, 1, 1).is_empty());
+    assert_eq!(hotkeys::key_marks(&file, 9, 9).len(), 1);
+
+    // The keyboard and mouse pages render them, the Hotkey tile included,
+    // without sending anything.
+    for (kind, key) in [
+        (DeviceKind::Keyboard, KEY_SPACE),
+        (DeviceKind::Mouse, 0x113),
+    ] {
+        let (st, id) = bind_state(kind, "Test", DeviceRemaps::default());
+        let ctx = egui::Context::default();
+        let mut app = bind_app(&ctx, &st, &id, key);
+        let mut hk = HotkeysFile::default();
+        hk.bindings.push(HotkeyBinding::new(
+            "side",
+            HotkeyAction::VoiceTranscribeAlt,
+            &[0x113],
+        ));
+        app.hotkeys.receive(HotkeysState {
+            file: hk,
+            ..Default::default()
+        });
+        ctx.data_mut(|m| {
+            m.insert_temp(
+                egui::Id::new(bindings::HIGHLIGHT_ID),
+                ("dictate".to_string(), 0.0),
+            )
+        });
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+        }
+        assert!(out.is_empty(), "{kind:?}: {out:?}");
+    }
+}
+
+#[test]
+fn a_hotkey_conflict_offers_three_answers() {
+    use hako_core::hotkey::*;
+    use hako_core::remap::EvdevKey;
+    let (st, id) = bind_state(DeviceKind::Keyboard, "Test", DeviceRemaps::default());
+    let ctx = egui::Context::default();
+    let app = bind_app(&ctx, &st, &id, 0);
+    let mut h = drive(app);
+    h.state_mut().0.hotkeys.receive(HotkeysState {
+        file: HotkeysFile::default(),
+        status: vec![HotkeyStatus {
+            id: "dictate".into(),
+            source: HotkeySource::Evdev,
+            active: true,
+            devices: vec![],
+            conflicts: vec![HotkeyConflict::Remap {
+                device: "Test".into(),
+                vendor_id: id.vendor_id,
+                product_id: id.product_id,
+                key: EvdevKey(KEY_SPACE),
+            }],
+            problems: vec![],
+        }],
+        ..Default::default()
+    });
+    h.run_steps(4);
+    click(&mut h, "Both");
+    let sent = sent(&mut h);
+    assert!(
+        matches!(sent.as_slice(), [UiCommand::PatchHotkeys(ops)]
+            if matches!(&ops[..], [HotkeyOp::Set { binding }] if binding.with_remaps)),
+        "{sent:?}"
+    );
+}
+
+// ── Jarvis ───────────────────────────────────────────────────────
+
+/// The whole UI in a window tall enough for the Voice page's lower
+/// sections, every fold open.
+fn drive_voice(app: HakoAppUi) -> Driven {
+    let mut h = egui_kittest::Harness::builder()
+        .with_size([1200.0, 9000.0])
+        .build_state(
+            |ctx, (app, out): &mut (HakoAppUi, Vec<UiCommand>)| app.ui(ctx, out),
+            (app, Vec::new()),
+        );
+    h.ctx.data_mut(|m| {
+        for t in voice::FOLDS {
+            m.insert_temp(voice::fold_id(t), true);
+        }
+    });
+    h.run_steps(4);
+    h
+}
+
+/// Voice ready for Jarvis: the dictation model and the wake model are ready.
+fn jarvis_voice() -> hako_core::voice::VoiceState {
+    let mut v = sample_voice();
+    v.wake_model = Some(hako_core::voice::ModelStatus::Ready);
+    v
+}
+
+fn user_commands() -> Vec<hako_core::voice::UserCommand> {
+    use hako_core::remap::EvdevKey;
+    use hako_core::voice::{UserAction, UserCommand};
+    let cmd = |say: &str, action| UserCommand {
+        say: vec![say.into()],
+        action,
+        confirm: false,
+    };
+    vec![
+        cmd(
+            "browser {slot}",
+            UserAction::Run {
+                program: "/usr/bin/firefox".into(),
+                args: vec!["{slot}".into()],
+            },
+        ),
+        cmd(
+            "paste",
+            UserAction::Keys {
+                keys: vec![EvdevKey(hako_core::hotkey::KEY_LEFTCTRL), EvdevKey(47)],
+            },
+        ),
+        cmd(
+            "sign off",
+            UserAction::Type {
+                text: "Best regards".into(),
+            },
+        ),
+        cmd(
+            "mail",
+            UserAction::Open {
+                target: "https://mail.example.com".into(),
+            },
+        ),
+        UserCommand {
+            confirm: true,
+            ..cmd(
+                "game mode",
+                UserAction::Profile {
+                    name: "Gaming".into(),
+                },
+            )
+        },
+    ]
+}
+
+#[test]
+fn jarvis_section_renders_every_state() {
+    use hako_core::hotkey::{HotkeyAction, HotkeyBinding, HotkeysFile, HotkeysState};
+    use hako_core::voice::{CommandOutcome, ModelStatus};
+    let ctx = egui::Context::default();
+    ctx.data_mut(|m| {
+        for t in voice::FOLDS {
+            m.insert_temp(voice::fold_id(t), true);
+        }
+    });
+    let mut out = Vec::new();
+    let mut render = |app: &mut HakoAppUi| {
+        for _ in 0..3 {
+            let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
+        }
+        assert!(out.is_empty(), "rendering sent {out:?}");
+    };
+    // Wake model missing, downloading, damaged, ready.
+    for wake in [
+        None,
+        Some(ModelStatus::Downloading {
+            bytes: 1_000_000,
+            total: 3_000_000,
+        }),
+        Some(ModelStatus::Corrupt {
+            reason: "hash mismatch".into(),
+        }),
+        Some(ModelStatus::Ready),
+    ] {
+        let mut v = sample_voice();
+        v.wake_model = wake;
+        render(&mut voice_app(Some(v)));
+    }
+    // Listening, with a command that worked and one that failed, the user's
+    // commands, a push-to-command hotkey.
+    for ok in [true, false] {
+        let mut v = jarvis_voice();
+        v.file.jarvis.enabled = true;
+        v.jarvis_listening = ok;
+        v.file.jarvis.commands = user_commands();
+        v.last_command = Some(CommandOutcome {
+            at: 0,
+            heard: "open firefox".into(),
+            action: ok.then(|| "open firefox".into()),
+            ok,
+            message: (!ok).then(|| "no such app".into()),
+        });
+        let mut app = voice_app(Some(v));
+        let mut file = HotkeysFile::default();
+        file.bindings.push(HotkeyBinding::new(
+            "jarvis",
+            HotkeyAction::JarvisListen,
+            &[183],
+        ));
+        app.hotkeys.receive(HotkeysState {
+            file,
+            ..Default::default()
+        });
+        render(&mut app);
+    }
+    // The command editor open on every action kind.
+    for kind in voice::CommandKind::ALL {
+        let mut app = voice_app(Some(jarvis_voice()));
+        app.voice.command = Some(voice::CommandDraft {
+            kind,
+            ..Default::default()
+        });
+        render(&mut app);
+    }
+}
+
+#[test]
+fn jarvis_shows_what_it_hears_and_did() {
+    use hako_core::voice::CommandOutcome;
+    let mut v = jarvis_voice();
+    v.file.jarvis.enabled = true;
+    v.jarvis_listening = true;
+    v.last_command = Some(CommandOutcome {
+        at: 0,
+        heard: "open steam".into(),
+        action: Some("open steam".into()),
+        ok: false,
+        message: Some("no such app".into()),
+    });
+    let h = drive_voice(voice_app(Some(v)));
+    assert!(shown(&h, "Listening for « jarvis »"));
+    assert!(shown(&h, "\u{201c}open steam\u{201d}"));
+    assert!(shown(&h, "Failed"));
+    assert!(shown(&h, "Understood as: open steam"));
+    assert!(shown(&h, "no such app"));
+    assert!(shown(&h, "Ready"), "wake model ready");
+
+    assert_eq!(voice::ago(100, 95), "just now");
+    assert_eq!(voice::ago(100, 50), "50 s ago");
+    assert_eq!(voice::ago(1000, 400), "10 min ago");
+    assert_eq!(voice::ago(7200, 0), "2 h ago");
+    assert_eq!(voice::ago(100_000, 0), "1 day ago");
+    assert_eq!(voice::ago(0, 5), "just now", "a clock behind the daemon's");
+}
+
+#[test]
+fn jarvis_turns_on_only_once_both_models_are_ready() {
+    use egui_kittest::kittest::Queryable;
+    use hako_core::voice::{ModelStatus, VoiceOp};
+    let mut none = jarvis_voice();
+    none.file.model = None;
+    assert_eq!(
+        voice::jarvis_blocker(&none),
+        Some("Needs a dictation model: download one under Model and click Use")
+    );
+    let mut no_wake = jarvis_voice();
+    no_wake.wake_model = Some(ModelStatus::Downloading { bytes: 1, total: 2 });
+    let why = "Download the wake-word model first";
+    assert_eq!(voice::jarvis_blocker(&no_wake), Some(why));
+    assert_eq!(voice::jarvis_blocker(&jarvis_voice()), None);
+
+    // Disabled with the reason; the wake model can be downloaded.
+    no_wake.wake_model = None;
+    let mut h = drive_voice(voice_app(Some(no_wake)));
+    assert!(shown(&h, why));
+    fn toggle(h: &Driven) -> egui_kittest::kittest::Node<'_> {
+        h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Listen for the wake word")
+    }
+    assert!(toggle(&h).is_disabled());
+    let label = format!(
+        "Download {}",
+        voice::fmt_size(hako_core::voice::CATALOG.kws.size)
+    );
+    h.get_by_label(&label).click();
+    h.run_steps(4);
+    let download = sent(&mut h);
+    assert!(
+        matches!(download.as_slice(), [UiCommand::PatchVoice(ops)] if ops == &[VoiceOp::DownloadWake]),
+        "{download:?}"
+    );
+
+    // Ready: on.
+    let mut h = drive_voice(voice_app(Some(jarvis_voice())));
+    toggle(&h).click();
+    h.run_steps(4);
+    let sent = sent(&mut h);
+    assert!(
+        matches!(sent.as_slice(), [UiCommand::PatchVoice(ops)]
+            if matches!(&ops[..], [VoiceOp::SetJarvis { jarvis }] if jarvis.enabled)),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn command_drafts_build_every_action_kind() {
+    use hako_core::remap::EvdevKey;
+    use hako_core::voice::{UserAction, VoiceFile};
+    use voice::{save_command, CommandDraft, CommandKind};
+    let f = VoiceFile::default();
+    let draft = |kind| CommandDraft {
+        phrases: "  do it \n\nnow {slot}\n".into(),
+        kind,
+        program: " /usr/bin/foot ".into(),
+        args: "-e\n{slot}\n".into(),
+        keys: vec![EvdevKey(hako_core::hotkey::KEY_LEFTCTRL), EvdevKey(47)],
+        text: "hello\nworld".into(),
+        target: "https://example.com".into(),
+        profile: "Gaming".into(),
+        confirm: true,
+        ..Default::default()
+    };
+    for kind in CommandKind::ALL {
+        let j = save_command(&f, &draft(kind)).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        let [c] = j.commands.as_slice() else {
+            panic!("{kind:?}: {:?}", j.commands)
+        };
+        assert_eq!(c.say, ["do it", "now {slot}"]);
+        assert!(c.confirm);
+        let want = match kind {
+            CommandKind::Run => UserAction::Run {
+                program: "/usr/bin/foot".into(),
+                args: vec!["-e".into(), "{slot}".into()],
+            },
+            CommandKind::Keys => UserAction::Keys {
+                keys: vec![EvdevKey(hako_core::hotkey::KEY_LEFTCTRL), EvdevKey(47)],
+            },
+            CommandKind::Type => UserAction::Type {
+                text: "hello\nworld".into(),
+            },
+            CommandKind::Open => UserAction::Open {
+                target: "https://example.com".into(),
+            },
+            CommandKind::Profile => UserAction::Profile {
+                name: "Gaming".into(),
+            },
+        };
+        assert_eq!(c.action, want);
+        // Editing it again gives the same command back.
+        assert_eq!(CommandDraft::edit(0, c).build(), *c);
+    }
+    // Refused: no phrase, a relative program, no keys, nothing to type, to
+    // open or to apply.
+    let bad = [
+        CommandDraft {
+            phrases: " \n".into(),
+            ..draft(CommandKind::Run)
+        },
+        CommandDraft {
+            program: "foot".into(),
+            ..draft(CommandKind::Run)
+        },
+        CommandDraft {
+            keys: vec![],
+            ..draft(CommandKind::Keys)
+        },
+        CommandDraft {
+            text: String::new(),
+            ..draft(CommandKind::Type)
+        },
+        CommandDraft {
+            target: " ".into(),
+            ..draft(CommandKind::Open)
+        },
+        CommandDraft {
+            profile: String::new(),
+            ..draft(CommandKind::Profile)
+        },
+    ];
+    for d in bad {
+        assert!(save_command(&f, &d).is_err(), "{d:?}");
+    }
+    // Editing replaces in place.
+    let mut f = VoiceFile::default();
+    f.jarvis.commands = user_commands();
+    let d = CommandDraft {
+        index: Some(1),
+        ..draft(CommandKind::Type)
+    };
+    let j = save_command(&f, &d).unwrap();
+    assert_eq!(j.commands.len(), 5);
+    assert_eq!(j.commands[1].say, ["do it", "now {slot}"]);
+    assert_eq!(j.commands[0], f.jarvis.commands[0]);
+}
+
+#[test]
+fn the_command_editor_saves_valid_commands_and_explains_invalid_ones() {
+    use hako_core::voice::{UserAction, VoiceOp};
+    use voice::{CommandDraft, CommandKind};
+    let mut app = voice_app(Some(jarvis_voice()));
+    app.voice.command = Some(CommandDraft {
+        phrases: "launch terminal".into(),
+        kind: CommandKind::Run,
+        program: "foot".into(),
+        ..Default::default()
+    });
+    let mut h = drive_voice(app);
+    click(&mut h, "Save command");
+    assert!(sent(&mut h).is_empty());
+    assert!(shown(
+        &h,
+        "Not saved: command: the program is an absolute path"
+    ));
+
+    h.state_mut().0.voice.command.as_mut().unwrap().program = "/usr/bin/foot".into();
+    h.run_steps(2);
+    click(&mut h, "Save command");
+    let sent = sent(&mut h);
+    let [UiCommand::PatchVoice(ops)] = sent.as_slice() else {
+        panic!("{sent:?}")
+    };
+    let [VoiceOp::SetJarvis { jarvis }] = ops.as_slice() else {
+        panic!("{ops:?}")
+    };
+    assert_eq!(jarvis.commands.len(), 1);
+    assert_eq!(
+        jarvis.commands[0].action,
+        UserAction::Run {
+            program: "/usr/bin/foot".into(),
+            args: vec![]
+        }
+    );
+    assert!(h.state().0.voice.command.is_none(), "editor closed");
+    assert!(shown(&h, "Run /usr/bin/foot"), "listed");
+}
+
+#[test]
+fn a_command_chord_is_recorded_with_detect() {
+    use hako_core::hotkey::HotkeyCaptureState;
+    use hako_core::remap::EvdevKey;
+    use voice::{CommandDraft, CommandKind};
+    let mut app = voice_app(Some(jarvis_voice()));
+    app.voice.command = Some(CommandDraft {
+        kind: CommandKind::Keys,
+        ..Default::default()
+    });
+    let mut h = drive_voice(app);
+    click(&mut h, "Detect keys…");
+    let sent_now = sent(&mut h);
+    assert!(
+        matches!(sent_now.as_slice(), [UiCommand::StartHotkeyCapture]),
+        "{sent_now:?}"
+    );
+    h.state_mut().0.hotkeys.capture_update(HotkeyCaptureState {
+        chord: vec![EvdevKey(hako_core::hotkey::KEY_LEFTCTRL), EvdevKey(47)],
+        done: true,
+        ..Default::default()
+    });
+    h.run_steps(2);
+    assert!(sent(&mut h).is_empty(), "no hotkey is changed");
+    let d = h.state().0.voice.command.clone().unwrap();
+    assert_eq!(
+        d.keys,
+        [EvdevKey(hako_core::hotkey::KEY_LEFTCTRL), EvdevKey(47)]
+    );
+}
+
+#[test]
+fn add_push_to_command_hotkey_detects_then_sets_a_jarvis_binding() {
+    use hako_core::hotkey::{HotkeyAction, HotkeyCaptureState, HotkeyOp};
+    use hako_core::remap::EvdevKey;
+    let mut h = drive_voice(voice_app(Some(jarvis_voice())));
+    click(&mut h, "Add push-to-command hotkey");
+    let sent_now = sent(&mut h);
+    assert!(
+        matches!(sent_now.as_slice(), [UiCommand::StartHotkeyCapture]),
+        "{sent_now:?}"
+    );
+    h.state_mut().0.hotkeys.capture_update(HotkeyCaptureState {
+        chord: vec![EvdevKey(183)],
+        done: true,
+        ..Default::default()
+    });
+    h.run_steps(2);
+    let sent = sent(&mut h);
+    let [UiCommand::PatchHotkeys(ops)] = sent.as_slice() else {
+        panic!("{sent:?}")
+    };
+    assert!(
+        matches!(&ops[..], [HotkeyOp::Set { binding }]
+            if binding.action == HotkeyAction::JarvisListen
+                && binding.id == "jarvis"
+                && binding.keys == [EvdevKey(183)]),
+        "{ops:?}"
+    );
+    // Now it is listed with the editor, not offered again.
+    h.run_steps(2);
+    assert!(!shown(&h, "Add push-to-command hotkey"));
+    assert!(shown(&h, "Jarvis: listen"));
+}
+
+#[test]
+fn what_can_i_say_lists_every_action() {
+    use hako_core::jarvis::ACTIONS;
+    // Every action in exactly one group.
+    let listed: Vec<&str> = voice::say_groups()
+        .iter()
+        .flat_map(|(_, specs)| specs.iter().map(|s| s.name))
+        .collect();
+    assert_eq!(listed.len(), ACTIONS.len());
+    assert!(ACTIONS.iter().all(|a| listed.contains(&a.name)));
+
+    let mut v = jarvis_voice();
+    v.file.jarvis.commands = user_commands();
+    let h = drive_voice(voice_app(Some(v.clone())));
+    for a in ACTIONS {
+        assert!(shown(&h, a.description), "{}", a.name);
+    }
+    assert!(shown(&h, "Apply profile Gaming"), "the user's own");
+}
+
+/// The Voice page off, on (every section open) and recording, and a
+/// keyboard's Bindings page with the default hotkey on it.
+#[test]
+#[ignore = "needs a GPU (wgpu)"]
+fn snapshot_voice() {
+    let mut off = sample_voice();
+    off.file.enabled = false;
+    shoot_app("voice_off", SHOT, voice_app(Some(off)), |_| {}, |_| {});
+    let open = |ctx: &egui::Context| {
+        ctx.data_mut(|m| {
+            for t in voice::FOLDS {
+                m.insert_temp(voice::fold_id(t), true);
+            }
+        })
+    };
+    let mut rec = sample_voice();
+    rec.engine = hako_core::voice::EngineStatus::Recording;
+    let mut app = voice_app(Some(rec));
+    app.voice.partial(hako_core::voice::VoicePartial {
+        session: 1,
+        committed: "Hello from the".into(),
+        tentative: "keyboard".into(),
+    });
+    shoot_app("voice", [1180.0, 7000.0], app, open, |_| {});
+    let (st, id) = bind_state(
+        DeviceKind::Keyboard,
+        "Huntsman V2 TKL",
+        DeviceRemaps::default(),
+    );
+    let mut app = bind_app(&egui::Context::default(), &st, &id, 57);
+    app.hotkeys
+        .receive(hako_core::hotkey::HotkeysState::default());
+    shoot_app(
+        "voice_bindings",
+        [1180.0, 1400.0],
+        app,
+        |ctx| {
+            ctx.data_mut(|m| {
+                m.insert_temp(egui::Id::new(("bind_selected", id.key())), 57_u16);
+            })
+        },
+        |_| {},
+    );
 }

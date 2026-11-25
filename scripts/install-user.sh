@@ -9,11 +9,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -x "$ROOT/bin/hakod" ] && [ -x "$ROOT/bin/hako" ]; then
   BIN="$ROOT/bin"
   FX="$ROOT/lib/libhako_fx.so"
+  STT="$ROOT/lib/hako-stt"
 else
   source "$HOME/.cargo/env" 2>/dev/null || true
   cargo build --release --manifest-path "$ROOT/Cargo.toml"
   BIN="$ROOT/target/release"
   FX="$BIN/libhako_fx.so"
+  STT="$BIN/hako-stt"
 fi
 ICONDIR="$HOME/.local/share/icons/hicolor/256x256/apps"
 LIBDIR="$HOME/.local/lib/hako"
@@ -26,18 +28,20 @@ install -m 644 "$ROOT/client/assets/icon.png" "$ICONDIR/hako.png"
 gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
-# hakod's effects library (it looks in ../lib/hako) and both binaries are
-# staged next to their targets, then renamed into place, the library first:
+# hakod's effects library and speech worker (it looks in ../lib/hako) and
+# both binaries are staged next to their targets, then renamed into place,
+# the library first:
 # running mixer strips keep the old file mapped, and no new hakod runs without
 # it. A failed rename puts the earlier files back, so a failure never leaves a
 # half-written file, a new hakod with an old hako, or an old hakod with the
 # new library.
 DEST="$HOME/.local/bin"
-FILES=("$LIBDIR/libhako_fx.so" "$DEST/hakod" "$DEST/hako")
+FILES=("$LIBDIR/libhako_fx.so" "$LIBDIR/hako-stt" "$DEST/hakod" "$DEST/hako")
 staged() { echo "$(dirname "$1")/.$(basename "$1").$2"; }
 keep_old=""
 trap 'for f in "${FILES[@]}"; do rm -f "$(staged "$f" new)"; [ -n "$keep_old" ] || rm -f "$(staged "$f" old)"; done' EXIT
 install -m 644 "$FX" "$(staged "$LIBDIR/libhako_fx.so" new)"
+install -m 755 "$STT" "$(staged "$LIBDIR/hako-stt" new)"
 for b in hakod hako; do
   install -m 755 "$BIN/$b" "$(staged "$DEST/$b" new)"
 done

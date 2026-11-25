@@ -59,9 +59,24 @@ pub(super) fn hero(
     cx: &mut Cx,
     selected: &mut Option<EvdevKey>,
 ) -> Option<(EvdevKey, Action)> {
-    // Undrawn buttons: the usual extras, anything bound, and a detected one.
+    // Undrawn buttons: the usual extras, anything bound or in a hotkey, and
+    // a detected one.
+    let marks = cx.marks();
+    let flash = super::highlighted(ui);
+    let pulse = 0.5 + 0.5 * (ui.input(|i| i.time) as f32 * 4.0).sin();
     let mut extra: Vec<EvdevKey> = EXTRA.to_vec();
-    for k in cx.remaps.bindings.iter().map(|b| b.source).chain(*selected) {
+    let hotkeyed = marks
+        .iter()
+        .map(|(c, _)| EvdevKey(*c))
+        .filter(|k| (0x110..0x120).contains(&k.0));
+    for k in cx
+        .remaps
+        .bindings
+        .iter()
+        .map(|b| b.source)
+        .chain(hotkeyed)
+        .chain(*selected)
+    {
         if !DRAWN.contains(&k) && !extra.contains(&k) {
             extra.push(k);
         }
@@ -183,6 +198,12 @@ pub(super) fn hero(
         let bresp = drawn.map(|(region, _)| ui.interact(region, id, sense));
         let over = |f: &dyn Fn(&egui::Response) -> bool| f(&cresp) || bresp.as_ref().is_some_and(f);
         let bound = cx.binding(key).filter(|_| !locked);
+        let mark = marks
+            .iter()
+            .find(|(c, _)| *c == key.0)
+            .map(|(_, m)| m)
+            .filter(|_| !locked);
+        let flashing = mark.is_some_and(|m| flash.as_ref() == Some(&m.binding));
         let is_sel = *selected == Some(key);
         let target = !locked && dragging && over(&|r| r.dnd_hover_payload::<Action>().is_some());
         let hot = ui.ctx().animate_bool_with_time(
@@ -190,16 +211,20 @@ pub(super) fn hero(
             over(&|r| r.hovered() || r.has_focus()) || is_sel || target,
             0.12,
         );
-        let tint = bound.map_or(pal().accent, |b| mode_color(b.mode));
+        let tint = bound.map_or_else(
+            || mark.map_or(pal().accent, |_| theme::HOTKEY),
+            |b| mode_color(b.mode),
+        );
         let ring = if target { theme::pal().ok } else { tint };
-        let mark = if bound.is_some() { 0.30 } else { 0.0 };
+        let marked = bound.is_some() || mark.is_some();
+        let shade = if marked { 0.30 } else { 0.0 };
         let face = theme::pal()
             .key_top
-            .lerp_to_gamma(tint, mark)
+            .lerp_to_gamma(tint, shade)
             .lerp_to_gamma(ring, 0.30 * hot);
         let edge = theme::pal()
             .deck_edge
-            .lerp_to_gamma(ring, hot.max(mark * 2.0));
+            .lerp_to_gamma(ring, hot.max(shade * 2.0));
 
         if let Some((region, anchor)) = drawn {
             match i {
@@ -272,7 +297,7 @@ pub(super) fn hero(
                 3.0,
                 Stroke::new(
                     1.5_f32,
-                    pal().border_hi.lerp_to_gamma(ring, hot.max(mark * 3.0)),
+                    pal().border_hi.lerp_to_gamma(ring, hot.max(shade * 3.0)),
                 ),
             );
         }
@@ -280,6 +305,14 @@ pub(super) fn hero(
         // Card.
         if is_sel || target {
             glow(&p, card, 10, 14, ring.gamma_multiply(0.35));
+        } else if flashing {
+            glow(
+                &p,
+                card,
+                10,
+                16,
+                theme::HOTKEY.gamma_multiply(0.2 + 0.4 * pulse),
+            );
         }
         p.rect_filled(
             card,
@@ -290,14 +323,23 @@ pub(super) fn hero(
             card,
             10.0,
             Stroke::new(
-                if is_sel || target { 1.5_f32 } else { 1.0 },
-                pal()
-                    .border
-                    .lerp_to_gamma(ring, if is_sel || target { 1.0 } else { 0.35 * hot }),
+                if is_sel || target || flashing {
+                    1.5_f32
+                } else {
+                    1.0
+                },
+                pal().border.lerp_to_gamma(
+                    ring,
+                    if is_sel || target || flashing {
+                        1.0
+                    } else {
+                        0.35 * hot
+                    },
+                ),
             ),
             egui::StrokeKind::Inside,
         );
-        if bound.is_some() {
+        if marked {
             p.rect_filled(
                 Rect::from_min_size(
                     card.left_top() + vec2(0.0, 10.0),
@@ -337,6 +379,8 @@ pub(super) fn hero(
         );
         let (summary, color): (String, Color32) = if locked {
             ("Primary click · locked".into(), pal().text_faint)
+        } else if let (None, Some(m)) = (bound, mark) {
+            (m.summary.clone(), tint)
         } else {
             (
                 describe(bound),

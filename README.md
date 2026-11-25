@@ -232,6 +232,33 @@ pairing); expect about 20 ms on a wired network with the default buffer.
 Network is off until you turn it on; a firewall must allow 47820/udp and
 47821/tcp+udp.
 
+### Voice: dictation and Jarvis
+
+**Voice** turns speech into text on your own computer: press a hotkey (default
+`Ctrl+Space`), a soft ping plays, speak, and the words are typed into whatever
+field has focus, live while you talk. Nothing leaves your machine.
+
+- **Your model, your choice**: every model transcribe.cpp publishes (Whisper,
+  Parakeet, Moonshine, Canary, Qwen3-ASR, Voxtral and more, 70+), each with its
+  size, parameters, languages and whether it streams. Downloads are pinned to
+  a checksum.
+- **Hotkeys done properly**: hako reads the keyboard itself, so hold-to-talk
+  works on every desktop, X11 or Wayland. Hold, Toggle or Smart (tap to latch,
+  hold to talk), any 1 to 4 keys or mouse buttons, optionally hidden from the
+  focused app. Voice hotkeys show up on each device's Bindings page too.
+- **Text the way you want it**: custom words, filler removal, replacements,
+  spoken punctuation, trailing space, auto-submit, type or paste.
+- **Jarvis** (optional): say a wake word you pick, then a command in the same
+  breath: "Jarvis, open Firefox", "Jarvis, mute my mic", "Jarvis, game mode".
+  It reaches everything hako controls (profiles, mixer, ChatMix, lighting,
+  DPI, battery), apps, media keys, timers and commands you define. The wake
+  word is checked twice (a keyword spotter, then your speech model) before
+  anything runs.
+
+Voice is off until you turn it on; models download only when you ask.
+`hako voice toggle` (or `start` / `stop` / `cancel`) controls it from desktop
+shortcuts and scripts.
+
 ### Make it yours
 
 <img src="docs/screenshots/themes.png" alt="The same page in the Onyx, Graphite, Synthwave and Daylight themes" width="100%">
@@ -248,9 +275,13 @@ Four hand-tuned themes: **Onyx** (near-black), **Graphite**, **Synthwave** and
   confirm *Allow saving to device memory* for that device. Writes hako isn't
   confident about are shown, but blocked with the reason.
 - **No root service.** The daemon runs as you. udev gives your login seat
-  access to the supported devices only.
-- **Private by design.** The only network request hako makes is the update
-  check, and you can switch it off.
+  access to the supported devices, and read access to keyboards and mice for
+  hotkeys and key bindings (the active local session only, never a group:
+  like X11, any program you run can then read key presses).
+- **Private by design.** The network requests hako makes are the update
+  check (you can switch it off) and the speech models you choose to download.
+  Voice runs entirely on your hardware; the microphone is open only while you
+  dictate, or while Jarvis listens if you turn that on.
 
 ---
 
@@ -445,12 +476,15 @@ hakod --udev-rules          # udev rules for every supported device
 hakod --reset-audio         # remove hako's audio nodes, restore the default output
 hakod --latency-test        # latency the processing chain adds (software only, silent)
 hakod --log-level debug     # run in the foreground with verbose logs
+
+hako voice toggle           # start / stop dictation (also start, stop, cancel; --alt)
 ```
 
 Settings live in `~/.config/hako/`: `config.toml`, `devices/` (last settings
 per device), `mixer.toml` (the live mixer layout), `profiles/` (device
-settings and, if saved with the mixer on, its layout) and `remaps/`. All plain
-TOML, written atomically.
+settings and, if saved with the mixer on, its layout), `remaps/`, `hotkeys.toml`
+(app hotkeys) and `voice.toml` (dictation and Jarvis). All plain TOML, written
+atomically. Speech models and dictation history live in `~/.local/share/hako/`.
 
 ### Troubleshooting
 

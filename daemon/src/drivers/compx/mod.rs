@@ -269,8 +269,9 @@ impl Mouse {
     }
 
     /// Link type, CID / MID and from them the sensor (v1).
-    fn identify(&mut self, dev: &mut HidrawDevice) -> Result<()> {
-        self.link_type = protocol::read_link(dev).ok().map(|(_, _, t)| t);
+    fn identify(&mut self, dev: &mut impl Link) -> Result<()> {
+        let link = protocol::read_link(dev);
+        self.link_type = link.as_ref().ok().map(|&(_, _, t)| t);
         let (cid, mid) = protocol::read_cid_mid(dev)?;
         if let Some(&(_, _, s)) = tables::CID_MID
             .iter()
@@ -278,6 +279,7 @@ impl Mouse {
         {
             self.sensor = Some(s);
         }
+        link.context("link type")?;
         self.identified = true;
         Ok(())
     }
@@ -314,13 +316,15 @@ impl Mouse {
     }
 
     /// Stages, lift-off, debounce, angle snapping.
-    fn read_extras(&mut self, dev: &mut HidrawDevice) -> Result<()> {
+    fn read_extras(&mut self, dev: &mut impl Link) -> Result<()> {
         let count = self.row.map_or(0, |r| r[1]);
         if let Some(sensor) = self.sensor {
+            let mut stages = [None; STAGES as usize];
             for i in 0..STAGES.min(count) {
                 let d = protocol::read_bytes(dev, dpi::stage_addr(i), dpi::RECORD)?;
-                self.stages[usize::from(i)] = dpi::decode(sensor, &d).map(|(x, y)| (x + y) / 2);
+                stages[usize::from(i)] = dpi::decode(sensor, &d).map(|(x, y)| (x + y) / 2);
             }
+            self.stages = stages;
             if sensor.lift_off().is_some() {
                 self.lod = protocol::read_pair(dev, ADDR_LOD)?;
             }
@@ -905,5 +909,89 @@ mod tests {
             .set(SettingKey::DpiStage4, SettingValue::Int(800))
             .unwrap_err();
         assert!(e.to_string().contains("not available"), "{e}");
+        // A DPI the sensor cannot hold fails before anything is sent (the
+        // node is a plain file: any request would land in it).
+        let root = std::env::temp_dir().join(format!("hako-compx-dpi-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let node = root.join("hidraw");
+        std::fs::write(&node, []).unwrap();
+        let mut m = mouse(ATK, 0x1264, Proto::V1, Some([0x01, 3, 0]));
+        m.dev = Some(HidrawDevice::open(&node).unwrap());
+        let e = m
+            .set(SettingKey::DpiStage1, SettingValue::Int(30_050))
+            .unwrap_err();
+        assert!(e.to_string().contains("cannot store 30050"), "{e}");
+        assert_eq!(std::fs::metadata(&node).unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A v1 mouse: EEPROM reads, CID / MID 1 / 121, and its link type
+    /// unless `link` is `None` (that query goes unanswered).
+    struct Fake {
+        eeprom: [u8; 0x100],
+        link: Option<u8>,
+        queue: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl Link for Fake {
+        fn send(&mut self, r: &[u8]) -> Result<()> {
+            let data = match r[1] {
+                protocol::CMD_READ => {
+                    let a = usize::from(u16::from_be_bytes([r[3], r[4]]));
+                    self.eeprom[a..a + usize::from(r[5])].to_vec()
+                }
+                protocol::CMD_CID_MID => vec![1, 121],
+                protocol::CMD_LINK => match self.link {
+                    Some(t) => vec![0, 0, 0, 0, 1, 121, t],
+                    None => return Ok(()),
+                },
+                c => panic!("unexpected command {c:#04x}"),
+            };
+            let mut f = r.to_vec();
+            f[6..16].fill(0);
+            f[6..6 + data.len()].copy_from_slice(&data);
+            f[16] = 0;
+            f[16] = 0x55u8.wrapping_sub(f.iter().fold(0u8, |a, &b| a.wrapping_add(b)));
+            self.queue.push_back(f);
+            Ok(())
+        }
+        fn recv(&mut self, buf: &mut [u8], _: Duration) -> Result<usize> {
+            let r = self.queue.pop_front().context("timeout")?;
+            buf[..r.len()].copy_from_slice(&r);
+            Ok(r.len())
+        }
+    }
+
+    fn fake(link: Option<u8>) -> Fake {
+        Fake {
+            eeprom: [0; 0x100],
+            link,
+            queue: Default::default(),
+        }
+    }
+
+    #[test]
+    fn identified_only_once_the_link_type_is_known() {
+        // 1K receiver named for 4 kHz: without the link type it would offer
+        // 2000 / 4000 Hz.
+        let mut m = mouse(COMPX, 0xf510, Proto::V1, Some([0x01, 3, 0]));
+        assert!(m.identify(&mut fake(None)).is_err());
+        assert!(!m.identified && m.link_type.is_none());
+        m.identify(&mut fake(Some(0))).unwrap();
+        assert!(m.identified);
+        assert_eq!(m.max_rate(), 1000);
+    }
+
+    #[test]
+    fn stages_past_a_shrunk_count_are_cleared() {
+        let mut m = mouse(COMPX, 0xf502, Proto::V1, Some([0x01, 2, 0]));
+        m.stages = [Some(400); STAGES as usize];
+        let mut f = fake(Some(0));
+        for (i, v) in [800, 1600].into_iter().enumerate() {
+            let a = usize::from(dpi::stage_addr(i as u8));
+            f.eeprom[a..a + 4].copy_from_slice(&dpi::encode(Sensor::Paw3395, v, v).unwrap());
+        }
+        m.read_extras(&mut f).unwrap();
+        assert_eq!(m.stages, [Some(800), Some(1600), None, None, None]);
     }
 }

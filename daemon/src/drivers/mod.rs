@@ -362,15 +362,20 @@ pub fn udev_rules() -> String {
             }
         }
     }
+    // Bluetooth HID devices have no USB idVendor: match the HID device name
+    // (`0005:VVVV:PPPP.NNNN`).
     for (vid, what) in FALLBACK_VENDORS {
         out += &format!(
-            "\n# {what}\nKERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{vid:04x}\", {access}\n"
+            "\n# {what}\nKERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{vid:04x}\", {access}\n\
+             KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", KERNELS==\"0005:{vid:04X}:*\", {access}\n"
         );
     }
-    // QMK raw HID (usage page 0xFF60, usage 0x61) on any vendor's keyboard.
+    // QMK raw HID (usage page 0xFF60, usage 0x61) on any vendor's keyboard,
+    // in every encoding the driver's probe accepts.
     out += &format!(
         "\n# QMK / VIA keyboards: raw HID interface (usage page 0xFF60, usage 0x61).\n\
-         KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", PROGRAM=\"/bin/sh -c 'LC_ALL=C grep -qaP \\\"\\x06\\x60\\xff\\x09\\x61\\\" /sys%p/device/report_descriptor'\", {access}\n"
+         KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", PROGRAM=\"/bin/sh -c 'od -An -tx1 -v -w4096 /sys%p/device/report_descriptor | grep -qE \\\"{}\\\"'\", {access}\n",
+        qmk::udev_pattern()
     );
     // HID LampArray (usage page 0x59, usage 0x01) in every encoding the
     // driver's parser accepts.
@@ -383,7 +388,30 @@ pub fn udev_rules() -> String {
         "\n# Host-side remaps and macros inject through uinput.\n\
          KERNEL==\"uinput\", SUBSYSTEM==\"misc\", {access}, OPTIONS+=\"static_node=uinput\"\n"
     );
+    // Hotkeys listen on every keyboard and mouse (laptop and unknown ones
+    // too), and generic remaps grab them. `ID_INPUT_*` comes from udev's
+    // builtin `input_id` (60-input-id.rules), set before this file. Seat
+    // ACL only: the active session's user, never a group.
+    out += "\n# App hotkeys and generic remaps: every keyboard and mouse (seat ACL only).\n\
+         KERNEL==\"event*\", SUBSYSTEM==\"input\", ENV{ID_INPUT_KEYBOARD}==\"1\", TAG+=\"uaccess\"\n\
+         KERNEL==\"event*\", SUBSYSTEM==\"input\", ENV{ID_INPUT_MOUSE}==\"1\", TAG+=\"uaccess\"\n";
     out
+}
+
+/// ERE for a udev rule over `od -An -tx1` output (" xx" per byte): an
+/// application collection with usage `page` then `usage`, or the one
+/// extended usage `extended`; any global / local items between, every item
+/// in any data size. Arguments are alternations of an item's encodings.
+pub fn udev_application(page: &str, usage: &str, extended: &str) -> String {
+    let byte = " [0-9a-f]{2}";
+    // Non-main short items: type bits (2-3) global or local, by data size.
+    let item = format!(
+        "( [0-9a-f][48]| [0-9a-f][59]{byte}| [0-9a-f][6a]{}| [0-9a-f][7b]{})",
+        byte.repeat(2),
+        byte.repeat(4)
+    );
+    let collection = "( a1 01| a2 01 00| a3 01 00 00 00)";
+    format!("({page}{item}*{usage}|{extended}){item}*{collection}")
 }
 
 pub trait DeviceAdapter: Send {
@@ -651,6 +679,21 @@ mod tests {
             &r#"SUBSYSTEM=="usb", ATTR{idVendor}=="1532", ATTR{idProduct}=="026b", MODE="0660", TAG+="uaccess""#
         ));
         assert!(has("hidraw*", "1038", "12e5") && !has("event*", "1038", "12e5"));
+        // Hotkeys: any keyboard / mouse, by udev's own classification.
+        for class in ["KEYBOARD", "MOUSE"] {
+            let rule = format!(
+                r#"KERNEL=="event*", SUBSYSTEM=="input", ENV{{ID_INPUT_{class}}}=="1", TAG+="uaccess""#
+            );
+            assert!(lines.contains(&rule.as_str()), "{rule}");
+        }
+        // Unlisted Logitech HID++ devices over USB and over Bluetooth (no
+        // USB idVendor there; the HID device is `0005:046D:<pid>.<n>`).
+        assert!(lines.contains(
+            &r#"KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", MODE="0660", TAG+="uaccess""#
+        ));
+        assert!(lines.contains(
+            &r#"KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0005:046D:*", MODE="0660", TAG+="uaccess""#
+        ));
     }
 
     #[test]

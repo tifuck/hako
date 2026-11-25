@@ -53,7 +53,7 @@ const SYNC_EVERY: Duration = Duration::from_secs(20);
 const PROBE_RETRY: Duration = Duration::from_secs(30);
 /// Unanswered requests in a row after which the probe stops asking (the
 /// rest of it fails at once and is retried with the probe).
-const PROBE_MISSES: u8 = 3;
+pub(super) const PROBE_MISSES: u8 = 3;
 /// DPI slider when the device's list cannot be read.
 const DPI_FALLBACK: (u16, u16, u16) = (100, 25600, 50);
 /// 0x2202 lift-off byte values (0 = no LOD control); the device rejects 0

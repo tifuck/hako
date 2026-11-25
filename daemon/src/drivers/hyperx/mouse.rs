@@ -61,6 +61,8 @@ pub(super) enum Family {
         leds: &'static [u8],
         /// Interface of the cable PID (the dongle is interface 2).
         cable_iface: u32,
+        /// Why the `de ff` save is not offered (`None`: researched).
+        save_blocked: Option<&'static str>,
     },
 }
 
@@ -103,11 +105,18 @@ pub(super) struct Caps {
     /// NGENUITY's Save copies lift-off to the onboard slot (Haste 2 Wireless
     /// only; the Saga Pro's save sends it to the live slot).
     save_lift: bool,
+    /// Why the slot-1 save is not offered (`None`: researched for the model).
+    save_blocked: Option<&'static str>,
 }
+
+/// docs/onboard-writes/hyperx.md rates the slot-1 copy for two models only.
+const SAVE_UNRESEARCHED: &str = "the onboard profile (slot 1) write is only researched for the \
+Haste 2 Wireless and the Saga Pro, not for this model";
 
 const HASTE_2_WIRELESS_CAPS: Caps = Caps {
     presets: true,
     save_lift: true,
+    save_blocked: None,
     ..STANDARD
 };
 
@@ -120,6 +129,7 @@ const STANDARD: Caps = Caps {
     max_dpi: 26000,
     lift: true,
     save_lift: false,
+    save_blocked: Some(SAVE_UNRESEARCHED),
 };
 
 /// NGENUITY's universal keyboards (Alloy Rise family): the same report space,
@@ -134,6 +144,7 @@ const KEYBOARD: Caps = Caps {
     max_dpi: 0,
     lift: false,
     save_lift: false,
+    save_blocked: Some(SAVE_UNRESEARCHED),
 };
 const KEYBOARD_WIRELESS: Caps = Caps {
     battery: true,
@@ -164,7 +175,10 @@ pub(super) const SAGA_PRO: Spec<Family> = Spec {
     pids: &[0x06bf, 0x04bf],
     family: Family::Universal {
         links: &[link(0x06bf, 3, false, R4K), link(0x04bf, 2, true, R1K)],
-        caps: STANDARD,
+        caps: Caps {
+            save_blocked: None,
+            ..STANDARD
+        },
     },
 };
 /// NGENUITY's universal mice with no extra protocol: PIDs, interfaces, rate
@@ -308,6 +322,10 @@ pub(super) const HASTE_WIRELESS: Spec<Family> = Spec {
         dpi: false,
         leds: &[DART_LED_LOGO],
         cable_iface: 2,
+        save_blocked: Some(
+            "the Dart's `de ff` save is not verified on the Haste Wireless: NGENUITY's save for \
+             it carries a SaveType byte whose payload was not compared (docs/vendor-re/hyperx.md)",
+        ),
     },
 };
 
@@ -315,6 +333,7 @@ const DART_FAMILY: Family = Family::Dart {
     dpi: true,
     leds: DART_LEDS,
     cable_iface: 1,
+    save_blocked: None,
 };
 
 #[cfg(test)]
@@ -790,17 +809,19 @@ fn universal_controls(effect: &str, rates: usize, caps: Caps, mask: u8) -> Vec<S
     if !caps.dpi {
         return c;
     }
-    c.push(
-        SettingMeta::toggle(
-            SaveToDevice,
-            if caps.save_lift {
-                "Save DPI, report rate, brightness and lift-off to device memory"
-            } else {
-                "Save DPI, report rate and brightness to device memory"
-            },
-        )
-        .persistent(),
-    );
+    let save = SettingMeta::toggle(
+        SaveToDevice,
+        if caps.save_lift {
+            "Save DPI, report rate, brightness and lift-off to device memory"
+        } else {
+            "Save DPI, report rate and brightness to device memory"
+        },
+    )
+    .persistent();
+    c.push(match caps.save_blocked {
+        Some(why) => save.blocked(why),
+        None => save,
+    });
     c
 }
 
@@ -1031,12 +1052,17 @@ impl UniversalMouse {
     }
 
     fn saving(&self) -> bool {
-        get_setting(&self.user, SettingKey::SaveToDevice).and_then(|v| v.as_bool()) == Some(true)
+        self.caps.save_blocked.is_none()
+            && get_setting(&self.user, SettingKey::SaveToDevice).and_then(|v| v.as_bool())
+                == Some(true)
     }
 
     /// Copy the live value(s) behind `key` to the onboard slot (`None`: all).
     fn store(&mut self, key: Option<SettingKey>) -> Result<()> {
         use SettingKey::*;
+        if let Some(why) = self.caps.save_blocked {
+            bail!("not saved to device memory: {why}");
+        }
         let save_lift = self.caps.save_lift;
         let mut q = |req: &[u8]| self.query(req);
         // Storing everything (`None`) stops at the first failure: say what
@@ -1380,10 +1406,16 @@ const DART_EFFECTS: [(&str, &str); 4] = [
 ];
 
 /// The `de ff` save is sent by NGENUITY itself (exact PID, always `ff`) and
-/// is documented by santeri3700 / OpenRGB: shown as an owner opt-in.
+/// is documented by santeri3700 / OpenRGB: shown as an owner opt-in, blocked
+/// with `save_blocked` on a model it is not researched for.
 /// The enabled stages cannot be read back, so the count is the user's choice;
 /// until chosen the stage sliders show all five and the mouse keeps its mask.
-fn dart_controls(effect: &str, stages: u8, dpi: bool) -> Vec<SettingMeta> {
+fn dart_controls(
+    effect: &str,
+    stages: u8,
+    dpi: bool,
+    save_blocked: Option<&str>,
+) -> Vec<SettingMeta> {
     let mut c = Vec::new();
     if dpi {
         // Five stages up to 16000 DPI (santeri3700).
@@ -1410,9 +1442,12 @@ fn dart_controls(effect: &str, stages: u8, dpi: bool) -> Vec<SettingMeta> {
         &["breathing", "spectrum", "reactive"],
         &["static", "breathing", "reactive"],
     ));
-    c.push(
-        SettingMeta::toggle(SettingKey::SaveToDevice, "Save changes to device memory").persistent(),
-    );
+    let save =
+        SettingMeta::toggle(SettingKey::SaveToDevice, "Save changes to device memory").persistent();
+    c.push(match save_blocked {
+        Some(why) => save.blocked(why),
+        None => save,
+    });
     c
 }
 
@@ -1439,8 +1474,17 @@ fn dart_parts(spec: &Spec<Family>) -> (bool, &'static [u8], u32) {
             dpi,
             leds,
             cable_iface,
+            ..
         } => (dpi, leds, cable_iface),
         Family::Universal { .. } => (false, &[], 0),
+    }
+}
+
+/// Why a Dart-family model gets no `de ff` save.
+fn dart_save_blocked(spec: &Spec<Family>) -> Option<&'static str> {
+    match spec.family {
+        Family::Dart { save_blocked, .. } => save_blocked,
+        Family::Universal { .. } => Some("not a Dart-family mouse"),
     }
 }
 
@@ -1456,6 +1500,7 @@ impl DartMouse {
             text(&settings, SettingKey::Effect, "static"),
             dart_stage_count(&settings),
             dpi,
+            dart_save_blocked(spec),
         );
         crate::drivers::sanitize_saved(&mut settings, &offered);
         let mut a = Self {
@@ -1514,13 +1559,17 @@ impl DartMouse {
     }
 
     fn saving(&self) -> bool {
-        get_setting(&self.settings, SettingKey::SaveToDevice).and_then(|v| v.as_bool())
-            == Some(true)
+        dart_save_blocked(self.spec).is_none()
+            && get_setting(&self.settings, SettingKey::SaveToDevice).and_then(|v| v.as_bool())
+                == Some(true)
     }
 
     /// NGENUITY's Save: `de ff`, answered with a `de` report (it waits up to a
     /// second, the mouse writes flash).
     fn save(&mut self) -> Result<()> {
+        if let Some(why) = dart_save_blocked(self.spec) {
+            bail!("not saved to device memory: {why}");
+        }
         let dev = self.dev.as_mut().context("not connected")?;
         let reports = exchange(dev, &dart_save(), SAVE_WAIT, |r| r.first() == Some(&0xde))?;
         let acked = reports.iter().any(|r| r.first() == Some(&0xde));
@@ -1635,6 +1684,7 @@ impl DeviceAdapter for DartMouse {
                 text(&self.settings, SettingKey::Effect, "static"),
                 dart_stage_count(&self.settings),
                 dart_parts(self.spec).0,
+                dart_save_blocked(self.spec),
             ),
             last_error: self.last_error.clone(),
         }
@@ -2121,28 +2171,35 @@ mod tests {
 
     #[test]
     fn save_controls() {
-        for presets in [true, false] {
-            let caps = Caps {
-                presets,
-                ..STANDARD
-            };
-            let c = universal_controls("static", 4, caps, 0x1f);
-            let save = c
-                .iter()
+        let save = |c: Vec<SettingMeta>| {
+            c.into_iter()
                 .find(|c| c.key == SettingKey::SaveToDevice)
-                .unwrap();
-            assert!(save.persistent && save.blocked.is_none());
+                .unwrap()
+        };
+        // Offered where docs/onboard-writes/hyperx.md rates it (Haste 2
+        // Wireless with presets, Saga Pro without), blocked on the rest.
+        for s in ALL {
+            let Family::Universal { caps, .. } = s.family else {
+                continue;
+            };
+            if !caps.dpi {
+                continue;
+            }
+            let m = save(universal_controls("static", 4, caps, 0x1f));
+            let researched = [HASTE_2_WIRELESS.name, SAGA_PRO.name].contains(&s.name);
+            assert!(m.persistent, "{}", s.name);
+            assert_eq!(m.blocked.is_none(), researched, "{}", s.name);
         }
         assert!(saved_by(SettingKey::Dpi, STANDARD) && saved_by(SettingKey::Brightness, STANDARD));
         assert!(!saved_by(SettingKey::LiftOffDistance, STANDARD));
         assert!(!saved_by(SettingKey::Effect, STANDARD));
-        let dart = dart_controls("static", 5, true);
-        let save = dart
-            .iter()
-            .find(|c| c.key == SettingKey::SaveToDevice)
-            .unwrap();
-        // NGENUITY sends `de ff` itself: an owner opt-in, not a placeholder.
-        assert!(save.persistent && save.blocked.is_none());
+        // NGENUITY sends `de ff` itself to the Dart: an owner opt-in, not a
+        // placeholder; the Haste Wireless's save is not researched.
+        for (spec, researched) in [(&DART, true), (&DART_HP, true), (&HASTE_WIRELESS, false)] {
+            let m = save(dart_controls("static", 5, true, dart_save_blocked(spec)));
+            assert!(m.persistent, "{}", spec.name);
+            assert_eq!(m.blocked.is_none(), researched, "{}", spec.name);
+        }
     }
 
     #[test]
@@ -2190,7 +2247,7 @@ mod tests {
             dart_packets(leds, "spectrum", [0; 3], 100, "medium").len(),
             1
         );
-        let c = dart_controls("static", 5, dpi);
+        let c = dart_controls("static", 5, dpi, dart_save_blocked(&HASTE_WIRELESS));
         assert!(c.iter().all(|m| !matches!(
             m.key,
             SettingKey::DpiStage1 | SettingKey::DpiStageActive | SettingKey::DpiStageCount
@@ -2227,7 +2284,7 @@ mod tests {
         );
         assert_eq!(parse_dart_status(&[0x51, 0x03, 0, 0, 0, 0, 0]), None);
         // The stage count hides the stages above it and limits the active one.
-        let c = dart_controls("static", 3, true);
+        let c = dart_controls("static", 3, true, None);
         let hidden = |k| c.iter().find(|m| m.key == k).unwrap().hidden;
         assert!(!hidden(SettingKey::DpiStage3) && hidden(SettingKey::DpiStage4));
         let active = c
@@ -2275,7 +2332,7 @@ mod tests {
                 .is_ok());
         }
         for (e, _) in DART_EFFECTS {
-            let c = dart_controls(e, 5, true);
+            let c = dart_controls(e, 5, true, None);
             let color = c.iter().find(|c| c.key == SettingKey::ColorR).unwrap();
             assert_eq!(color.hidden, e == "spectrum");
         }
@@ -2312,7 +2369,7 @@ mod tests {
             Some((57, true))
         );
         assert_eq!(parse_heartbeat(&[0x51, 0, 0, 0x03, 0xff, 0]), None);
-        let c = dart_controls("static", 5, true);
+        let c = dart_controls("static", 5, true, None);
         let rate = c.iter().find(|c| c.key == SettingKey::ReportRate).unwrap();
         assert!(rate.validate(&SettingValue::Int(500)).is_ok());
     }
@@ -2332,7 +2389,7 @@ mod tests {
         // Notes: 16000 DPI = 0x0140 -> 40 01.
         assert_eq!(dart_stage(4, 16000)[5..7], [0x40, 0x01]);
         assert_eq!(dart_active(0)[..6], [0x00, 0xd3, 0x00, 0x00, 0x01, 0x00]);
-        let c = dart_controls("static", 5, true);
+        let c = dart_controls("static", 5, true, None);
         let stage = c.iter().find(|m| m.key == SettingKey::DpiStage5).unwrap();
         assert!(stage.validate(&SettingValue::Int(16000)).is_ok());
         assert!(stage.validate(&SettingValue::Int(16050)).is_err());
@@ -2349,7 +2406,7 @@ mod tests {
         merge_setting(&mut s, SettingKey::DpiStage1, SettingValue::Int(40_000));
         merge_setting(&mut s, SettingKey::DpiStageActive, SettingValue::Int(9));
         merge_setting(&mut s, SettingKey::ReportRate, SettingValue::Int(8000));
-        crate::drivers::sanitize_saved(&mut s, &dart_controls("static", 5, true));
+        crate::drivers::sanitize_saved(&mut s, &dart_controls("static", 5, true, None));
         assert_eq!(
             get_setting(&s, SettingKey::DpiStage1),
             Some(&SettingValue::Int(16_000))
@@ -2430,6 +2487,42 @@ mod tests {
         let mut m = universal_on(Some(HidrawDevice::open(&node).unwrap()), &root);
         assert_eq!(m.query(&brightness_write(50)).unwrap(), None);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A save mode left on in an older file sends nothing where the save is
+    /// blocked.
+    #[test]
+    fn a_blocked_save_never_writes() {
+        let mut m = universal_on(None, &std::env::temp_dir());
+        m.caps = STANDARD;
+        merge_setting(
+            &mut m.user,
+            SettingKey::SaveToDevice,
+            SettingValue::Bool(true),
+        );
+        assert!(!m.saving());
+        let err = m.store(None).unwrap_err();
+        assert!(err.to_string().contains("researched"), "{err}");
+
+        let mut settings = SettingsMap::new();
+        merge_setting(
+            &mut settings,
+            SettingKey::SaveToDevice,
+            SettingValue::Bool(true),
+        );
+        let mut d = DartMouse {
+            spec: &HASTE_WIRELESS,
+            id: m.id.clone(),
+            dev: None,
+            settings,
+            battery: m.battery.clone(),
+            last_poll: None,
+            last_error: None,
+            paths: m.paths.clone(),
+        };
+        assert!(!d.saving());
+        let err = d.save().unwrap_err();
+        assert!(err.to_string().contains("Haste Wireless"), "{err}");
     }
 
     #[test]

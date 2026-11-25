@@ -6,19 +6,23 @@
 
 use hako_core::catalog::{SettingGroup, SettingKey, SettingMeta, SettingValue};
 use hako_core::device::{DeviceKind, DeviceSnapshot, HubState};
+use hako_core::hotkey::HotkeyOp;
 use hako_core::ipc::{AppSettings, MeterTargetSpec};
 use hako_core::mixer::MixerOp;
 use hako_core::net::NetOp;
 use hako_core::remap::{CaptureRole, DeviceRemaps, EvdevKey, RemapBinding};
+use hako_core::voice::{VoiceControlParams, VoiceOp};
 use hako_core::DeviceId;
 
 pub mod aux;
 pub mod bindings;
 pub mod brand;
 pub mod controls;
+pub mod hotkeys;
 pub mod mixer;
 pub mod net;
 pub mod theme;
+pub mod voice;
 pub mod widgets;
 
 use theme::pal;
@@ -83,6 +87,19 @@ pub enum UiCommand {
     GetNet,
     /// Network edits, applied in order.
     PatchNet(Vec<NetOp>),
+    /// Reload the hotkeys (`HakoAppUi::hotkeys` gets the answer).
+    GetHotkeys,
+    /// Hotkey edits, applied in order, all or nothing.
+    PatchHotkeys(Vec<HotkeyOp>),
+    /// Record a chord from any keyboard or mouse (`HotkeyCapture` events).
+    StartHotkeyCapture,
+    CancelHotkeyCapture,
+    /// Reload Voice (`HakoAppUi::voice` gets the answer).
+    GetVoice,
+    /// Voice edits, applied in order, all or nothing.
+    PatchVoice(Vec<VoiceOp>),
+    /// Start / stop / toggle / cancel dictation.
+    VoiceControl(VoiceControlParams),
 }
 
 pub struct HakoAppUi {
@@ -107,6 +124,12 @@ pub struct HakoAppUi {
     /// never together with `show_mixer`).
     pub show_net: bool,
     pub net: net::NetUi,
+    /// Voice page active instead of a device page (settings still win;
+    /// never together with `show_mixer` or `show_net`).
+    pub show_voice: bool,
+    pub voice: voice::VoiceUi,
+    /// App-wide hotkeys, shown on the Voice page and device Bindings pages.
+    pub hotkeys: hotkeys::HotkeysUi,
     /// Newer release found by the client's update check.
     pub update: Option<widgets::UpdateOffer>,
     /// Commands sent but not yet answered (with the state after them);
@@ -137,6 +160,9 @@ impl Default for HakoAppUi {
             mixer: mixer::MixerUi::default(),
             show_net: false,
             net: net::NetUi::default(),
+            show_voice: false,
+            voice: voice::VoiceUi::default(),
+            hotkeys: hotkeys::HotkeysUi::default(),
             update: None,
             pending: false,
             meter_targets: Vec::new(),
@@ -166,6 +192,9 @@ impl HakoAppUi {
         self.meter_targets.clear();
         self.mixer.sync(ctx.dragged_id().is_some());
         self.net_frame(ctx.dragged_id().is_some());
+        self.voice.sync(ctx.dragged_id().is_some());
+        self.hotkeys.sync(ctx.dragged_id().is_some());
+        self.hotkeys.frame(out);
         self.ensure_selection();
         self.top_bar(ctx, out);
         self.rail(ctx, out);
@@ -200,6 +229,14 @@ impl HakoAppUi {
                         if self.show_net {
                             widgets::page_transition(ui, "net");
                             ui.add_enabled_ui(online, |ui| self.net_page(ui, out));
+                            return;
+                        }
+                        if self.show_voice {
+                            widgets::page_transition(ui, "voice");
+                            let nav = ui.add_enabled_ui(online, |ui| self.voice_page(ui, out));
+                            if let Some((id, binding)) = nav.inner {
+                                self.show_on_device(ui.ctx(), id, binding);
+                            }
                             return;
                         }
                         let device = self.selected.as_ref().and_then(|id| {
@@ -432,6 +469,7 @@ impl HakoAppUi {
                     let selected = !self.show_settings
                         && !self.show_mixer
                         && !self.show_net
+                        && !self.show_voice
                         && self.selected.as_ref() == Some(&d.id);
                     let resp = rail_entry(ui, d, selected);
                     if selected {
@@ -442,6 +480,7 @@ impl HakoAppUi {
                         self.show_settings = false;
                         self.show_mixer = false;
                         self.show_net = false;
+                        self.show_voice = false;
                     }
                 }
 
@@ -460,6 +499,7 @@ impl HakoAppUi {
                     }
                     self.show_mixer = true;
                     self.show_net = false;
+                    self.show_voice = false;
                     self.show_settings = false;
                 }
                 let selected = self.show_net && !self.show_settings;
@@ -474,6 +514,23 @@ impl HakoAppUi {
                     }
                     self.show_net = true;
                     self.show_mixer = false;
+                    self.show_voice = false;
+                    self.show_settings = false;
+                }
+                let selected = self.show_voice && !self.show_settings;
+                let (status, dot) = self.voice.rail_status();
+                let resp = rail_item(ui, selected, "Voice", &status, dot, voice::icon_mic);
+                if selected {
+                    target = Some(resp.rect);
+                }
+                if resp.clicked() {
+                    if !selected {
+                        out.push(UiCommand::GetVoice);
+                        out.push(UiCommand::GetHotkeys);
+                    }
+                    self.show_voice = true;
+                    self.show_mixer = false;
+                    self.show_net = false;
                     self.show_settings = false;
                 }
                 if let Some(r) = target {
@@ -496,6 +553,19 @@ impl HakoAppUi {
                     );
                 }
             });
+    }
+
+    /// Open a device's Bindings page with a hotkey's keys highlighted.
+    fn show_on_device(&mut self, ctx: &egui::Context, id: DeviceId, binding: String) {
+        self.selected = Some(id);
+        self.show_voice = false;
+        self.show_mixer = false;
+        self.show_net = false;
+        let now = ctx.input(|i| i.time);
+        ctx.data_mut(|m| {
+            m.insert_temp(egui::Id::new("tab"), Tab::Bindings);
+            m.insert_temp(egui::Id::new(bindings::HIGHLIGHT_ID), (binding, now));
+        });
     }
 
     fn remaps_for(&self, id: &DeviceId) -> Option<DeviceRemaps> {
@@ -655,28 +725,22 @@ impl Tab {
         })
     }
 
-    fn label(self, kind: DeviceKind) -> &'static str {
-        match (self, kind) {
-            (Tab::Performance, _) => "Performance",
-            (Tab::Lighting, _) => "Lighting",
-            (Tab::Audio, _) => "Audio",
-            (Tab::Bindings, DeviceKind::Mouse) => "Buttons",
-            (Tab::Bindings, _) => "Key bindings",
-            (Tab::Device, _) => "Device",
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Performance => "Performance",
+            Tab::Lighting => "Lighting",
+            Tab::Audio => "Audio",
+            Tab::Bindings => "Bindings",
+            Tab::Device => "Device",
         }
     }
 }
 
-/// The pages a device has, in the order that suits its kind: what people
-/// adjust most comes first, and `Device` is always last.
+/// The pages a device has, in one order for every kind so switching devices
+/// keeps tabs in place; `Device` is always last.
 fn tabs_for(d: &DeviceSnapshot) -> Vec<Tab> {
     use Tab::*;
-    let order: &[Tab] = match d.kind {
-        DeviceKind::Mouse => &[Performance, Bindings, Lighting, Audio, Device],
-        DeviceKind::Keyboard => &[Lighting, Bindings, Performance, Audio, Device],
-        DeviceKind::Headset | DeviceKind::Other => &[Audio, Lighting, Performance, Device],
-    };
-    order
+    [Bindings, Audio, Lighting, Performance, Device]
         .iter()
         .copied()
         .filter(|&t| match t {
@@ -725,9 +789,11 @@ impl HakoAppUi {
         }
 
         let tabs = tabs_for(d);
-        let labels: Vec<&str> = tabs.iter().map(|t| t.label(d.kind)).collect();
-        let tab_id = egui::Id::new(("tab", d.id.key()));
-        // Kept as a `Tab`: pages come and go with the device's controls.
+        let labels: Vec<&str> = tabs.iter().map(|t| t.label()).collect();
+        let tab_id = egui::Id::new("tab");
+        // Kept as a `Tab`, shared by every device: switching devices stays on
+        // the same page when the next one has it, and pages come and go with
+        // the device's controls.
         let mut tab = ui
             .ctx()
             .data(|m| m.get_temp::<Tab>(tab_id))
@@ -742,10 +808,17 @@ impl HakoAppUi {
         widgets::page_transition(ui, (d.id.key(), tab));
 
         match tab {
-            Tab::Bindings if d.kind == DeviceKind::Mouse => {
-                bindings::mouse_page(ui, d, remaps, out)
+            Tab::Bindings => {
+                let page = if d.kind == DeviceKind::Mouse {
+                    bindings::mouse_page
+                } else {
+                    bindings::keyboard_page
+                };
+                if page(ui, d, remaps, &mut self.hotkeys, out) {
+                    self.show_voice = true;
+                    out.push(UiCommand::GetVoice);
+                }
             }
-            Tab::Bindings => bindings::keyboard_page(ui, d, remaps, out),
             Tab::Lighting => lighting_tab(ui, d, &group(d, SettingGroup::Lighting), out),
             Tab::Performance => performance_tab(ui, d, out),
             Tab::Audio => {
@@ -960,15 +1033,38 @@ impl HakoAppUi {
 }
 
 fn performance_tab(ui: &mut egui::Ui, d: &DeviceSnapshot, out: &mut Vec<UiCommand>) {
-    if let Some(m) = controls::meta(d, SettingKey::Dpi) {
+    use SettingKey::*;
+    let (stages, rest): (Vec<&SettingMeta>, Vec<&SettingMeta>) =
+        group(d, SettingGroup::Performance)
+            .into_iter()
+            .filter(|m| !matches!(m.key, Dpi | ReportRate))
+            .partition(|m| {
+                matches!(
+                    m.key,
+                    DpiStage1 | DpiStage2 | DpiStage3 | DpiStage4 | DpiStage5 | DpiStageActive
+                )
+            });
+    let dpi = controls::meta(d, Dpi);
+    if dpi.is_some() || !stages.is_empty() {
         widgets::section(
             ui,
-            "Sensitivity",
+            "DPI",
             |_| {},
-            |ui| controls::gated(ui, d, m, |ui| controls::dpi(ui, d, m, out)),
+            |ui| {
+                if let Some(m) = dpi {
+                    controls::gated(ui, d, m, |ui| controls::dpi(ui, d, m, out));
+                }
+                if !stages.is_empty() {
+                    if dpi.is_some() {
+                        ui.add_space(theme::SPACE_SM);
+                        widgets::divider(ui);
+                    }
+                    controls::rows(ui, d, &stages, out);
+                }
+            },
         );
     }
-    if let Some(m) = controls::meta(d, SettingKey::ReportRate) {
+    if let Some(m) = controls::meta(d, ReportRate) {
         let fast = m
             .options
             .iter()
@@ -993,31 +1089,13 @@ fn performance_tab(ui: &mut egui::Ui, d: &DeviceSnapshot, out: &mut Vec<UiComman
             },
         );
     }
-    use SettingKey::*;
-    let (stages, rest): (Vec<&SettingMeta>, Vec<&SettingMeta>) =
-        group(d, SettingGroup::Performance)
-            .into_iter()
-            .filter(|m| !matches!(m.key, Dpi | ReportRate))
-            .partition(|m| {
-                matches!(
-                    m.key,
-                    DpiStage1 | DpiStage2 | DpiStage3 | DpiStage4 | DpiStage5 | DpiStageActive
-                )
-            });
-    for (title, metas) in [
-        ("DPI stages", stages),
-        (
-            if d.kind == DeviceKind::Mouse {
-                "Sensor"
-            } else {
-                "Response"
-            },
-            rest,
-        ),
-    ] {
-        if !metas.is_empty() {
-            widgets::section(ui, title, |_| {}, |ui| controls::rows(ui, d, &metas, out));
-        }
+    if !rest.is_empty() {
+        let title = if d.kind == DeviceKind::Mouse {
+            "Sensor"
+        } else {
+            "Response"
+        };
+        widgets::section(ui, title, |_| {}, |ui| controls::rows(ui, d, &rest, out));
     }
 }
 

@@ -849,7 +849,8 @@ fn drag(
             .range(range)
             .speed(speed)
             .suffix(suffix)
-            .fixed_decimals(decimals),
+            .fixed_decimals(decimals)
+            .update_while_editing(false),
     );
     resp.drag_stopped() || (resp.changed() && !resp.dragged())
 }

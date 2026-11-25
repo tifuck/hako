@@ -2,11 +2,14 @@
 
 mod drivers;
 mod hid;
+mod hotkeys;
 mod hub;
 mod ipc_server;
+mod jarvis;
 mod mixer;
 mod net;
 mod remap;
+mod voice;
 mod worker;
 
 use anyhow::Result;
@@ -74,8 +77,22 @@ struct Cli {
     seconds: u32,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Blocking tasks still running after the teardown (a stuck discovery pass,
+/// a request mid-flight) are left behind after this: the process exits.
+const EXIT_WAIT: Duration = Duration::from_secs(2);
+
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    // Held until the process is about to exit: a hakod started meanwhile
+    // waits for this one instead of running alongside its leftovers.
+    let mut daemon_lock = None;
+    let result = runtime.block_on(run(&mut daemon_lock));
+    runtime.shutdown_timeout(EXIT_WAIT);
+    drop(daemon_lock);
+    result
+}
+
+async fn run(daemon_lock: &mut Option<std::fs::File>) -> Result<()> {
     let cli = Cli::parse();
     if cli.udev_rules {
         print!("{}", drivers::udev_rules());
@@ -87,6 +104,7 @@ async fn main() -> Result<()> {
     }
     if cli.diagnose {
         print!("{}", drivers::diagnose()?);
+        print!("{}", hotkeys::inputs::report(&remap::OWN_DEVICES));
         return Ok(());
     }
     let paths = ConfigPaths::xdg()?;
@@ -136,9 +154,11 @@ async fn main() -> Result<()> {
     // slow/stuck, and so a second daemon exits before touching any device.
     // One lock per user, whatever `--socket` says.
     let lock = default_socket_path().with_extension("lock");
-    let (listener, _lock) = ipc_server::bind(&socket, &lock)?;
+    let (listener, held) = ipc_server::bind(&socket, &lock)?;
+    *daemon_lock = Some(held);
 
     let hub = Arc::new(DaemonHub::new(paths));
+    hub.serve_jarvis();
 
     let hub_disc = hub.clone();
     let discovery = tokio::spawn(async move {
@@ -233,12 +253,15 @@ const RESET_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn reset_audio_cli(socket: &std::path::Path, paths: &ConfigPaths) -> Result<()> {
     match reset_via_daemon(socket, RESET_TIMEOUT) {
-        Ok(Some(v)) => {
+        Ok(Some(v)) if v["ok"] == true => {
             println!("{v}");
             return Ok(());
         }
+        // A live daemon (busy, or its reset partly failed): resetting here
+        // would kill its mixer under it.
+        Ok(Some(v)) => anyhow::bail!("daemon reset failed: {v}"),
         Ok(None) => {}
-        // A wedged or failing daemon must not leave the kill-switch stuck.
+        // A wedged daemon must not leave the kill-switch stuck.
         Err(e) => warn!("daemon reset failed ({e:#}); resetting here"),
     }
     // No daemon: also remove line-in links an older version left behind.
@@ -252,8 +275,9 @@ fn reset_audio_cli(socket: &std::path::Path, paths: &ConfigPaths) -> Result<()> 
     Ok(())
 }
 
-/// The daemon's `ResetAudio` reply; `None` when no daemon listens on `socket`.
-/// An error when it does not answer within `timeout` or reports a failure.
+/// The daemon's `ResetAudio` reply (also a failure it reports); `None` when
+/// no daemon listens on `socket`. An error when it does not answer within
+/// `timeout`.
 fn reset_via_daemon(
     socket: &std::path::Path,
     timeout: Duration,
@@ -270,7 +294,6 @@ fn reset_via_daemon(
     };
     write_json_frame_sync(&mut stream, &req)?;
     let v = read_json_frame_sync(&mut stream)?;
-    anyhow::ensure!(v["ok"] == true, "{v}");
     Ok(Some(v))
 }
 
@@ -280,7 +303,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     #[test]
-    fn the_kill_switch_gives_up_on_a_daemon_that_hangs_or_fails() {
+    fn the_kill_switch_gives_up_on_a_daemon_that_hangs_and_reports_its_failure() {
         let dir = std::env::temp_dir().join(format!("hako-reset-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -304,11 +327,11 @@ mod tests {
                 write_json_frame_sync(&mut s, &reply).unwrap();
             }
         });
-        let failed = reset_via_daemon(&sock, Duration::from_secs(5)).unwrap_err();
-        assert!(format!("{failed:#}").contains("false"), "{failed:#}");
-        assert!(reset_via_daemon(&sock, Duration::from_secs(5))
-            .unwrap()
-            .is_some());
+        // A failure it answers is its reply, not a reason to reset here.
+        let failed = reset_via_daemon(&sock, Duration::from_secs(5)).unwrap();
+        assert_eq!(failed.unwrap()["ok"], false);
+        let reset = reset_via_daemon(&sock, Duration::from_secs(5)).unwrap();
+        assert_eq!(reset.unwrap()["ok"], true);
         daemon.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }

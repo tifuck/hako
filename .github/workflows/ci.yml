@@ -18,7 +18,16 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: System deps (egui/winit, PipeWire bindings)
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang pkg-config cmake
+      - name: Speech libraries (sherpa-onnx, pinned)
+        # hako-stt's build script would fetch these unverified; fetch and
+        # check them here instead (the release asset's published digest).
+        run: |
+          d="$RUNNER_TEMP/sherpa" && mkdir -p "$d"
+          f=sherpa-onnx-v2.0.3-linux-x64-static-lib.tar.bz2
+          curl -fsSL -o "$d/$f" "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/$f"
+          echo "f927e695d29b8c7ea3fda97eed215204b210fd57f9faf990a93377bac098ad57  $d/$f" | sha256sum -c -
+          echo "SHERPA_ONNX_ARCHIVE_DIR=$d" >> "$GITHUB_ENV"
       - run: scripts/check-public.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings

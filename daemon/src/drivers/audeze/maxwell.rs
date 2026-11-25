@@ -237,11 +237,12 @@ fn param_value(m: &[u8], param: u8) -> Option<u8> {
         .copied()
 }
 
-/// Battery percent from the asynchronous result.
+/// Battery percent from the asynchronous result (none above 100).
 fn battery_percent(m: &[u8]) -> Option<u8> {
     is(m, RESULT, BATTERY)
         .then(|| m.get(8))?
-        .map(|&p| p.min(100))
+        .copied()
+        .filter(|&p| p <= 100)
 }
 
 /// Auto power off: enable flag and seconds (LE), sent twice.
@@ -365,6 +366,19 @@ const REPLY_WAIT: Duration = Duration::from_millis(2000);
 const REPLY_WAIT_DIRECT: Duration = Duration::from_millis(1250);
 /// Reads are repeated on a timeout; writes never are.
 const READ_ATTEMPTS: u32 = 2;
+
+/// A read the headset never answered (it went off or out of range
+/// mid-poll): the poll pass ends there.
+#[derive(Debug)]
+struct NoAnswer;
+
+impl std::fmt::Display for NoAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("no answer from the headset")
+    }
+}
+
+impl std::error::Error for NoAnswer {}
 const DRAIN_MAX: usize = 16;
 
 /// The 0xFF13 collection's node, on the documented interface if several have one.
@@ -537,18 +551,22 @@ impl MaxwellAdapter {
         Ok(None)
     }
 
+    /// `None`: the headset refused the read; [`NoAnswer`] when it is silent.
     fn read_key(&mut self, key: u8) -> Result<Option<u8>> {
         let accept = |m: &[u8]| is(m, RESPONSE, READ_KEY) && has_id(m, 6, key);
-        Ok(self
+        let m = self
             .request(&read_key_body(key), READ_ATTEMPTS, accept)?
-            .and_then(|m| key_value(&m, key)))
+            .ok_or(NoAnswer)?;
+        Ok(key_value(&m, key))
     }
 
+    /// As [`Self::read_key`].
     fn read_param(&mut self, param: u8) -> Result<Option<u8>> {
         let accept = |m: &[u8]| is(m, RESPONSE, READ_PARAM) && has_id(m, 7, param);
-        Ok(self
+        let m = self
             .request(&read_param_body(param), READ_ATTEMPTS, accept)?
-            .and_then(|m| param_value(&m, param)))
+            .ok_or(NoAnswer)?;
+        Ok(param_value(&m, param))
     }
 
     fn write_key(&mut self, key: u8, value: u8) -> Result<()> {
@@ -603,25 +621,39 @@ impl MaxwellAdapter {
         }
     }
 
-    /// None = no answer (the headset is off) or the dongle refused.
-    fn read_battery(&mut self) -> Result<Option<u8>> {
+    /// The battery result; None = no answer (the headset is off) or the
+    /// dongle refused.
+    fn read_battery(&mut self) -> Result<Option<Vec<u8>>> {
         let accept = |m: &[u8]| {
-            battery_percent(m).is_some()
+            is(m, RESULT, BATTERY)
                 || (is(m, RESPONSE, BATTERY) && m.get(6).is_some_and(|&s| s != 0))
         };
         Ok(self
             .request(&[BATTERY[0], BATTERY[1], 0x00], READ_ATTEMPTS, accept)?
-            .and_then(|m| battery_percent(&m)))
+            .filter(|m| is(m, RESULT, BATTERY)))
     }
 
+    /// One status pass; a headset that stops answering midway is offline
+    /// (each silent read would otherwise wait out its own timeouts).
     fn poll(&mut self) -> Result<()> {
         self.last_poll = Some(Instant::now());
+        match self.read_status() {
+            Err(e) if e.is::<NoAnswer>() => {
+                debug!("{}: {e}", self.spec.name);
+                (self.battery.percent, self.battery.present) = (None, false);
+                Ok(())
+            }
+            r => r,
+        }
+    }
+
+    fn read_status(&mut self) -> Result<()> {
         let was_online = self.battery.present;
-        let Some(pct) = self.read_battery()? else {
+        let Some(m) = self.read_battery()? else {
             (self.battery.percent, self.battery.present) = (None, false);
             return Ok(());
         };
-        self.battery.percent = Some(pct);
+        self.battery.percent = battery_percent(&m);
         if !was_online {
             // Present only once this worked, so a failed read is retried.
             self.read_sidetone()?;
@@ -838,6 +870,11 @@ mod tests {
             Some(64)
         );
         assert_eq!(battery_percent(&msg(RESPONSE, &[0xd6, 0x0c, 0])), None);
+        // Not a level: unknown, not full.
+        assert_eq!(
+            battery_percent(&msg(RESULT, &[0xd6, 0x0c, 0, 0, 0xff])),
+            None
+        );
     }
 
     #[test]
@@ -1147,6 +1184,53 @@ mod tests {
         fake.keys.insert(KEY_SIDETONE, 9);
         a.link = Some(Box::new(fake));
         assert_eq!(a.read_key(KEY_SIDETONE).unwrap(), Some(9));
+    }
+
+    /// Answers the first `answers` requests, then nothing (the headset went
+    /// off mid-poll).
+    struct GoesQuiet {
+        fake: FakeHeadset,
+        answers: usize,
+    }
+
+    impl Link for GoesQuiet {
+        fn send(&mut self, r: &[u8]) -> Result<()> {
+            if self.answers == 0 {
+                self.fake
+                    .sent
+                    .lock()
+                    .unwrap()
+                    .push(fragment(r)[4..].to_vec());
+                return Ok(());
+            }
+            self.answers -= 1;
+            self.fake.send(r)
+        }
+
+        fn input(&mut self, buf: &mut [u8]) -> Result<usize> {
+            self.fake.input(buf)
+        }
+    }
+
+    #[test]
+    fn a_headset_silent_mid_poll_ends_the_pass_offline() {
+        let (mut a, sent) = headset(&MAXWELL, SettingsMap::new(), 1);
+        a.direct = true;
+        let fake = FakeHeadset {
+            keys: Default::default(),
+            params: Default::default(),
+            sent: sent.clone(),
+            replies: Default::default(),
+            fail_key: None,
+        };
+        a.link = Some(Box::new(GoesQuiet { fake, answers: 1 }));
+        a.poll().unwrap();
+        assert!(!a.battery.present);
+        assert_eq!(a.battery.percent, None);
+        // The battery, then one unanswered read (both attempts), and no more.
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 3, "{sent:02x?}");
+        assert_eq!(sent[1], read_key_body(KEY_SIDETONE_MAX));
     }
 
     #[test]

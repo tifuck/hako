@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds hako_<version>_<arch>.deb from release binaries.
-#   packaging/deb/build-deb.sh <version> <dir with hako, hakod, libhako_fx.so> <output dir>
+#   packaging/deb/build-deb.sh <version> <dir with hako, hakod, libhako_fx.so, hako-stt> <output dir>
 # Needs dpkg-dev (dpkg-deb, dpkg-shlibdeps).
 set -euo pipefail
 VERSION="$1"
@@ -15,6 +15,7 @@ PKG="$WORK/hako_${VERSION}_${ARCH}"
 install -Dm755 "$BIN/hako" "$PKG/usr/bin/hako"
 install -Dm755 "$BIN/hakod" "$PKG/usr/bin/hakod"
 install -Dm644 "$BIN/libhako_fx.so" "$PKG/usr/lib/hako/libhako_fx.so"
+install -Dm755 "$BIN/hako-stt" "$PKG/usr/lib/hako/hako-stt"
 sed 's|%h/.local/bin/hakod|/usr/bin/hakod|' "$ROOT/packaging/systemd/hakod.service" \
   | install -Dm644 /dev/stdin "$PKG/usr/lib/systemd/user/hakod.service"
 install -Dm644 "$ROOT/packaging/hako.desktop" "$PKG/usr/share/applications/hako.desktop"
@@ -30,7 +31,7 @@ done
 # at runtime (winit / glutin dlopen them), so they are listed by hand.
 mkdir -p "$WORK/debian"
 printf 'Source: hako\n\nPackage: hako\nArchitecture: any\n' > "$WORK/debian/control"
-LINKED="$(cd "$WORK" && dpkg-shlibdeps -O "$PKG/usr/bin/hako" "$PKG/usr/bin/hakod" "$PKG/usr/lib/hako/libhako_fx.so" | sed 's/^shlibs:Depends=//')"
+LINKED="$(cd "$WORK" && dpkg-shlibdeps -O "$PKG/usr/bin/hako" "$PKG/usr/bin/hakod" "$PKG/usr/lib/hako/libhako_fx.so" "$PKG/usr/lib/hako/hako-stt" | sed 's/^shlibs:Depends=//')"
 rm -rf "$WORK/debian"
 RUNTIME="libegl1, libgl1, libwayland-client0, libwayland-cursor0, libwayland-egl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrandr2"
 
@@ -42,6 +43,7 @@ Maintainer: hako maintainers <173309113+tifuck@users.noreply.github.com>
 Installed-Size: $(du -sk --exclude=DEBIAN "$PKG" | cut -f1)
 Depends: $LINKED, $RUNTIME, systemd, udev, lsp-plugins-ladspa
 Recommends: pipewire-bin, wireplumber, alsa-utils, curl, openssh-client, pkexec | policykit-1
+Suggests: wl-clipboard, xclip, wtype, ydotool
 Section: utils
 Priority: optional
 Homepage: https://github.com/tifuck/Hako
@@ -50,7 +52,8 @@ Description: control panel for gaming keyboards, mice and headsets
  Crate) with one background service and one native window: lighting, DPI,
  polling rate, key bindings and macros, headset battery, sidetone, ChatMix
  and line-in monitoring for Razer, Logitech, SteelSeries, Corsair, HyperX,
- ASUS and more.
+ ASUS and more. Optional local voice dictation (speech-to-text on your own
+ hardware) types into the focused window.
 EOF
 
 mkdir -p "$OUT"

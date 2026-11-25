@@ -157,9 +157,12 @@ impl Lights for Elo {
         self.dev.drain(Duration::ZERO);
         self.dev.write(&inactive_report(minutes))?;
         // HeadsetControl reads one reply before pausing, and fails without one.
+        // No source documents the reply, so any report only shows the headset
+        // is there (it also sends unsolicited status reports): the value
+        // itself stays unconfirmed.
         let reply = read_until(&mut self.dev, Duration::from_millis(500), |_| true)?;
         std::thread::sleep(self.family.pause());
-        reply.context("the headset did not confirm the auto-off time")?;
+        reply.context("the headset did not answer the auto-off write")?;
         Ok(())
     }
 }

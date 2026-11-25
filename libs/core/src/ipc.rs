@@ -41,6 +41,20 @@ pub enum Method {
     GetNet,
     /// `PatchNetParams`; returns the new `NetState`.
     PatchNet,
+    /// `HotkeysState` (`crate::hotkey`).
+    GetHotkeys,
+    /// `PatchHotkeysParams`; returns the new `HotkeysState`.
+    PatchHotkeys,
+    /// Record a chord from any keyboard / mouse; progress as `HotkeyCapture`
+    /// events. Returns the initial `HotkeyCaptureState`.
+    StartHotkeyCapture,
+    CancelHotkeyCapture,
+    /// `VoiceState` (`crate::voice`).
+    GetVoice,
+    /// `PatchVoiceParams`; returns the new `VoiceState`.
+    PatchVoice,
+    /// `VoiceControlParams`: start / stop / toggle / cancel dictation.
+    VoiceControl,
 }
 
 /// Server-pushed event types (`"type":"DeviceUpdated"`).
@@ -59,6 +73,15 @@ pub enum EventKind {
     MixerUpdated,
     /// LAN audio peers, requests or link stats changed; payload `NetState`.
     NetUpdated,
+    /// Hotkeys, their sources or conflicts changed; payload `HotkeysState`.
+    HotkeysUpdated,
+    /// A chord capture progressed; payload `HotkeyCaptureState`.
+    HotkeyCapture,
+    /// Voice settings, models, downloads or engine status changed; payload
+    /// `VoiceState`.
+    VoiceUpdated,
+    /// Live transcript while recording; payload `VoicePartial`.
+    VoicePartial,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

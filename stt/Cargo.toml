@@ -1,0 +1,24 @@
+[package]
+name = "hako-stt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "hako's speech-to-text worker: hakod runs it as a child and streams it audio"
+
+[[bin]]
+name = "hako-stt"
+path = "src/main.rs"
+
+[features]
+# GPU through Vulkan (needs libvulkan-dev and glslc to build).
+vulkan = ["transcribe-cpp/vulkan"]
+
+[dependencies]
+hako-core = { workspace = true }
+serde_json = { workspace = true }
+# The only crate linking the speech engine (ggml, C++): a crash stays here.
+transcribe-cpp = { version = "0.4.2", default-features = false }
+# Jarvis wake words (open-vocabulary keyword spotting). Its build script
+# fetches prebuilt static libraries; the release pins them by hash
+# (SHERPA_ONNX_ARCHIVE_DIR in .github/workflows/release.yml).
+sherpa-onnx = "=2.0.3"

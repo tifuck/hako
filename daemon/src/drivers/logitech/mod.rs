@@ -666,7 +666,7 @@ pub fn fallback(nodes: &[&HidDeviceInfo]) -> Option<Fallback> {
     if first.vendor_id != VID
         || !nodes
             .iter()
-            .any(|n| crate::hid::report_ids(&n.report_descriptor()).contains(&0x11))
+            .any(|n| has_hidpp_long_output(&n.report_descriptor()))
     {
         return None;
     }
@@ -701,6 +701,31 @@ pub fn fallback(nodes: &[&HidDeviceInfo]) -> Option<Fallback> {
         name,
         open: open_unlisted,
     })
+}
+
+/// What hid-logitech-hidpp requires of a HID++ node: output report 0x11 with
+/// at least 19 data bytes, here on a vendor page (0xFF00 wired / receiver,
+/// 0xFF43 Bluetooth), set by Usage Page or by the application collection's
+/// 4-byte usage.
+fn has_hidpp_long_output(desc: &[u8]) -> bool {
+    let vendor = |p: u32| p == 0xff00 || p == 0xff43;
+    let (mut page, mut usage_page, mut app_page) = (0, 0, 0);
+    let (mut size, mut count, mut id, mut bits) = (0u32, 0u32, 0u32, 0u32);
+    for (tag, v) in crate::hid::descriptor_items(desc) {
+        match tag {
+            0x04 => page = v,
+            0x74 => size = v,
+            0x84 => id = v,
+            0x94 => count = v,
+            0x08 => usage_page = if v > 0xffff { v >> 16 } else { page },
+            0xa0 if v == 1 => app_page = std::mem::take(&mut usage_page),
+            0x90 if id == 0x11 && (vendor(page) || vendor(app_page)) => {
+                bits = bits.saturating_add(size.saturating_mul(count))
+            }
+            _ => {}
+        }
+    }
+    bits >= 19 * 8
 }
 
 /// Name of the kernel driver bound to a HID device (sysfs `driver` link).
@@ -1038,6 +1063,48 @@ mod tests {
             Some((0xff43, 0x0202))
         );
         assert_eq!(first_application(&[]), None);
+    }
+
+    /// HID++ collections as Logitech devices declare them: short (0x10, 6
+    /// bytes) and long (0x11, 19 bytes) input + output reports.
+    #[test]
+    fn probe_needs_a_hidpp_long_output_report() {
+        let long = |page: &[u8], usage: &[u8], count: u8, main: &[u8]| {
+            [
+                page,
+                usage,
+                &[0xa1, 0x01, 0x85, 0x11, 0x75, 0x08, 0x95, count],
+                &[0x15, 0x00, 0x26, 0xff, 0x00],
+                main,
+                &[0xc0],
+            ]
+            .concat()
+        };
+        let io = [0x09, 0x02, 0x81, 0x00, 0x09, 0x02, 0x91, 0x00];
+        // Wired / receiver interface: page 0xFF00, short then long collection.
+        let wired = [
+            &[
+                0x06, 0x00, 0xff, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x10, 0x75, 0x08, 0x95, 0x06, 0x15,
+                0x00, 0x26, 0xff, 0x00, 0x09, 0x01, 0x81, 0x00, 0x09, 0x01, 0x91, 0x00, 0xc0,
+            ][..],
+            &long(&[0x06, 0x00, 0xff], &[0x09, 0x02], 0x13, &io),
+        ]
+        .concat();
+        assert!(has_hidpp_long_output(&wired));
+        // Bluetooth: page 0xFF43, usage 0x0202.
+        let bt = long(&[0x06, 0x43, 0xff], &[0x0a, 0x02, 0x02], 0x13, &io);
+        assert!(has_hidpp_long_output(&bt));
+        // The page only in the application collection's 4-byte usage.
+        let ext = long(&[], &[0x0b, 0x02, 0x02, 0x43, 0xff], 0x13, &io);
+        assert!(has_hidpp_long_output(&ext));
+        // Report 0x11 as input only, too short, or on a non-vendor page.
+        let input = long(&[0x06, 0x00, 0xff], &[0x09, 0x02], 0x13, &io[..4]);
+        assert!(!has_hidpp_long_output(&input));
+        let short = long(&[0x06, 0x00, 0xff], &[0x09, 0x02], 0x06, &io);
+        assert!(!has_hidpp_long_output(&short));
+        let consumer = long(&[0x05, 0x0c], &[0x09, 0x01], 0x13, &io);
+        assert!(!has_hidpp_long_output(&consumer));
+        assert!(!has_hidpp_long_output(&[]));
     }
 
     #[test]

@@ -460,7 +460,7 @@ fn capture(
             let frames = crate::chunk_bytes(bytes, offset, size)
                 .as_chunks::<STRIDE>()
                 .0;
-            // Uncontended: the main thread reads it once the run is over.
+            // Held briefly by the main thread (`reserve`) and once the run is over.
             let mut rec = recording.lock().unwrap_or_else(PoisonError::into_inner);
             if !frames.is_empty() {
                 let n = frames.len() as u32;
@@ -475,16 +475,9 @@ fn capture(
                     rec.rate = Some(rate.denom);
                 }
             }
-            // ponytail: the whole run is kept in memory (~23 MB a minute,
-            // reserved up front so the data loop rarely allocates); estimate
-            // per burst as it arrives if runs get much longer.
-            for frame in frames {
-                let [left, right] = frame.as_chunks::<4>().0 else {
-                    continue;
-                };
-                rec.reference.push(f32::from_le_bytes(*left));
-                rec.processed.push(f32::from_le_bytes(*right));
-            }
+            // ponytail: the whole run is kept in memory (~23 MB a minute at
+            // 48 kHz); estimate per burst as it arrives if runs get much longer.
+            record(&mut rec, frames);
         })
         .register()?;
     connect(&stream, spa::utils::Direction::Input)?;
@@ -492,6 +485,31 @@ fn capture(
         _listener: listener,
         _stream: stream,
     })
+}
+
+/// Append frames while there is room: the data loop never allocates (the
+/// main thread reserves for the rate, `reserve`); what does not fit is
+/// dropped.
+fn record(rec: &mut Recording, frames: &[[u8; STRIDE]]) {
+    let room = rec.reference.capacity().min(rec.processed.capacity()) - rec.reference.len();
+    for frame in frames.iter().take(room) {
+        let [left, right] = frame.as_chunks::<4>().0 else {
+            continue;
+        };
+        rec.reference.push(f32::from_le_bytes(*left));
+        rec.processed.push(f32::from_le_bytes(*right));
+    }
+}
+
+/// Room for `seconds` at the graph's rate once the capture reported it.
+fn reserve(rec: &mut Recording, seconds: usize) {
+    let Some(rate) = rec.rate else {
+        return;
+    };
+    let want = seconds.saturating_mul(rate as usize);
+    for channel in [&mut rec.reference, &mut rec.processed] {
+        channel.reserve(want.saturating_sub(channel.len()));
+    }
 }
 
 /// Links touching a node named `prefix*` other than `ours`, as
@@ -560,9 +578,15 @@ impl Session<'_> {
     }
 }
 
+/// Longest run: the whole recording is kept in memory.
+pub const MAX_SECONDS: u32 = 600;
+
 /// Measure, then tear everything down (on every path: streams and links drop
 /// with this frame, the DSP children with `Session`). `stop` aborts the run.
 pub fn run_latency_test(opts: &LatencyTestOptions, stop: &AtomicBool) -> Result<LatencyReport> {
+    if opts.seconds > MAX_SECONDS {
+        bail!("a latency test runs at most {MAX_SECONDS} seconds");
+    }
     let engine = engine()?;
     let prefix = format!("hako-test-latency-{}-", std::process::id());
     let [gen, cap] = ["gen", "capture"].map(|part| format!("{prefix}{part}"));
@@ -599,10 +623,11 @@ pub fn run_latency_test(opts: &LatencyTestOptions, stop: &AtomicBool) -> Result<
     let context = pw::context::ContextRc::new(&session.mainloop, None)?;
     let core = context.connect_rc(None)?;
     let go = Arc::new(AtomicBool::new(false));
-    let samples = opts.seconds as usize * 48_000;
+    // At 48 kHz until the capture reports the graph's rate (`reserve`).
+    let seconds = opts.seconds as usize;
     let recording = Arc::new(Mutex::new(Recording {
-        reference: Vec::with_capacity(samples),
-        processed: Vec::with_capacity(samples),
+        reference: Vec::with_capacity(seconds * 48_000),
+        processed: Vec::with_capacity(seconds * 48_000),
         ..Recording::default()
     }));
     let _generator = generator(&core, &gen, &latency, go.clone())?;
@@ -687,6 +712,10 @@ pub fn run_latency_test(opts: &LatencyTestOptions, stop: &AtomicBool) -> Result<
         if !ours.iter().all(|id| graph.links.contains_key(id)) {
             bail!("a test link disappeared");
         }
+        reserve(
+            &mut recording.lock().unwrap_or_else(PoisonError::into_inner),
+            seconds,
+        );
         check(graph)
     })?;
     go.store(false, Ordering::Relaxed);
@@ -883,6 +912,36 @@ mod tests {
         let text = report(vec![0; 3], 0).to_string();
         assert!(text.contains("PASS"), "{text}");
         assert!(text.contains("0 samples = 0.00 ms"), "{text}");
+    }
+
+    /// The data loop never grows the recording; the main thread makes room
+    /// for the graph's rate, and a run is capped before anything is made.
+    #[test]
+    fn the_recording_grows_only_off_the_data_loop() {
+        let mut rec = Recording {
+            reference: Vec::with_capacity(4),
+            processed: Vec::with_capacity(4),
+            ..Recording::default()
+        };
+        let room = rec.reference.capacity();
+        let frames = vec![[0u8; STRIDE]; room + 3];
+        record(&mut rec, &frames);
+        assert_eq!(rec.reference.len(), room, "the rest dropped");
+        assert_eq!(rec.reference.capacity(), room, "not reallocated");
+        reserve(&mut rec, 1);
+        assert_eq!(rec.reference.capacity(), room, "rate unknown yet");
+        rec.rate = Some(96_000);
+        reserve(&mut rec, 2);
+        assert!(rec.reference.capacity() >= 192_000);
+        assert!(rec.processed.capacity() >= 192_000);
+
+        let opts = LatencyTestOptions {
+            latency: 256,
+            seconds: MAX_SECONDS + 1,
+            path: LatencyPath::Chain,
+        };
+        let e = run_latency_test(&opts, &AtomicBool::new(false)).unwrap_err();
+        assert!(e.to_string().contains("at most"), "{e:#}");
     }
 
     fn test_objects() -> usize {

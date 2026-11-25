@@ -514,7 +514,9 @@ fn battery_request(kind: Battery) -> Vec<u8> {
 fn parse_battery(kind: Battery, r: &[u8]) -> Option<(u8, bool)> {
     let (level, charging) = match kind {
         Battery::Aerox => {
-            if r.first() == Some(&DONGLE_UNREACHED) {
+            // The request's echo, cable (`92`) or dongle (`d2`); anything else
+            // (the dongle's "mouse unreachable" `40`) is not a level.
+            if !matches!(r.first(), Some(0x92 | 0xd2)) {
                 return None;
             }
             let v = *r.get(1)?;
@@ -1533,7 +1535,13 @@ mod tests {
             parse_battery(Battery::Aerox, &[0x92, 11]),
             Some((50, false))
         );
+        assert_eq!(
+            parse_battery(Battery::Aerox, &[0xd2, 11]),
+            Some((50, false))
+        );
         assert_eq!(parse_battery(Battery::Aerox, &[0x92, 0]), None);
+        // An unrelated report is not the reply.
+        assert_eq!(parse_battery(Battery::Aerox, &[0x00, 11]), None);
         // The dongle's "mouse unreachable" echo is not a level.
         assert_eq!(parse_battery(Battery::Aerox, &[0x40, 21]), None);
         assert_eq!(parse_battery(Battery::Rival, &[64, 0, 1]), Some((64, true)));

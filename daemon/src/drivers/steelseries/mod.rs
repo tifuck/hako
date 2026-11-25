@@ -24,7 +24,7 @@
 //! models list it blocked. Keyboard onboard-profile writes and the Apex Pro
 //! flash save are never sent. `nova_pro` follows the same rule: its `06 09`
 //! (the save command in both sources) comes after a setter only in save mode,
-//! and never for the `225d`.
+//! the white `225d` included (same GG base definition).
 
 mod headset;
 mod keyboard;

@@ -50,18 +50,33 @@ pub fn output_report_len(desc: &[u8], report_id: u8) -> Option<usize> {
     Some(bits.div_ceil(8) as usize).filter(|n| REPORT_LEN.contains(n))
 }
 
-/// The node of `vid:pid` declaring `usage_page`; else the one on `iface`.
+/// The node of `vid:pid` on `iface` declaring `usage_page`; else any node
+/// declaring it; else the one on `iface`.
 pub fn find_node(vid: u16, pid: u16, usage_page: u16, iface: Option<u32>) -> Result<HidDeviceInfo> {
     let nodes: Vec<_> = enumerate_hidraw()?
         .into_iter()
         .filter(|d| d.vendor_id == vid && d.product_id == pid)
         .collect();
+    pick(&nodes, iface, |d| {
+        report_descriptor(d).is_some_and(|desc| usage_pages(&desc).contains(&usage_page))
+    })
+    .cloned()
+    .with_context(|| format!("no control interface for {vid:04x}:{pid:04x}"))
+}
+
+/// [`find_node`]'s choice among `nodes`; `declares`: the node has the usage
+/// page (V2 receivers declare it on more than one interface).
+fn pick(
+    nodes: &[HidDeviceInfo],
+    iface: Option<u32>,
+    declares: impl Fn(&HidDeviceInfo) -> bool,
+) -> Option<&HidDeviceInfo> {
+    let on_iface = |d: &&HidDeviceInfo| iface.is_some() && d.interface == iface;
     nodes
         .iter()
-        .find(|d| report_descriptor(d).is_some_and(|desc| usage_pages(&desc).contains(&usage_page)))
-        .or_else(|| iface.and_then(|i| nodes.iter().find(|d| d.interface == Some(i))))
-        .cloned()
-        .with_context(|| format!("no control interface for {vid:04x}:{pid:04x}"))
+        .find(|d| on_iface(d) && declares(d))
+        .or_else(|| nodes.iter().find(|d| declares(d)))
+        .or_else(|| nodes.iter().find(on_iface))
 }
 
 /// Stable instance key: the USB serial when the kernel reports one.
@@ -125,6 +140,31 @@ mod tests {
         assert_eq!(out(8, &[0x01, 0x04, 0x00, 0x00]), None);
         // Size x count past u32: saturates, then is rejected.
         assert_eq!(out(0xff, &[0xff, 0xff, 0xff, 0xff]), None);
+    }
+
+    #[test]
+    fn the_page_on_the_given_interface_wins() {
+        let node = |iface| HidDeviceInfo {
+            path: format!("/dev/hidraw{iface}").into(),
+            vendor_id: 0x1b1c,
+            product_id: 0x2a0c,
+            interface: Some(iface),
+            uniq: String::new(),
+            bus: 3,
+            name: String::new(),
+            sys: Default::default(),
+        };
+        let nodes = [node(0), node(3), node(4)];
+        let iface = |n: Option<&HidDeviceInfo>| n.and_then(|d| d.interface);
+        // Interfaces 3 and 4 both declare the page: the asked one is taken.
+        let vendor = |d: &HidDeviceInfo| d.interface != Some(0);
+        assert_eq!(iface(pick(&nodes, Some(4), vendor)), Some(4));
+        assert_eq!(iface(pick(&nodes, Some(3), vendor)), Some(3));
+        // Not declared there: any node declaring it, then the interface alone.
+        let only3 = |d: &HidDeviceInfo| d.interface == Some(3);
+        assert_eq!(iface(pick(&nodes, Some(4), only3)), Some(3));
+        assert_eq!(iface(pick(&nodes, Some(4), |_| false)), Some(4));
+        assert_eq!(iface(pick(&nodes, None, |_| false)), None);
     }
 
     #[test]

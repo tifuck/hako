@@ -13,6 +13,9 @@ ExecStart=%h/.local/bin/hakod
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=2
+# Above the longest teardown (discovery pass 10 s, devices 2 s, mixer 15 s,
+# audio reset); a hung stop is killed instead of waiting 90 s.
+TimeoutStopSec=40
 
 
 [Install]

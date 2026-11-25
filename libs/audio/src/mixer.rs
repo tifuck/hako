@@ -43,7 +43,7 @@ use hako_core::mixer::{
 };
 use hako_core::{AuxConfig, AuxEffectKind};
 use regex::Regex;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Mutex;
@@ -105,6 +105,7 @@ pub(crate) fn kill_orphans() {
             remove_orphan_confs(dir);
         }
         restore_saved(Some(&saved_cards_path(&Naming::daemon())));
+        restore_moved(&saved_apps_path(&Naming::daemon()));
     }
 }
 
@@ -685,14 +686,56 @@ pub fn devices(created: &[&str]) -> Result<(Vec<DeviceInfo>, Option<String>)> {
         engine()?.with_graph(|graph| (device_list(graph, created), graph.default_sink.clone()));
     for info in &mut list {
         if let (DeviceDirection::Source, Some(card)) = (info.device.direction, &info.alsa_card) {
-            (info.device.inputs, info.device.capture) =
-                capture_controls(&info.device.node, card).unwrap_or_default();
+            let Some(controls) = read_controls(&info.device.node, card) else {
+                continue;
+            };
+            (info.device.inputs, info.device.capture) = controls;
             if info.device.capture {
                 info.device.capture_now = capture_level(&info.device.node, card);
             }
         }
     }
     Ok((list, default_sink))
+}
+
+/// (node, card) pairs a background thread is reading (`read_controls`).
+static CARD_READS: Mutex<BTreeSet<(String, String)>> = Mutex::new(BTreeSet::new());
+
+/// The card's controls as cached, without waiting on `amixer` (a listing
+/// is on the mixer's thread): one not read yet (or due again) is `None`
+/// while a thread reads it, with its capture level, for the next listing.
+fn read_controls(node: &str, card: &str) -> Option<CardControls> {
+    let key = (node.to_string(), card.to_string());
+    let cached = CARD_CONTROLS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+        .and_then(|(found, failed)| match failed {
+            Some((_, at)) if Instant::now() >= *at => None,
+            _ => Some(found.clone()),
+        });
+    if cached.is_some() {
+        return cached;
+    }
+    let reads = || CARD_READS.lock().unwrap_or_else(|p| p.into_inner());
+    if !reads().insert(key.clone()) {
+        return None;
+    }
+    let reading = key.clone();
+    let spawned = std::thread::Builder::new()
+        .name("hako-card-read".into())
+        .spawn(move || {
+            let (node, card) = &reading;
+            if capture_controls(node, card).is_ok_and(|(_, level)| level) {
+                capture_level(node, card);
+            }
+            reads().remove(&reading);
+        });
+    if let Err(e) = spawned {
+        warn!("mixer: reading ALSA card {card}: {e}");
+        reads().remove(&key);
+    }
+    None
 }
 
 /// A card's "Input Source" items and whether it has a capture level.
@@ -1070,6 +1113,33 @@ fn short_headroom(
     short
 }
 
+fn headroom_of(node: &Node) -> Option<u32> {
+    node.props.get("api.alsa.headroom")?.parse().ok()
+}
+
+/// The devices in `before` (by `object.serial`) no source of `scene` takes.
+fn headroom_left(
+    scene: &Scene,
+    graph: &Graph,
+    before: &HashMap<String, (u32, u32)>,
+) -> Vec<String> {
+    let taken: HashSet<String> = scene
+        .inputs
+        .iter()
+        .filter_map(|input| match &input.kind {
+            InputKind::Hardware { sources } => Some(sources),
+            InputKind::Virtual { .. } => None,
+        })
+        .flatten()
+        .filter_map(|s| serial(graph.nodes.get(&graph.node_id(&s.node)?)?))
+        .collect();
+    before
+        .keys()
+        .filter(|key| !taken.contains(*key))
+        .cloned()
+        .collect()
+}
+
 /// `(Source::alsa_input, Source::capture_percent)`.
 type CardWant = (Option<String>, Option<u8>);
 
@@ -1180,18 +1250,65 @@ fn saved_cards_path(naming: &Naming) -> PathBuf {
     hako_core::default_socket_path().with_file_name(format!("{}mixer-cards.json", naming.files))
 }
 
+/// `MixerGraph::saved_apps` of a graph named `naming`.
+fn saved_apps_path(naming: &Naming) -> PathBuf {
+    hako_core::default_socket_path().with_file_name(format!("{}mixer-apps.json", naming.files))
+}
+
+/// The saved-cards and saved-apps files are read, changed and written one
+/// caller at a time (the mixer's thread, the kill-switch's).
+static RECORDS: Mutex<()> = Mutex::new(());
+
+fn records() -> std::sync::MutexGuard<'static, ()> {
+    RECORDS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// A record file's map; none when it is not there. One that does not parse
+/// is moved aside to `.json.bad` (the next save would replace what it held).
+fn read_record<T: Default>(path: &Path, parse: impl FnOnce(&str) -> serde_json::Result<T>) -> T {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return T::default();
+    };
+    parse(&text).unwrap_or_else(|e| {
+        let bad = path.with_extension("json.bad");
+        warn!(
+            "mixer: {} is unreadable ({e}), moved to {}",
+            path.display(),
+            bad.display()
+        );
+        if let Err(e) = std::fs::rename(path, &bad) {
+            warn!("mixer: moving {} aside: {e}", path.display());
+        }
+        T::default()
+    })
+}
+
+/// Replace a record file with `encoded` (owner-only, atomically), or
+/// remove it (`None`).
+fn write_record(path: &Path, encoded: Option<serde_json::Result<String>>) -> Result<()> {
+    let Some(encoded) = encoded else {
+        return match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e).context("remove"),
+            _ => Ok(()),
+        };
+    };
+    let tmp = path.with_extension("json.tmp");
+    encoded
+        .context("encode")
+        .and_then(|text| write_conf(&tmp, &text))
+        .and_then(|()| std::fs::rename(&tmp, path).context("rename"))
+}
+
 /// Cards' "Input Source" before hako changed it, by card id, as `saved`
 /// (`MixerGraph::saved_cards`) has them.
 fn saved_previous(saved: &Path) -> BTreeMap<String, String> {
-    std::fs::read_to_string(saved)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    read_record(saved, |text| serde_json::from_str(text))
 }
 
 /// The card's "Input Source" before hako changed it, from a run that
 /// crashed before giving it back.
 fn load_previous(saved: Option<&Path>, card: &str) -> Option<String> {
+    let _records = records();
     saved_previous(saved?).remove(&card_id(card)?)
 }
 
@@ -1200,6 +1317,12 @@ fn load_previous(saved: Option<&Path>, card: &str) -> Option<String> {
 // ponytail: kept in the runtime dir, so a reboot (or logout) forgets it;
 // move it to the config dir if cards stay on hako's input after that.
 fn save_previous(saved: Option<&Path>, card: &str, previous: Option<&str>) {
+    let _records = records();
+    store_previous(saved, card, previous);
+}
+
+/// `save_previous` under `RECORDS`, held by the caller.
+fn store_previous(saved: Option<&Path>, card: &str, previous: Option<&str>) {
     let (Some(saved), Some(id)) = (saved, card_id(card)) else {
         return;
     };
@@ -1211,16 +1334,8 @@ fn save_previous(saved: Option<&Path>, card: &str, previous: Option<&str>) {
     if !changed {
         return;
     }
-    let result = if all.is_empty() {
-        std::fs::remove_file(saved).context("remove")
-    } else {
-        let tmp = saved.with_extension("json.tmp");
-        serde_json::to_string(&all)
-            .context("encode")
-            .and_then(|text| write_conf(&tmp, &text))
-            .and_then(|()| std::fs::rename(&tmp, saved).context("rename"))
-    };
-    if let Err(e) = result {
+    let encoded = (!all.is_empty()).then(|| serde_json::to_string(&all));
+    if let Err(e) = write_record(saved, encoded) {
         warn!("mixer: saving card inputs to {}: {e:#}", saved.display());
     }
 }
@@ -1232,6 +1347,7 @@ fn restore_saved(saved: Option<&Path>) {
     let Some(saved) = saved else {
         return;
     };
+    let _records = records();
     for (id, previous) in saved_previous(saved) {
         let Some(card) = card_number(&id) else {
             continue;
@@ -1239,10 +1355,35 @@ fn restore_saved(saved: Option<&Path>) {
         match set_input_source(&card, &previous) {
             Ok(()) => {
                 info!("mixer: card {card} ({id}) input source back to {previous}");
-                save_previous(Some(saved), &card, None);
+                store_previous(Some(saved), &card, None);
             }
             Err(e) => warn!("mixer: restoring card {card} ({id}) input: {e:#}"),
         }
+    }
+}
+
+/// Hand back the app streams a crashed run left moved (`saved`:
+/// `MixerGraph::saved_apps`): kept while PipeWire cannot be reached.
+fn restore_moved(saved: &Path) {
+    let _records = records();
+    let moved: BTreeMap<u32, Option<String>> =
+        read_record(saved, |text| serde_json::from_str(text));
+    if moved.is_empty() {
+        return;
+    }
+    let Ok(engine) = engine() else {
+        return;
+    };
+    for (id, was) in moved {
+        let there = engine.with_graph(|g| g.nodes.get(&id).is_some_and(|n| serial(n) == was));
+        if there {
+            if let Err(e) = engine.set_target(id, None) {
+                warn!("mixer: handing back stream {id}: {e:#}");
+            }
+        }
+    }
+    if let Err(e) = write_record(saved, None) {
+        warn!("mixer: {}: {e:#}", saved.display());
     }
 }
 
@@ -1281,10 +1422,15 @@ pub struct MixerGraph {
     mono_sinks: BTreeMap<String, bool>,
     /// App streams moved into virtual inputs, by stream id.
     moved: BTreeMap<u32, Moved>,
+    /// `moved`'s ids and serials, for the next start after a crash (`None`:
+    /// not kept).
+    saved_apps: Option<PathBuf>,
     /// Capture devices given headroom (`sync_headroom`): frames by
     /// `object.serial`, which PipeWire never reuses.
-    // ponytail: never evicted (one entry per device node a source ever used).
     headroom: HashMap<String, u32>,
+    /// Their node id and headroom before, by `object.serial`: given back
+    /// when no source takes them any more and at teardown.
+    headroom_before: HashMap<String, (u32, u32)>,
     problems: Vec<StripProblem>,
     running: bool,
 }
@@ -1294,6 +1440,7 @@ impl MixerGraph {
     pub fn new(naming: Naming, latency: u32) -> Self {
         // Unit tests run next to the user's hakod: its runtime dir is not theirs.
         let saved_cards = (!cfg!(test)).then(|| saved_cards_path(&naming));
+        let saved_apps = (!cfg!(test)).then(|| saved_apps_path(&naming));
         Self {
             naming,
             latency,
@@ -1304,7 +1451,9 @@ impl MixerGraph {
             unreaped: Vec::new(),
             mono_sinks: BTreeMap::new(),
             moved: BTreeMap::new(),
+            saved_apps,
             headroom: HashMap::new(),
+            headroom_before: HashMap::new(),
             problems: Vec::new(),
             running: false,
         }
@@ -1695,16 +1844,66 @@ impl MixerGraph {
     /// another clock; one that already did gets it at its next change.
     fn sync_headroom(&mut self, engine: &Engine, scene: &Scene, problems: &mut Vec<StripProblem>) {
         let frames = self.latency;
-        let short = engine.with_graph(|graph| short_headroom(scene, graph, frames, &self.headroom));
-        for (id, serial, input) in short {
+        let (short, left) = engine.with_graph(|graph| {
+            let short: Vec<_> = short_headroom(scene, graph, frames, &self.headroom)
+                .into_iter()
+                .map(|(id, serial, input)| {
+                    let before = graph.nodes.get(&id).and_then(headroom_of);
+                    (id, serial, input, before)
+                })
+                .collect();
+            (short, headroom_left(scene, graph, &self.headroom_before))
+        });
+        for key in left {
+            self.restore_headroom(engine, &key);
+        }
+        for (id, serial, input, before) in short {
             match headroom_pod(frames).and_then(|pod| engine.set_props(id, pod)) {
                 Ok(()) => {
                     info!("mixer: capture device {id} gets {frames} frames of headroom");
-                    self.headroom.insert(serial, frames);
+                    self.headroom.insert(serial.clone(), frames);
+                    if let Some(before) = before {
+                        self.headroom_before.entry(serial).or_insert((id, before));
+                    }
                 }
                 Err(error) => problems.push(problem(&input, format!("headroom: {error:#}"))),
             }
         }
+    }
+
+    /// Give the device `object.serial` `key` the headroom it had before
+    /// `sync_headroom` (a node that is gone has nothing to give back).
+    fn restore_headroom(&mut self, engine: &Engine, key: &str) {
+        self.headroom.remove(key);
+        let Some((id, before)) = self.headroom_before.remove(key) else {
+            return;
+        };
+        let there = engine.with_graph(|g| {
+            g.nodes
+                .get(&id)
+                .is_some_and(|n| serial(n).as_deref() == Some(key))
+        });
+        if !there {
+            return;
+        }
+        match headroom_pod(before).and_then(|pod| engine.set_props(id, pod)) {
+            Ok(()) => info!("mixer: capture device {id} back to {before} frames of headroom"),
+            Err(e) => warn!("mixer: capture device {id} headroom back to {before}: {e:#}"),
+        }
+    }
+
+    /// Every capture device's headroom back (teardown).
+    fn release_headroom(&mut self) {
+        if !self.headroom_before.is_empty() {
+            let Ok(engine) = engine() else {
+                return;
+            };
+            let keys: Vec<String> = self.headroom_before.keys().cloned().collect();
+            for key in keys {
+                self.restore_headroom(engine, &key);
+            }
+        }
+        self.headroom.clear();
     }
 
     /// Strips that may be linked: running, with their fader written (a
@@ -1721,6 +1920,14 @@ impl MixerGraph {
     /// (new streams, a strip that came back); hand back the ones no input
     /// takes any more.
     fn sync_apps(&mut self, engine: &Engine, scene: &Scene, problems: &mut Vec<StripProblem>) {
+        let before = self.moved.clone();
+        self.move_apps(engine, scene, problems);
+        if self.moved != before {
+            self.save_moved();
+        }
+    }
+
+    fn move_apps(&mut self, engine: &Engine, scene: &Scene, problems: &mut Vec<StripProblem>) {
         let up: Vec<&str> = self
             .strips
             .iter()
@@ -1783,6 +1990,27 @@ impl MixerGraph {
                 warn!("mixer: handing back stream {id}: {e:#}");
                 self.moved.insert(id, m);
             }
+        }
+        self.save_moved();
+    }
+
+    /// Keep `moved` for `restore_moved` after a crash; gone once empty.
+    fn save_moved(&self) {
+        let Some(path) = &self.saved_apps else {
+            return;
+        };
+        let all: BTreeMap<u32, Option<String>> = self
+            .moved
+            .iter()
+            .map(|(id, m)| (*id, m.serial.clone()))
+            .collect();
+        let encoded = (!all.is_empty()).then(|| serde_json::to_string(&all));
+        let _records = records();
+        if let Err(e) = write_record(path, encoded) {
+            warn!(
+                "mixer: saving moved app streams to {}: {e:#}",
+                path.display()
+            );
         }
     }
 
@@ -1984,6 +2212,7 @@ impl MixerGraph {
         self.release_cards();
         restore_saved(self.saved_cards.as_deref());
         self.release_apps();
+        self.release_headroom();
         self.links.clear();
         let names: Vec<String> = self.node_names().iter().map(|n| n.to_string()).collect();
         for strip in self.strips.values_mut() {
@@ -2006,6 +2235,7 @@ impl Drop for MixerGraph {
         self.release_cards();
         restore_saved(self.saved_cards.as_deref());
         self.release_apps();
+        self.release_headroom();
         self.links.clear();
         for strip in self.strips.values_mut() {
             strip.stop(&mut self.unreaped);
@@ -2558,6 +2788,88 @@ mod tests {
             BTreeMap::from([("unplugged".to_string(), "Line".to_string())])
         );
         let _ = std::fs::remove_file(&saved);
+    }
+
+    /// An unreadable record is moved aside, not replaced with one card.
+    #[test]
+    fn an_unreadable_saved_cards_file_is_kept_aside() {
+        let saved = std::env::temp_dir().join(format!(
+            "hako-test-x-mixer-cards-bad-{}.json",
+            std::process::id()
+        ));
+        let bad = saved.with_extension("json.bad");
+        std::fs::write(&saved, "{not json").unwrap();
+        save_previous(Some(&saved), "7", Some("Line"));
+        assert_eq!(std::fs::read_to_string(&bad).unwrap(), "{not json");
+        assert_eq!(
+            saved_previous(&saved),
+            BTreeMap::from([("test7".to_string(), "Line".to_string())])
+        );
+        let _ = std::fs::remove_file(&saved);
+        let _ = std::fs::remove_file(&bad);
+    }
+
+    /// Moved app streams are kept on disk while any are, for a crashed
+    /// run's successor to hand back.
+    #[test]
+    fn moved_app_streams_are_kept_for_after_a_crash() {
+        let saved = std::env::temp_dir().join(format!(
+            "hako-test-x-mixer-apps-{}.json",
+            std::process::id()
+        ));
+        let mut graph = MixerGraph::new(test_naming(), 256);
+        graph.saved_apps = Some(saved.clone());
+        graph.moved.insert(
+            42,
+            Moved {
+                serial: Some("99".into()),
+                sink: "hako-test-x-game".into(),
+            },
+        );
+        graph.save_moved();
+        let kept: BTreeMap<u32, Option<String>> =
+            read_record(&saved, |text| serde_json::from_str(text));
+        assert_eq!(kept, BTreeMap::from([(42, Some("99".to_string()))]));
+        graph.moved.clear();
+        graph.save_moved();
+        assert!(!saved.exists(), "none moved: no file");
+    }
+
+    /// A device's headroom is given back once no source takes it.
+    #[test]
+    fn headroom_is_given_back_when_no_source_takes_the_device() {
+        let scene = scene();
+        let graph = graph_with(&[
+            ("mic-a", "Audio/Source", &[("object.serial", "10")]),
+            ("other", "Audio/Source", &[("object.serial", "12")]),
+        ]);
+        let before = HashMap::from([("10".to_string(), (1, 32)), ("12".to_string(), (2, 32))]);
+        assert_eq!(headroom_left(&scene, &graph, &before), ["12"]);
+    }
+
+    /// A card not read yet is read off the caller's thread; the next
+    /// listing has it.
+    #[test]
+    fn a_new_cards_controls_are_read_in_the_background() {
+        use crate::tests::amixer_calls;
+        let node = "hako-test-controls-background";
+        amixer_calls();
+        assert_eq!(read_controls(node, "7"), None);
+        assert!(amixer_calls().is_empty(), "not on this thread");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut read = None;
+        while read.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            read = read_controls(node, "7");
+        }
+        assert_eq!(
+            read,
+            Some((
+                vec!["Rear Mic".into(), "Front Mic".into(), "Line".into()],
+                true
+            ))
+        );
+        assert!(amixer_calls().is_empty());
     }
 
     #[test]

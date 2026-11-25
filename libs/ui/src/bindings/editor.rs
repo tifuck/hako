@@ -2,10 +2,12 @@
 //! Edits stay in a local draft and are committed with `SetRemap`.
 
 use super::{describe, keycap_chip, macros, mode_color, source_name, Cx};
+use crate::hotkeys;
 use crate::theme::{self, pal};
 use crate::widgets;
 use crate::UiCommand;
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, Ui};
+use hako_core::hotkey::{HotkeyAction, HotkeyBinding, HotkeyOp, HotkeyScope};
 use hako_core::remap::{
     clamp_interval, CaptureRole, EvdevKey, MacroRepeat, MacroStep, RemapBinding, RemapMode,
     MAX_INTERVAL_MS, MAX_MACRO_STEPS, MIN_INTERVAL_MS,
@@ -24,8 +26,26 @@ pub(super) struct Draft {
     /// Mode chosen but not yet applicable (no target yet).
     pending: bool,
     pub steps_dirty: bool,
-    pub awaiting_record: bool,
+    pub record: Option<RecordWait>,
+    /// The Hotkey tile is picked (an app hotkey, not a remap).
+    hotkey: bool,
 }
+
+/// A Record click on its way: `recorded` keeps the previous take until the
+/// daemon starts the new capture, so only the end of a capture seen running
+/// is adopted.
+#[derive(Clone)]
+pub(super) enum RecordWait {
+    /// Sent at `at` (egui time) while the device showed `error`.
+    Requested {
+        at: f64,
+        error: Option<String>,
+    },
+    Recording,
+}
+
+/// How long a Record click waits for the daemon to report the capture.
+const RECORD_START_TIMEOUT: f64 = 5.0;
 
 impl Draft {
     fn from(b: Option<&RemapBinding>) -> Self {
@@ -38,7 +58,8 @@ impl Draft {
             steps: b.map(|b| b.steps.clone()).unwrap_or_default(),
             pending: false,
             steps_dirty: false,
-            awaiting_record: false,
+            record: None,
+            hotkey: false,
         }
     }
 
@@ -123,18 +144,23 @@ pub(super) fn apply(cx: &mut Cx, draft: &mut Draft, source: EvdevKey) -> bool {
     }
 }
 
-const MODES: [(&str, &str); 6] = [
+const MODES: [(&str, &str); 7] = [
     ("Default", "Built-in behavior"),
     ("Remap", "Send another key"),
     ("Hold repeat", "Repeats while held"),
     ("Toggle repeat", "Press to start / stop"),
     ("Macro", "Play a sequence"),
     ("Disable", "Do nothing"),
+    ("Hotkey", "Fire an app action"),
 ];
+
+/// The Hotkey tile's index in `MODES`.
+const HOTKEY_TILE: usize = 6;
 
 fn tile_color(i: usize) -> Color32 {
     match i {
         0 => pal().text_muted,
+        HOTKEY_TILE => theme::HOTKEY,
         i => mode_color(RemapMode::ALL[i - 1]),
     }
 }
@@ -182,11 +208,24 @@ fn mode_icon(p: &egui::Painter, r: Rect, c: Color32, i: usize) {
             }
         }
         // Disable: barred circle.
-        _ => {
+        5 => {
             let rad = r.width() / 2.0 - 2.0;
             p.circle_stroke(r.center(), rad, s);
             let d = rad * 0.7;
             p.line_segment([pos2(cx - d, cy + d), pos2(cx + d, cy - d)], s);
+        }
+        // Hotkey: a bolt.
+        _ => {
+            let pts = [
+                pos2(cx + 2.0, r.top() + 1.0),
+                pos2(cx - 4.0, cy + 1.0),
+                pos2(cx + 1.0, cy + 1.0),
+                pos2(cx - 2.0, r.bottom() - 1.0),
+                pos2(cx + 4.0, cy - 1.0),
+                pos2(cx - 1.0, cy - 1.0),
+                pos2(cx + 2.0, r.top() + 1.0),
+            ];
+            p.add(egui::Shape::line(pts.to_vec(), s));
         }
     }
 }
@@ -300,10 +339,12 @@ pub(super) fn panel(ui: &mut Ui, cx: &mut Cx, selected: &mut Option<EvdevKey>) {
     if draft.seen != bound {
         // A capture created/changed the binding: keep a mode the user picked first.
         let wanted = draft.pending.then_some(draft.mode).flatten();
-        let awaiting = draft.awaiting_record;
+        let record = draft.record.take();
         let (steps, dirty) = (draft.steps.clone(), draft.steps_dirty);
+        let hotkey = draft.hotkey;
         draft = Draft::from(bound.as_ref());
-        draft.awaiting_record = awaiting;
+        draft.record = record;
+        draft.hotkey = hotkey;
         if dirty {
             draft.steps = steps;
             draft.steps_dirty = true;
@@ -317,14 +358,31 @@ pub(super) fn panel(ui: &mut Ui, cx: &mut Cx, selected: &mut Option<EvdevKey>) {
     }
 
     let recording = cx.remaps.capturing == Some(CaptureRole::Record);
-    if draft.awaiting_record && !recording {
-        draft.awaiting_record = false;
-        if !cx.remaps.recorded.is_empty() {
-            draft.steps = cx.remaps.recorded.clone();
-            draft.steps_dirty = true;
+    match &draft.record {
+        Some(RecordWait::Requested { .. }) if recording => {
+            draft.record = Some(RecordWait::Recording);
         }
+        Some(RecordWait::Requested { at, error }) => {
+            let refused = cx.remaps.last_error.is_some() && cx.remaps.last_error != *error;
+            if refused || ui.input(|i| i.time) - at > RECORD_START_TIMEOUT {
+                draft.record = None;
+            }
+        }
+        Some(RecordWait::Recording) if !recording => {
+            draft.record = None;
+            if !cx.remaps.recorded.is_empty() {
+                draft.steps = cx.remaps.recorded.clone();
+                draft.steps_dirty = true;
+            }
+        }
+        _ => {}
     }
 
+    let mark = cx
+        .marks()
+        .into_iter()
+        .find(|(c, _)| *c == source.0)
+        .map(|(_, m)| m);
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         // Header: the key, what it does now, reset.
@@ -366,16 +424,24 @@ pub(super) fn panel(ui: &mut Ui, cx: &mut Cx, selected: &mut Option<EvdevKey>) {
                     draft.pending = false;
                     cx.clear(source);
                 }
-                widgets::pill(ui, &describe(bound.as_ref()), color);
+                match (&bound, &mark) {
+                    (None, Some(m)) => widgets::pill(ui, &m.summary, theme::HOTKEY),
+                    _ => widgets::pill(ui, &describe(bound.as_ref()), color),
+                };
             });
         });
         ui.add_space(theme::SPACE_SM);
 
         let current = match draft.mode {
+            _ if draft.hotkey || (draft.mode.is_none() && mark.is_some()) => HOTKEY_TILE,
             None => 0,
             Some(m) => 1 + RemapMode::ALL.iter().position(|x| *x == m).unwrap_or(0),
         };
-        if let Some(i) = mode_tiles(ui, draft_id(cx, source).with("mode"), current) {
+        let picked = mode_tiles(ui, draft_id(cx, source).with("mode"), current);
+        if let Some(i) = picked {
+            draft.hotkey = i == HOTKEY_TILE;
+        }
+        if let Some(i) = picked.filter(|i| *i != HOTKEY_TILE) {
             if i == 0 {
                 draft.mode = None;
                 draft.pending = false;
@@ -393,6 +459,7 @@ pub(super) fn panel(ui: &mut Ui, cx: &mut Cx, selected: &mut Option<EvdevKey>) {
         widgets::divider(ui);
 
         match draft.mode {
+            _ if picked.unwrap_or(current) == HOTKEY_TILE => hotkey_panel(ui, cx, source),
             None => {
                 ui.add_space(theme::SPACE_SM);
                 widgets::hint(ui, "Uses the device's built-in behavior.");
@@ -423,6 +490,73 @@ pub(super) fn panel(ui: &mut Ui, cx: &mut Cx, selected: &mut Option<EvdevKey>) {
     });
     ui.add_space(theme::SPACE_MD);
     store(ui.ctx(), cx, source, draft);
+}
+
+/// The Hotkey tile: the app hotkeys this key is part of on this device, with
+/// the shared editor, or a new one (this key alone, this device only).
+fn hotkey_panel(ui: &mut Ui, cx: &mut Cx, source: EvdevKey) {
+    ui.add_space(theme::SPACE_SM);
+    let (v, p) = (cx.d.id.vendor_id, cx.d.id.product_id);
+    let Some(st) = cx.hotkeys.state().cloned() else {
+        let why = cx.hotkeys.error().unwrap_or("Loading hotkeys…").to_string();
+        widgets::hint(ui, &why);
+        return;
+    };
+    let mine: Vec<HotkeyBinding> = st
+        .file
+        .for_device(v, p)
+        .filter(|b| hotkeys::uses_key(b, source.0))
+        .cloned()
+        .collect();
+    let devices = std::slice::from_ref(cx.d);
+    for b in &mine {
+        hotkeys::editor(ui, cx.hotkeys, b, Some((v, p, &cx.d.name)), devices, cx.out);
+        hotkeys::conflicts(ui, cx.hotkeys, b, Some((v, p)), devices, cx.out);
+        ui.add_space(theme::SPACE_SM);
+    }
+    hotkeys::new_binding_row(ui, cx.hotkeys, None, cx.out);
+    if !mine.is_empty() {
+        return;
+    }
+    let remapped = cx.binding(source).is_some();
+    let id = draft_id(cx, source).with("hotkey_action");
+    let mut action = ui
+        .data(|m| m.get_temp::<HotkeyAction>(id))
+        .unwrap_or(HotkeyAction::VoiceTranscribe);
+    widgets::row(ui, "Action", Some("What this key does in hako"), |ui| {
+        let can = cx.hotkeys.file().is_some();
+        if ui
+            .add_enabled_ui(can, |ui| widgets::primary_button(ui, "Create hotkey"))
+            .inner
+            .clicked()
+        {
+            if let Some(file) = cx.hotkeys.file() {
+                let mut b = HotkeyBinding::new(&hotkeys::new_id(file, action), action, &[source.0]);
+                b.scope = HotkeyScope::Device {
+                    vendor_id: v,
+                    product_id: p,
+                };
+                let id = b.id.clone();
+                // The key does one thing: the hotkey replaces its remap.
+                if cx
+                    .hotkeys
+                    .send(&id, vec![HotkeyOp::Set { binding: b }], cx.out)
+                    && remapped
+                {
+                    cx.out.push(UiCommand::ClearRemap {
+                        device_id: cx.d.id.clone(),
+                        source,
+                    });
+                }
+            }
+        }
+        hotkeys::action_picker(ui, "bind_hotkey_action", &mut action);
+    });
+    ui.data_mut(|m| m.insert_temp(id, action));
+    widgets::hint(
+        ui,
+        "Starts as this key alone on this device; Detect adds modifiers such as Ctrl.",
+    );
 }
 
 fn target_row(ui: &mut Ui, cx: &mut Cx, source: EvdevKey, draft: &mut Draft) {

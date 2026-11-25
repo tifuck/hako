@@ -267,7 +267,7 @@ enum Event {
 /// Reports the dongle pushes on the configuration node (report id 3).
 fn parse_event(r: &[u8]) -> Option<Event> {
     match r {
-        [0x03, 0xb4, pct, ..] => Some(Event::Battery((*pct).min(100))),
+        [0x03, 0xb4, pct @ 0..=100, ..] => Some(Event::Battery(*pct)),
         [0x03, 0xb1, 0x01, ..] => Some(Event::Link(true)),
         [0x03, 0xb1, 0xf0 | 0xf1, ..] => Some(Event::Link(false)),
         _ => None,
@@ -787,6 +787,7 @@ mod tests {
             ev(&[3, 0xb1, 0xf0, 0x0a, 0, 0, 0, 0]),
             Some(Event::Link(false))
         );
+        assert_eq!(ev(&[3, 0xb4, 0xff, 0, 0, 0, 0, 0]), None);
         assert_eq!(ev(&[3, 0x31, 0x14, 0x10, 0, 0, 0, 0]), None);
         assert_eq!(ev(&[2, 0, 0, 0, 4, 0, 0, 0]), None);
         assert_eq!(cable_battery(55), battery(None, true));

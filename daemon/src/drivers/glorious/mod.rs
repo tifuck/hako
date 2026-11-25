@@ -245,15 +245,15 @@ enum Reading {
 /// Reply `[1]` status (`a1` ok, `a4` mouse not found, `a0` busy), `[6]`
 /// echoes `83`, `[7]` is the charging flag and `[8]` the percent (mxw for the
 /// frame, Glorious CORE `ModelOSeries.ts` for status and charging flag). A 0 %
-/// level is shown as 1 %; other status bytes (`a2` failed, `a3` unsupported)
-/// are ignored.
+/// level is shown as 1 %; a level above 100, or other status bytes (`a2`
+/// failed, `a3` unsupported), are ignored.
 fn parse_battery(r: &[u8]) -> Option<Reading> {
     if r.get(6) != Some(&0x83) {
         return None;
     }
     match r.get(1)? {
         0xa1 => Some(Reading::Level {
-            percent: (*r.get(8)?).clamp(1, 100),
+            percent: Some(*r.get(8)?).filter(|&p| p <= 100)?.max(1),
             charging: *r.get(7)? != 0,
         }),
         0xa4 => Some(Reading::Asleep),
@@ -682,6 +682,7 @@ mod tests {
         assert_eq!(parse_battery(&reply(0xa1, 0x83, 57)), level(57, false));
         assert_eq!(parse_battery(&reply(0xa1, 0x83, 0)), level(1, false));
         assert_eq!(parse_battery(&reply(0xa1, 0x83, 100)), level(100, false));
+        assert_eq!(parse_battery(&reply(0xa1, 0x83, 0xff)), None);
         // CORE reads the charging flag at [7], not from the level.
         let mut charging = reply(0xa1, 0x83, 100);
         charging[7] = 1;

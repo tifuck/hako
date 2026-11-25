@@ -118,6 +118,7 @@ pub struct Bitcrusher {
 
 impl Bitcrusher {
     pub fn new(rate: f32) -> Self {
+        let rate = sane_rate(rate);
         Self {
             held: [0.0; 2],
             count: 0,

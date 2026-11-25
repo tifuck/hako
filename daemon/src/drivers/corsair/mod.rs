@@ -387,6 +387,9 @@ struct Peripheral {
     max_report_rate: Option<u32>,
     /// The device answered the angle-snapping property on connect.
     angle_snap: bool,
+    /// Host (software) mode was taken: outside it a Bragi DPI write lands in
+    /// the onboard profile.
+    host: bool,
     connected: bool,
     last_error: Option<String>,
     last_keepalive: Instant,
@@ -423,6 +426,7 @@ impl Peripheral {
             report_rate: None,
             max_report_rate: None,
             angle_snap: false,
+            host: false,
             connected: true,
             last_error: None,
             last_keepalive: Instant::now(),
@@ -557,10 +561,12 @@ impl Peripheral {
         if !self.caps.lighting {
             return Ok(());
         }
+        self.host = false;
         if self.onboard() {
             return self.backend.software(false);
         }
         self.backend.software(true)?;
+        self.host = true;
         self.backend.color(frame_color(&self.settings))?;
         if !with_dpi {
             return Ok(());
@@ -808,6 +814,13 @@ impl Peripheral {
                     .store(&headset::sleep(min, self.caps.onboard.sleep_powersave))
             }
             SettingKey::Dpi if self.onboard() => Ok(()),
+            // Host mode first (taking it sends the DPI too), or no DPI write.
+            SettingKey::Dpi if !self.host => {
+                self.apply(true)
+                    .context("DPI not set: the device did not take host mode")?;
+                anyhow::ensure!(self.host, "DPI not set: the device has no host mode");
+                Ok(())
+            }
             SettingKey::Dpi => self.backend.dpi(value.as_int().unwrap_or(0) as u16),
             SettingKey::MicSideTone => self.backend.sidetone(value.as_int().unwrap_or(0) as u8),
             SettingKey::AngleSnapping | SettingKey::LiftOffDistance if self.onboard() => Ok(()),
@@ -1095,6 +1108,59 @@ mod tests {
         assert_eq!(*log.lock().unwrap(), ["sw true", "sw false"]);
         assert!(p.onboard());
         let _ = std::fs::remove_dir_all(&p.paths.root);
+    }
+
+    /// Refuses host mode, like a device whose lighting handle cannot open.
+    struct NoHost(Arc<Mutex<Vec<String>>>);
+
+    impl Backend for NoHost {
+        fn software(&mut self, on: bool) -> Result<()> {
+            self.0.lock().unwrap().push(format!("sw {on}"));
+            anyhow::ensure!(!on, "refused");
+            Ok(())
+        }
+        fn dpi(&mut self, dpi: u16) -> Result<()> {
+            self.0.lock().unwrap().push(format!("dpi {dpi}"));
+            Ok(())
+        }
+    }
+
+    /// In hardware mode a Bragi DPI write would change the onboard profile.
+    #[test]
+    fn dpi_is_only_written_in_host_mode() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let dir =
+            std::env::temp_dir().join(format!("hako-corsair-test-nohost-{}", std::process::id()));
+        let paths = ConfigPaths {
+            root: dir.clone(),
+            config_toml: dir.join("config.toml"),
+            devices_dir: dir.join("devices"),
+            profiles_dir: dir.join("profiles"),
+            remaps_dir: dir.join("remaps"),
+        };
+        let mut p = Peripheral::new(
+            "test".into(),
+            DeviceKind::Mouse,
+            Caps {
+                lighting: true,
+                dpi: Some((100, 18000)),
+                ..Caps::default()
+            },
+            DeviceId {
+                vendor_id: VID,
+                product_id: 0xffff,
+                instance: "t".into(),
+            },
+            0xffff,
+            Box::new(NoHost(log.clone())),
+            paths,
+        )
+        .unwrap();
+        assert!(p.last_error.is_some());
+        let e = p.set(SettingKey::Dpi, SettingValue::Int(800)).unwrap_err();
+        assert!(format!("{e:#}").contains("host mode"), "{e:#}");
+        assert!(!log.lock().unwrap().iter().any(|l| l.starts_with("dpi")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Saved values out of range are fixed before connect sends them.

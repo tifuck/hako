@@ -204,6 +204,7 @@ pub struct Limiter {
 
 impl Limiter {
     pub fn new(rate: f32) -> Self {
+        let rate = sane_rate(rate);
         let n = ((LIMITER_LOOKAHEAD_MS / 1000.0 * rate).round() as usize).max(1);
         Self {
             rate,

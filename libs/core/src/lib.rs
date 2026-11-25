@@ -4,12 +4,15 @@ pub mod catalog;
 pub mod config;
 pub mod device;
 pub mod fx;
+pub mod hotkey;
 pub mod ipc;
+pub mod jarvis;
 pub mod mixer;
 pub mod net;
 pub mod protocol;
 pub mod remap;
 pub mod socket;
+pub mod voice;
 
 pub use catalog::*;
 pub use config::*;

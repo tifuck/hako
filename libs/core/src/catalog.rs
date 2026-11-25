@@ -107,7 +107,7 @@ impl<'de> Deserialize<'de> for SettingKey {
     }
 }
 
-/// UI section a setting belongs to, in tab order.
+/// UI section a setting belongs to (the UI's `Tab` maps groups to pages).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SettingGroup {
     Performance,

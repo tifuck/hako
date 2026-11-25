@@ -452,6 +452,11 @@ fn parse_arctis7_connection(r: &[u8]) -> Option<bool> {
     (r.len() >= 3 && r[..2] == [0x06, 0x14]).then(|| r[2] == CONNECTED)
 }
 
+/// Arctis Pro Wireless `40 aa` reply: `[0]` battery 0-4.
+fn pro_wireless_battery(r: &[u8]) -> Option<u8> {
+    r.first().filter(|&&b| b <= 4).map(|&b| percent(b, 0, 4))
+}
+
 /// First status request of a family (`None`: nothing to poll).
 fn status_request(family: Family) -> Option<Vec<u8>> {
     match family {
@@ -483,17 +488,23 @@ fn parse_status(family: Family, discrete: bool, r: &[u8]) -> Option<Status> {
         },
         // No opcode echo. [1] rf status (1 = headset linked), [2]/[3] battery
         // voltage (big endian), [4] battery status (0x01 charging, 0x02 full,
-        // 0x03 empty, 0xff offline), [9] chat / [10] game dial 0-19.
-        Family::Arctis9 if r.len() >= 11 => Status {
-            online: r[1] == 0x01 && r[4] != 0xff,
-            percent: Some(arctis9_percent(u16::from_be_bytes([r[2], r[3]]), r[4])),
-            charging: r[4] == 0x01,
-            chatmix: mix(r[10], r[9], 19),
-            buds: None,
-        },
-        // [0] 0x02 = offline, 0x04 = online (battery is a second request).
-        Family::ProWireless if !r.is_empty() => Status {
-            online: r[0] != 0x02,
+        // 0x03 empty, 0xff offline), [9] chat / [10] game dial 0-19; a report
+        // with other values there is not this reply.
+        Family::Arctis9
+            if r.len() >= 11 && matches!(r[4], 0..=3 | 0xff) && r[9] <= 19 && r[10] <= 19 =>
+        {
+            Status {
+                online: r[1] == 0x01 && r[4] != 0xff,
+                percent: Some(arctis9_percent(u16::from_be_bytes([r[2], r[3]]), r[4])),
+                charging: r[4] == 0x01,
+                chatmix: mix(r[10], r[9], 19),
+                buds: None,
+            }
+        }
+        // [0] rf mode: 0x01 shut down, 0x02 pairing, 0x04 linked (GG); battery
+        // is a second request.
+        Family::ProWireless if matches!(r.first(), Some(0x01 | 0x02 | 0x04)) => Status {
+            online: r[0] == 0x04,
             ..Status::default()
         },
         // [1] connection (3 = connected), [2] battery 0-4, [3] 0x01 charging,
@@ -1020,14 +1031,13 @@ impl HeadsetAdapter {
             }
         }
         if family == Family::ProWireless && st.online {
-            // [0] battery 0-4.
             st.percent = request(
                 dev,
                 &pad(&[0x40, 0xaa], 31),
-                |r| !r.is_empty(),
+                |r| pro_wireless_battery(r).is_some(),
                 REPLY_TIMEOUT,
             )?
-            .map(|r| percent(r[0], 0, 4));
+            .and_then(|r| pro_wireless_battery(&r));
         }
         if let Some((game, chat)) = st.chatmix.filter(|_| self.spec.chatmix != ChatMix::None) {
             merge_setting(
@@ -1516,6 +1526,21 @@ mod tests {
         r[1] = 1;
         r[4] = 0xff;
         assert!(!parse_status(Family::Arctis9, false, &r).unwrap().online);
+        // Values outside the layout: another report, not the status reply.
+        r[4] = 0x07;
+        assert!(parse_status(Family::Arctis9, false, &r).is_none());
+        r[4] = 0x01;
+        r[9] = 20;
+        assert!(parse_status(Family::Arctis9, false, &r).is_none());
+        // Pro Wireless: [0] rf mode 1 / 2 / 4, battery 0-4.
+        for (mode, online) in [(0x01, false), (0x02, false), (0x04, true)] {
+            let st = parse_status(Family::ProWireless, false, &[mode]).unwrap();
+            assert_eq!(st.online, online, "{mode}");
+        }
+        assert!(parse_status(Family::ProWireless, false, &[0x00]).is_none());
+        assert_eq!(pro_wireless_battery(&[2]), Some(50));
+        assert_eq!(pro_wireless_battery(&[5]), None);
+        assert_eq!(pro_wireless_battery(&[]), None);
         // Voltage steps (GG: 365 / 369 / 382 / 397) and the status overrides.
         for (v, p) in [(364, 0), (365, 25), (369, 50), (382, 75), (397, 100)] {
             assert_eq!(arctis9_percent(v, 0), p, "{v}");

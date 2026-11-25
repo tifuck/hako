@@ -59,18 +59,21 @@ pub enum Sensor {
 }
 
 /// Report-rate ceiling from the identity `type` byte (cable: 2 = 1 kHz,
-/// 3 = 8 kHz; wireless: 0 = 1, 1 = 4, 4 = 2, 5 = 8 kHz).
+/// 3 = 8 kHz; wireless: 0 = 1, 1 = 4, 4 = 2, 5 = 8 kHz). An undocumented
+/// type gets the lowest.
 pub fn type_max_rate(t: u8) -> i64 {
     match t {
-        0 | 2 => 1000,
         1 => 4000,
         4 => 2000,
-        _ => 8000,
+        3 | 5 => 8000,
+        _ => 1000,
     }
 }
 
+/// Only the documented cable types count as wired: an undocumented one is
+/// held like a wireless mouse (the hold is the same `03` with `[6] = 1`).
 pub fn type_wireless(t: u8) -> bool {
-    matches!(t, 0 | 1 | 4 | 5)
+    !matches!(t, 2 | 3)
 }
 
 /// `mid` -> `"Pulsar <name>"` for `cid` 0x57.
@@ -797,6 +800,10 @@ mod tests {
         assert_eq!(type_max_rate(2), 1000);
         assert_eq!(type_max_rate(5), 8000);
         assert!(type_wireless(1) && !type_wireless(3));
+        // Undocumented types: the lowest ceiling, and the wireless hold.
+        assert_eq!(type_max_rate(6), 1000);
+        assert_eq!(type_max_rate(0xff), 1000);
+        assert!(type_wireless(6) && !type_wireless(2));
     }
 
     #[test]

@@ -20,5 +20,7 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 libc = "0.2"
 evdev = "0.13"
+# Voice typing: characters to keys through the user's layout (system libxkbcommon).
+xkbcommon = { version = "0.9", default-features = false }
 # LAN audio: Noise_XX_25519_ChaChaPoly_BLAKE2s (pure Rust).
 snow = { version = "0.10", default-features = false, features = ["std", "use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom"] }

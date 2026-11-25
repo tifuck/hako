@@ -5,16 +5,16 @@ on:
   push:
     tags: ["v*"]
 
+# Build scripts of every dependency run in `build`: it gets no write or OIDC
+# token. Only `publish`, which runs no project code, may attest and release.
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  build:
     # Oldest supported runner: the binaries need its glibc (2.35) or newer.
     runs-on: ubuntu-22.04
     steps:
@@ -25,7 +25,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@9522411a9bce8484da960823fc2f46e52f981f71 # 1.100.0
       # No build cache here: a release must not restore state other runs wrote.
       - name: System deps (egui/winit, PipeWire bindings)
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang pkg-config pipewire-bin libpipewire-0.3-modules
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev clang pkg-config cmake pipewire-bin libpipewire-0.3-modules
+      - name: Speech libraries (sherpa-onnx, pinned)
+        # hako-stt's build script would fetch these unverified; fetch and
+        # check them here instead (the release asset's published digest).
+        run: |
+          d="$RUNNER_TEMP/sherpa" && mkdir -p "$d"
+          f=sherpa-onnx-v2.0.3-linux-x64-static-lib.tar.bz2
+          curl -fsSL -o "$d/$f" "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/$f"
+          echo "f927e695d29b8c7ea3fda97eed215204b210fd57f9faf990a93377bac098ad57  $d/$f" | sha256sum -c -
+          echo "SHERPA_ONNX_ARCHIVE_DIR=$d" >> "$GITHUB_ENV"
       - name: PipeWire 1.0 headers, 0.3.48 library
         run: packaging/pipewire-headers.sh "$RUNNER_TEMP/pw" >> "$GITHUB_ENV"
       - name: Tag matches workspace version
@@ -50,20 +59,33 @@ jobs:
         # Embeds owner/repo so installed builds know where to look for updates.
         env:
           HAKO_REPO: ${{ github.repository }}
+          # hako-stt's speech engine (ggml) must not be tuned to the runner's
+          # CPU: a portable x86-64-v3 floor (AVX2/FMA/F16C, 2013+ CPUs).
+          TRANSCRIBE_CMAKE_ARGS: -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF
         run: cargo build --release --locked --workspace
       - name: Smoke test binaries
         run: |
           # Every PipeWire function must resolve against the runner's 0.3.48.
           LD_BIND_NOW=1 target/release/hakod --version
           target/release/hako --version
-          if ldd target/release/hako target/release/hakod target/release/libhako_fx.so | grep 'not found'; then exit 1; fi
+          if ldd target/release/hako target/release/hakod target/release/libhako_fx.so target/release/hako-stt | grep 'not found'; then exit 1; fi
+          # The worker starts, reports ready and exits when stdin closes.
+          target/release/hako-stt < /dev/null > "$RUNNER_TEMP/stt.out" && grep -aq '"ready"' "$RUNNER_TEMP/stt.out"
+          # The speech engine has no AVX-512 (it would SIGILL on most desktops;
+          # onnxruntime's AVX-512 kernels are picked at runtime, so only ggml
+          # is checked).
+          libs="$(find target/release/build -path '*transcribe-cpp-sys*' -name libggml-cpu.a)"
+          [ -n "$libs" ] || { echo 'libggml-cpu.a not found'; exit 1; }
+          for a in $libs; do
+            if objdump -d --no-show-raw-insn "$a" | grep -qE '\bzmm[0-9]'; then echo "$a uses AVX-512"; exit 1; fi
+          done
       - name: Package
         run: |
           name="hako-${GITHUB_REF_NAME#v}-x86_64-linux"
           d="dist/$name"
           mkdir -p "$d/bin" "$d/lib"
           cp target/release/hakod target/release/hako "$d/bin/"
-          cp target/release/libhako_fx.so "$d/lib/"
+          cp target/release/libhako_fx.so target/release/hako-stt "$d/lib/"
           cp --parents scripts/install-user.sh scripts/fix-hidraw-perms.sh \
             packaging/hako.desktop packaging/systemd/hakod.service \
             udev/70-hako.rules client/assets/icon.png "$d/"
@@ -78,7 +100,7 @@ jobs:
             grep -qE "^[0-9a-f]{64}  $f\$" dist/SHA256SUMS || { echo "SHA256SUMS lacks $f"; exit 1; }
           done
           tar -tzf "dist/$name.tar.gz" > dist/tar.list
-          for f in udev/70-hako.rules scripts/install-user.sh bin/hakod bin/hako lib/libhako_fx.so; do
+          for f in udev/70-hako.rules scripts/install-user.sh bin/hakod bin/hako lib/libhako_fx.so lib/hako-stt; do
             grep -qx "$name/$f" dist/tar.list || { echo "$name.tar.gz lacks $name/$f"; exit 1; }
           done
           rm dist/tar.list
@@ -89,10 +111,35 @@ jobs:
           /usr/bin/hako --version && /usr/bin/hakod --version
           test -f /usr/lib/udev/rules.d/70-hako.rules
           test -f /usr/lib/hako/libhako_fx.so
+          test -x /usr/lib/hako/hako-stt
           test -f /usr/lib/systemd/user/hakod.service
           test -L /etc/systemd/user/default.target.wants/hakod.service
           sudo apt-get remove -y hako
           test ! -e /etc/systemd/user/default.target.wants/hakod.service
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+      - name: Check sums
+        run: cd dist && sha256sum -c SHA256SUMS
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
@@ -103,4 +150,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.deb dist/*.tar.gz dist/SHA256SUMS \
-            --title "hako $GITHUB_REF_NAME" --generate-notes --verify-tag
+            --repo "$GITHUB_REPOSITORY" --title "hako $GITHUB_REF_NAME" --generate-notes --verify-tag

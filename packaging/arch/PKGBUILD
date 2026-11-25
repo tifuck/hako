@@ -2,7 +2,7 @@
 # scripts/publish.sh sets pkgver and the checksum from each release's signed
 # SHA256SUMS; copy the file to the AUR repo after a release.
 pkgname=hako-bin
-pkgver=0.2.18
+pkgver=0.2.19
 pkgrel=1
 pkgdesc='Control panel for gaming keyboards, mice and headsets'
 arch=('x86_64')
@@ -13,18 +13,22 @@ license=('MIT')
 depends=('glibc' 'gcc-libs' 'pipewire' 'systemd' 'lsp-plugins-ladspa'
          'libglvnd' 'wayland' 'libxkbcommon' 'libx11' 'libxcursor' 'libxi' 'libxrandr')
 optdepends=('wireplumber: ChatMix and the mixer'
-            'alsa-utils: line-in input jack and capture level')
+            'alsa-utils: line-in input jack and capture level'
+            'curl: voice model downloads'
+            'wl-clipboard: voice paste output on Wayland'
+            'xclip: voice paste output on X11')
 provides=('hako')
 conflicts=('hako')
 install=hako.install
 _dir="hako-${pkgver}-x86_64-linux"
 source=("${url}/releases/download/v${pkgver}/${_dir}.tar.gz")
-sha256sums=('ef3ed2edbb67110681ad518155e848df124f04a654f31ab64c3520a8e9aa866d')
+sha256sums=('041c065511c4f8d5478868e5a2e462529bafb1a9d0f66edcc456f298e51c989c')
 
 package() {
   cd "$_dir"
   install -Dm755 bin/hako bin/hakod -t "$pkgdir/usr/bin/"
   install -Dm644 lib/libhako_fx.so -t "$pkgdir/usr/lib/hako/"
+  install -Dm755 lib/hako-stt -t "$pkgdir/usr/lib/hako/"
   sed 's|%h/.local/bin/hakod|/usr/bin/hakod|' packaging/systemd/hakod.service \
     | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/hakod.service"
   install -Dm644 packaging/hako.desktop "$pkgdir/usr/share/applications/hako.desktop"

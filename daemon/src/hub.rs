@@ -2,9 +2,12 @@
 
 use crate::drivers::{self, DeviceAdapter, DriverCtx, EventTx, Model, PlaceholderAdapter};
 use crate::hid::HidDeviceInfo;
+use crate::hotkeys::HotkeyService;
+use crate::jarvis::{HubReq, HubRx};
 use crate::mixer::{MixerService, PatchError};
 use crate::net::NetService;
 use crate::remap::RemapEngine;
+use crate::voice::VoiceService;
 use crate::worker::{self, DeviceHandle, Refused};
 use anyhow::{Context, Result};
 use hako_audio::meters::MeterService;
@@ -17,6 +20,7 @@ use hako_core::config::{
     ProfileFile, TomlSetting,
 };
 use hako_core::device::{AudioSummary, DaemonHealth, DeviceId, DeviceKind, HubState};
+use hako_core::hotkey::PatchHotkeysParams;
 use hako_core::ipc::{
     audio_latency_samples, AppSettings, IpcRequest, IpcResponse, Method, ProfileNameParams,
     SetManyParams, SetParams, SnapshotParams, AUDIO_LATENCIES,
@@ -25,6 +29,7 @@ use hako_core::mixer::{MixerFile, PatchMixerParams, Scene};
 use hako_core::net::{PatchNetParams, DISCOVERY_PORT};
 use hako_core::protocol::{is_new_error, AdapterEvent};
 use hako_core::remap::{CancelCaptureParams, ClearRemapParams, SetRemapParams, StartCaptureParams};
+use hako_core::voice::{PatchVoiceParams, VoiceControlParams};
 use hako_core::VERSION;
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -62,6 +67,10 @@ pub struct DaemonHub {
     pub mixer: Arc<MixerService>,
     /// LAN audio: pairing, sessions, network nodes (own threads).
     pub net: Arc<NetService>,
+    /// App-wide hotkeys (`hotkeys.toml`), fed by the remap thread.
+    pub hotkeys: Arc<HotkeyService>,
+    /// Dictation (`voice.toml`, own thread).
+    pub voice: Arc<VoiceService>,
     /// Never held across an await or device I/O (workers own the devices).
     devices: std::sync::Mutex<HashMap<String, DeviceHandle>>,
     events: EventTx,
@@ -82,12 +91,15 @@ pub struct DaemonHub {
     /// The last background failure pushed, for `GetState`: no UI may have
     /// been listening (the startup profile applies before one connects).
     background_error: std::sync::Mutex<Option<String>>,
+    /// Jarvis's requests, until `serve_jarvis` takes them.
+    jarvis: std::sync::Mutex<Option<HubRx>>,
 }
 
 impl DaemonHub {
     pub fn new(paths: ConfigPaths) -> Self {
         let (events, _) = broadcast::channel(64);
-        let remap = RemapEngine::start(paths.clone(), events.clone());
+        let hotkeys = Arc::new(HotkeyService::start(paths.clone(), events.clone()));
+        let remap = RemapEngine::start_with(paths.clone(), events.clone(), Some(hotkeys.link()));
         let audio = AudioService::new();
         let audio_events = events.clone();
         audio.on_error(move |message| {
@@ -120,12 +132,22 @@ impl DaemonHub {
             Some(DISCOVERY_PORT),
             Some(NetAudio::new()),
         );
+        let (jarvis_tx, jarvis_rx) = tokio::sync::mpsc::unbounded_channel();
+        let voice = Arc::new(VoiceService::start(
+            paths.clone(),
+            events.clone(),
+            hotkeys.clone(),
+            jarvis_tx,
+        ));
+        hotkeys.on_trigger(voice.trigger_sink());
         Self {
+            voice,
             paths,
             audio,
             meters: MeterService::new(),
             mixer: Arc::new(mixer),
             net: Arc::new(net),
+            hotkeys,
             devices: std::sync::Mutex::new(HashMap::new()),
             events,
             started: Instant::now(),
@@ -137,6 +159,59 @@ impl DaemonHub {
             discovering: Mutex::new(()),
             stopping: Arc::default(),
             background_error: std::sync::Mutex::new(None),
+            jarvis: std::sync::Mutex::new(Some(jarvis_rx)),
+        }
+    }
+
+    /// Serve Jarvis's requests (spoken commands) on the runtime, through
+    /// `handle` like a UI's. Once; the task ends with the hub.
+    pub fn serve_jarvis(self: &Arc<Self>) {
+        let Some(mut rx) = lock(&self.jarvis).take() else {
+            return;
+        };
+        let hub = Arc::downgrade(self);
+        tokio::spawn(async move {
+            while let Some((req, reply)) = rx.recv().await {
+                let Some(hub) = hub.upgrade() else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let _ = reply.send(hub.jarvis_request(req).await);
+                });
+            }
+        });
+    }
+
+    async fn jarvis_request(&self, req: HubReq) -> Result<serde_json::Value, String> {
+        match req {
+            HubReq::Ipc(method, params) => {
+                let r = self
+                    .handle(IpcRequest {
+                        id: serde_json::Value::Null,
+                        method,
+                        params,
+                    })
+                    .await;
+                match (r.ok, r.error) {
+                    (true, _) => Ok(r.result.unwrap_or_default()),
+                    (false, e) => Err(e.map_or_else(|| "failed".into(), |e| e.message)),
+                }
+            }
+            HubReq::ChatMix { game, chat } => {
+                let (audio, mixer) = (self.audio.clone(), self.mixer.clone());
+                tokio::task::spawn_blocking(move || {
+                    let mixer_on = mixer.state().is_ok_and(|s| s.status.running);
+                    if !audio.chatmix_active() && !mixer_on {
+                        return Err("ChatMix is not running".to_string());
+                    }
+                    audio
+                        .set_chatmix_volumes(game, chat)
+                        .map(|()| serde_json::Value::Null)
+                        .map_err(|e| format!("{e:#}"))
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("ChatMix task: {e}")))
+            }
         }
     }
 
@@ -430,19 +505,24 @@ impl DaemonHub {
     }
 
     /// Save first, then apply live (blocking: audio lock, child processes).
-    /// The legacy line-in fields are stored as given (older UIs send them).
-    fn set_config(&self, s: AppSettings) -> Result<AppSettings> {
+    /// `params` go over the saved settings under the config lock, so two
+    /// partial changes at once keep each other's fields. The legacy line-in
+    /// fields are stored as given (older UIs send them).
+    fn set_config(&self, params: serde_json::Value) -> Result<AppSettings> {
         let (cfg, ()) = update_app_config(&self.paths, |cfg| {
+            let s = serde_json::from_value::<AppSettings>(overlay(&self.app_settings(cfg), params))
+                .map_err(|e| Refused::new("invalid_value", format!("{e:#}")))?;
+            validate_settings(&s).map_err(|e| Refused::new("invalid_value", e))?;
             if !s.log_level.is_empty() {
                 cfg.log_level = s.log_level.clone();
             }
             cfg.chatmix_set_default_sink = s.chatmix_set_default_sink;
             cfg.aux.set_default_sink = s.aux_set_default_sink;
             cfg.aux.auto_enable = s.aux_auto_enable;
-            cfg.aux.effects = s.aux_effects.clone();
-            cfg.theme = s.theme.clone();
+            cfg.aux.effects = s.aux_effects;
+            cfg.theme = s.theme;
             cfg.check_updates = s.check_updates;
-            cfg.audio_latency = s.audio_latency.clone();
+            cfg.audio_latency = s.audio_latency;
             Ok(())
         })?;
         // Each applied even when another fails.
@@ -536,6 +616,10 @@ impl DaemonHub {
                 | Method::StartCapture
                 | Method::PatchMixer
                 | Method::PatchNet
+                | Method::PatchHotkeys
+                | Method::StartHotkeyCapture
+                | Method::PatchVoice
+                | Method::VoiceControl
         );
         (changes && self.stopping.load(Ordering::Relaxed))
             .then(|| IpcResponse::err(req.id.clone(), "busy", "hakod is shutting down"))
@@ -643,7 +727,7 @@ impl DaemonHub {
             },
             Method::DeleteProfile => {
                 match serde_json::from_value::<ProfileNameParams>(req.params) {
-                    Ok(p) => match self.delete_profile(&p.name) {
+                    Ok(p) => match self.delete_profile(&p.name).await {
                         Ok(()) => IpcResponse::ok(id, serde_json::json!({"deleted": p.name})),
                         Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
                     },
@@ -677,21 +761,9 @@ impl DaemonHub {
                 Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
             },
             Method::SetConfig => {
-                let current = match load_app_config(&self.paths) {
-                    Ok(cfg) => self.app_settings(&cfg),
-                    Err(e) => return IpcResponse::err(id, "io", format!("{e:#}")),
-                };
-                match serde_json::from_value::<AppSettings>(overlay(&current, req.params)) {
-                    Ok(s) => {
-                        if let Err(e) = validate_settings(&s) {
-                            return IpcResponse::err(id, "invalid_value", e);
-                        }
-                        match tokio::task::block_in_place(|| self.set_config(s)) {
-                            Ok(saved) => IpcResponse::ok(id, saved),
-                            Err(e) => IpcResponse::err(id, "io", format!("{e:#}")),
-                        }
-                    }
-                    Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+                match tokio::task::block_in_place(|| self.set_config(req.params)) {
+                    Ok(saved) => IpcResponse::ok(id, saved),
+                    Err(e) => IpcResponse::err(id, Refused::code(&e), format!("{e:#}")),
                 }
             }
             Method::GetRemaps => {
@@ -786,6 +858,64 @@ impl DaemonHub {
                 }
                 Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
             },
+            Method::GetHotkeys => {
+                // May read the desktop's shortcuts (gsettings): off the runtime.
+                let hotkeys = self.hotkeys.clone();
+                match tokio::task::spawn_blocking(move || hotkeys.state()).await {
+                    Ok(state) => IpcResponse::ok(id, state),
+                    Err(e) => IpcResponse::err(id, "io", format!("hotkeys task: {e}")),
+                }
+            }
+            Method::PatchHotkeys => {
+                match serde_json::from_value::<PatchHotkeysParams>(req.params) {
+                    Ok(p) => {
+                        // Writes hotkeys.toml: off the runtime.
+                        let hotkeys = self.hotkeys.clone();
+                        match tokio::task::spawn_blocking(move || hotkeys.patch(&p.ops)).await {
+                            Ok(Ok(state)) => IpcResponse::ok(id, state),
+                            Ok(Err(PatchError::Invalid(e))) => {
+                                IpcResponse::err(id, "invalid_value", e)
+                            }
+                            Ok(Err(PatchError::Io(e) | PatchError::Kept(e))) => {
+                                IpcResponse::err(id, "io", format!("{e:#}"))
+                            }
+                            Err(e) => IpcResponse::err(id, "io", format!("hotkeys task: {e}")),
+                        }
+                    }
+                    Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+                }
+            }
+            Method::StartHotkeyCapture => IpcResponse::ok(id, self.hotkeys.start_capture()),
+            Method::CancelHotkeyCapture => IpcResponse::ok(id, self.hotkeys.cancel_capture()),
+            Method::GetVoice => IpcResponse::ok(id, self.voice.state()),
+            Method::PatchVoice => match serde_json::from_value::<PatchVoiceParams>(req.params) {
+                Ok(p) => {
+                    // Writes files, may join a cancelled download: off the runtime.
+                    let voice = self.voice.clone();
+                    match tokio::task::spawn_blocking(move || voice.patch(p.ops)).await {
+                        Ok(Ok(state)) => IpcResponse::ok(id, state),
+                        Ok(Err(PatchError::Invalid(e))) => IpcResponse::err(id, "invalid_value", e),
+                        Ok(Err(PatchError::Io(e) | PatchError::Kept(e))) => {
+                            IpcResponse::err(id, "io", format!("{e:#}"))
+                        }
+                        Err(e) => IpcResponse::err(id, "io", format!("voice task: {e}")),
+                    }
+                }
+                Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+            },
+            Method::VoiceControl => {
+                match serde_json::from_value::<VoiceControlParams>(req.params) {
+                    Ok(p) => {
+                        let voice = self.voice.clone();
+                        match tokio::task::spawn_blocking(move || voice.control(p)).await {
+                            Ok(Ok(state)) => IpcResponse::ok(id, state),
+                            Ok(Err(e)) => IpcResponse::err(id, "invalid_value", e),
+                            Err(e) => IpcResponse::err(id, "io", format!("voice task: {e}")),
+                        }
+                    }
+                    Err(e) => IpcResponse::err(id, "invalid_value", format!("{e:#}")),
+                }
+            }
         }
     }
 
@@ -990,7 +1120,8 @@ impl DaemonHub {
     }
 
     /// Delete a profile and forget it as the one applied at start.
-    fn delete_profile(&self, name: &str) -> Result<()> {
+    async fn delete_profile(&self, name: &str) -> Result<()> {
+        let _one_at_a_time = self.profiles.lock().await;
         if !delete_profile(&self.paths, name)? {
             return Err(Refused::new("not_found", format!("no profile {name:?}")).into());
         }
@@ -1100,6 +1231,9 @@ impl DaemonHub {
             .inspect_err(|_| warn!("shutdown: a discovery pass still runs; not waiting for it"));
         let handles: Vec<_> = lock(&self.devices).drain().map(|(_, h)| h).collect();
         stop_all(&handles).await;
+        // Capture closed, worker ended, the sink unmuted.
+        let voice = self.voice.clone();
+        let _ = tokio::task::spawn_blocking(move || voice.shutdown()).await;
         let mixer = self.mixer.clone();
         let _ = tokio::task::spawn_blocking(move || mixer.shutdown()).await;
         // Tests share the session's audio with the running hakod: never torn down.
@@ -1437,7 +1571,8 @@ pub(crate) mod tests {
         assert!(validate_settings(&s).is_err());
     }
 
-    #[tokio::test]
+    // Validated under the config lock, inside `block_in_place`.
+    #[tokio::test(flavor = "multi_thread")]
     async fn set_config_refuses_bad_values_and_writes_nothing() {
         let hub = hub("set-config-bad");
         update_app_config(&hub.paths, |cfg| {
@@ -1520,6 +1655,19 @@ pub(crate) mod tests {
                 256,
             )),
             net: Arc::new(NetService::start(paths.clone(), events.clone(), None, None)),
+            hotkeys: Arc::new(HotkeyService::start(paths.clone(), events.clone())),
+            // Off (no voice.toml): never records, loads or types.
+            voice: Arc::new(VoiceService::start_in(
+                paths.clone(),
+                crate::voice::Dirs {
+                    models: paths.root.join("models"),
+                    history: paths.root.join("voice"),
+                    runtime: paths.root.join("run"),
+                },
+                events.clone(),
+                Arc::default(),
+                tokio::sync::mpsc::unbounded_channel().0,
+            )),
             audio,
             meters: MeterService::new(),
             devices: Default::default(),
@@ -1533,6 +1681,7 @@ pub(crate) mod tests {
             discovering: Mutex::new(()),
             stopping: Arc::default(),
             background_error: Default::default(),
+            jarvis: Default::default(),
             paths,
         }
     }
@@ -1541,6 +1690,7 @@ pub(crate) mod tests {
         hub.net.shutdown();
         hub.remap.shutdown();
         hub.mixer.shutdown();
+        hub.voice.shutdown();
         let _ = std::fs::remove_dir_all(&hub.paths.root);
     }
 
@@ -1648,12 +1798,12 @@ pub(crate) mod tests {
         hub.save_profile("p").await.unwrap();
         hub.save_profile("q").await.unwrap();
         let last = || load_app_config(&hub.paths).unwrap().last_profile;
-        hub.delete_profile("p").unwrap();
+        hub.delete_profile("p").await.unwrap();
         assert_eq!(list_profiles(&hub.paths).unwrap(), ["q"]);
         assert_eq!(last().as_deref(), Some("q"), "another profile's stays");
-        hub.delete_profile("q").unwrap();
+        hub.delete_profile("q").await.unwrap();
         assert_eq!(last(), None);
-        assert!(hub.delete_profile("q").is_err(), "no such profile");
+        assert!(hub.delete_profile("q").await.is_err(), "no such profile");
         close(hub);
     }
 
@@ -1662,7 +1812,7 @@ pub(crate) mod tests {
         let hub = hub("profile-errors");
         hub.save_profile("p").await.unwrap();
         std::fs::write(&hub.paths.config_toml, "last_profile = [").unwrap();
-        let e = hub.delete_profile("p").unwrap_err();
+        let e = hub.delete_profile("p").await.unwrap_err();
         assert!(format!("{e:#}").contains("deleted \"p\", but"), "{e:#}");
         assert!(list_profiles(&hub.paths).unwrap().is_empty());
         let e = hub.save_profile("r").await.unwrap_err();
@@ -1953,6 +2103,32 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn voice_is_served_over_ipc() {
+        let hub = hub("voice");
+        let call = |method, params| IpcRequest {
+            id: serde_json::json!(1),
+            method,
+            params,
+        };
+        let got = hub
+            .handle(call(Method::GetVoice, serde_json::Value::Null))
+            .await;
+        let state: hako_core::voice::VoiceState =
+            serde_json::from_value(got.result.unwrap()).unwrap();
+        assert_eq!(state.engine, hako_core::voice::EngineStatus::Off);
+        let ops = serde_json::json!({"ops": [{"op": "set_language", "language": "de"}]});
+        let set = hub.handle(call(Method::PatchVoice, ops)).await;
+        assert_eq!(set.result.unwrap()["file"]["language"], "de");
+        let ops = serde_json::json!({"ops": [{"op": "download", "id": "nope", "quant": "Q8_0"}]});
+        let bad = hub.handle(call(Method::PatchVoice, ops)).await;
+        assert_eq!(bad.error.unwrap().code, "invalid_value");
+        let start = serde_json::json!({"action": "start"});
+        let off = hub.handle(call(Method::VoiceControl, start)).await;
+        assert_eq!(off.error.unwrap().code, "invalid_value");
+        close(hub);
+    }
+
+    #[tokio::test]
     async fn offline_devices_do_not_fail_a_profile() {
         let hub = hub("offline");
         let paths = hub.paths.clone();
@@ -2089,7 +2265,7 @@ pub(crate) mod tests {
         hub.apply_profile("p", false).await.unwrap();
         assert!(!modified(), "applied");
         assert!(hub.handle(set(700)).await.error.is_none());
-        hub.delete_profile("p").unwrap();
+        hub.delete_profile("p").await.unwrap();
         assert!(!modified(), "forgotten");
         stop_all(&[h]).await;
         close(hub);
@@ -2491,6 +2667,41 @@ pub(crate) mod tests {
         let got = hub.handle(patch(mute)).await;
         assert_eq!(got.error.unwrap().code, "busy");
         assert_eq!(std::fs::read(&file).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&hub.paths.root);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hotkey_requests_reach_the_hotkey_service() {
+        let hub = hub("hotkeys");
+        let req = |method, params| IpcRequest {
+            id: serde_json::json!(1),
+            method,
+            params,
+        };
+        let got = hub
+            .handle(req(Method::GetHotkeys, serde_json::json!({})))
+            .await;
+        let state: hako_core::hotkey::HotkeysState =
+            serde_json::from_value(got.result.unwrap()).unwrap();
+        assert_eq!(state.file.bindings.len(), 2);
+        let remove = serde_json::json!({"ops": [{"op": "remove", "id": "cancel"}]});
+        let got = hub.handle(req(Method::PatchHotkeys, remove.clone())).await;
+        assert!(got.error.is_none(), "{:?}", got.error);
+        let got = hub.handle(req(Method::PatchHotkeys, remove)).await;
+        assert_eq!(got.error.unwrap().code, "invalid_value");
+        let got = hub
+            .handle(req(Method::StartHotkeyCapture, serde_json::json!(null)))
+            .await;
+        assert!(got.error.is_none());
+        let got = hub
+            .handle(req(Method::CancelHotkeyCapture, serde_json::json!(null)))
+            .await;
+        assert_eq!(got.result.unwrap()["cancelled"], true);
+        hub.shutdown().await;
+        let got = hub
+            .handle(req(Method::StartHotkeyCapture, serde_json::json!(null)))
+            .await;
+        assert_eq!(got.error.unwrap().code, "busy");
         let _ = std::fs::remove_dir_all(&hub.paths.root);
     }
 

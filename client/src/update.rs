@@ -99,9 +99,38 @@ impl Ready {
     }
 }
 
-/// Where this build updates from: `(owner/repo, installed hako path)`.
-/// Resolve once at startup: after an update the running exe is replaced.
-pub fn target() -> Option<(&'static str, PathBuf)> {
+/// Which file the installed binary is, and its last change: another window
+/// (or apt) installing a newer hako since this process started changes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stamp {
+    dev: u64,
+    ino: u64,
+    mtime: (i64, i64),
+}
+
+fn stamp(bin: &Path) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(bin).ok()?;
+    Some(Stamp {
+        dev: m.dev(),
+        ino: m.ino(),
+        mtime: (m.mtime(), m.mtime_nsec()),
+    })
+}
+
+/// Fails when `bin` is no longer the binary this process started from: an
+/// old window must not install its (older) download over a newer hako.
+fn still_installed(bin: &Path, started: &Stamp) -> Result<()> {
+    if stamp(bin).as_ref() != Some(started) {
+        bail!("hako was updated since this window opened; reopen hako");
+    }
+    Ok(())
+}
+
+/// Where this build updates from: `(owner/repo, installed hako path, its
+/// stamp)`. Resolve once at startup: after an update the running exe is
+/// replaced.
+pub fn target() -> Option<(&'static str, PathBuf, Stamp)> {
     let repo = REPO.filter(|r| !r.is_empty())?;
     let exe = std::env::current_exe().ok()?;
     let user = PathBuf::from(std::env::var_os("HOME")?).join(".local/bin/hako");
@@ -110,7 +139,7 @@ pub fn target() -> Option<(&'static str, PathBuf)> {
         .into_iter()
         .flatten()
         .find(|bin| std::fs::canonicalize(bin).is_ok_and(|b| b == exe))
-        .map(|bin| (repo, bin))
+        .and_then(|bin| Some((repo, bin, stamp(&exe)?)))
 }
 
 /// Installed from the `.deb`, so apt owns the files.
@@ -202,9 +231,10 @@ fn asset(
 /// Private download folder: in the user's cache, never a guessable `/tmp`
 /// path another user could swap the package in before it is installed as root.
 fn download_dir() -> Result<PathBuf> {
+    // A relative XDG_CACHE_HOME is invalid and ignored (XDG base dir spec).
     let cache = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|d| !d.is_empty())
         .map(PathBuf::from)
+        .filter(|d| d.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .context("no home directory")?;
     Ok(cache.join("hako/update"))
@@ -246,7 +276,8 @@ impl Drop for Discard<'_> {
 }
 
 /// Download and verify `rel`, replacing any earlier download. The signed
-/// checksums come first: only a build they list is downloaded.
+/// checksums come first: only a build they list is downloaded, and one
+/// already on disk (another window's) is kept, not fetched again.
 pub fn download(rel: &Release) -> Result<Ready> {
     download_to(&download_dir()?, SIGNING_KEY, rel)
 }
@@ -254,9 +285,6 @@ pub fn download(rel: &Release) -> Result<Ready> {
 /// [`download`] into `dir`, trusting releases signed by `key`.
 fn download_to(dir: &Path, key: &str, rel: &Release) -> Result<Ready> {
     let _lock = lock(dir)?;
-    let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir)?;
-    let mut discard = Discard { dir, keep: false };
     let sums = fetch(&[&rel.sums_url], SUMS_MAX)?;
     fetch(&[&rel.sig_url], SUMS_MAX)
         .with_context(|| {
@@ -274,19 +302,24 @@ fn download_to(dir: &Path, key: &str, rel: &Release) -> Result<Ready> {
         )));
     };
     let file = dir.join(&rel.name);
-    fetch(&[&rel.url], ASSET_MAX)
-        .and_then(|body| Ok(std::fs::write(&file, body)?))
-        .context("download failed")?;
-    let got = String::from_utf8(run(Command::new("/usr/bin/sha256sum").arg(&file))?)?;
-    if got.split_whitespace().next() != Some(want.as_str()) {
+    let ready = Ready {
+        version: rel.version.clone(),
+        file: file.clone(),
+        sum: want,
+    };
+    if std::fs::read(&file).is_ok_and(|d| sha256(&d).is_ok_and(|s| s == ready.sum)) {
+        return Ok(ready);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir)?;
+    let mut discard = Discard { dir, keep: false };
+    let body = fetch(&[&rel.url], ASSET_MAX).context("download failed")?;
+    if sha256(&body)? != ready.sum {
         bail!(Rejected("checksum mismatch, download discarded".into()));
     }
+    std::fs::write(&file, body).context("download failed")?;
     discard.keep = true;
-    Ok(Ready {
-        version: rel.version.clone(),
-        file,
-        sum: want,
-    })
+    Ok(ready)
 }
 
 /// Remove a download no release wants any more (hako was updated another
@@ -309,9 +342,10 @@ fn remove_download(dir: &Path) {
 /// when the device rules could not be updated or the daemon did not restart
 /// (the update is installed either way). The download is kept on
 /// failure so the user can retry.
-pub fn install(ready: &Ready) -> Result<Option<String>> {
+pub fn install(ready: &Ready, bin: &Path, started: &Stamp) -> Result<Option<String>> {
     let dir = ready.file.parent().context("bad download path")?;
     let _lock = lock(dir)?;
+    still_installed(bin, started)?;
     let res = install_file(&ready.file, &ready.sum, dir);
     if res.is_ok() {
         let _ = std::fs::remove_dir_all(dir);
@@ -497,13 +531,9 @@ fn copy_capped(cmd: &mut Command, max: u64, sink: &mut impl std::io::Write) -> R
     Ok(())
 }
 
-/// Run to completion; stdout on success, stderr as the error.
-fn run(cmd: &mut Command) -> Result<Vec<u8>> {
-    run_input(cmd, &[])
-}
-
-/// [`run`] with `input` as stdin, written from another thread so a child
-/// filling its stdout pipe cannot deadlock.
+/// Run to completion with `input` as stdin, written from another thread so
+/// a child filling its stdout pipe cannot deadlock; stdout on success,
+/// stderr as the error.
 fn run_input(cmd: &mut Command, input: &[u8]) -> Result<Vec<u8>> {
     use std::io::Write;
     let mut child = cmd
@@ -571,10 +601,19 @@ fn verify_signature(key: &str, data: &[u8], sig: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// SHA-256 of `data` (lowercase hex). `sha256sum` reads it over stdin, so
+/// no path is ever parsed or printed back.
+fn sha256(data: &[u8]) -> Result<String> {
+    let out = String::from_utf8(run_input(&mut Command::new("/usr/bin/sha256sum"), data)?)?;
+    out.split_whitespace()
+        .next()
+        .map(str::to_string)
+        .context("sha256sum printed no sum")
+}
+
 /// Fails unless `data` still hashes to `want`, the sum `download` verified.
 fn check_sum(data: &[u8], want: &str) -> Result<()> {
-    let got = String::from_utf8(run_input(&mut Command::new("/usr/bin/sha256sum"), data)?)?;
-    if got.split_whitespace().next() != Some(want) {
+    if sha256(data)? != want {
         bail!("checksum mismatch, the download changed since it was verified");
     }
     Ok(())
@@ -643,6 +682,10 @@ fn expected_sum(sums: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(cmd: &mut Command) -> Result<Vec<u8>> {
+        run_input(cmd, &[])
+    }
 
     #[test]
     fn versions_compare_numerically() {
@@ -766,6 +809,20 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(files, [name]);
+        // Another window downloading the same release keeps the verified
+        // file rather than deleting it (the asset is gone from the server).
+        let ok = root.join("ok");
+        std::fs::remove_file(ok.join(name)).unwrap();
+        let rel = Release {
+            version: "9.9.9".into(),
+            name: name.into(),
+            url: format!("file://{}", ok.join(name).display()),
+            sums_url: format!("file://{}", ok.join("SHA256SUMS").display()),
+            sig_url: format!("file://{}", ok.join("SHA256SUMS.sig").display()),
+        };
+        let again = download_to(&dir, &public(&good), &rel).unwrap();
+        assert_eq!(again.file, dir.join(name));
+        assert_eq!(std::fs::read(&again.file).unwrap(), b"build");
 
         let rejected_with = |(res, dir): (Result<Ready>, PathBuf), msg: &str| {
             let e = res.unwrap_err();
@@ -815,6 +872,24 @@ mod tests {
         assert!(format!("{e:#}").contains("checksum mismatch"), "{e:#}");
         assert!(!dir.exists());
         std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_old_window_does_not_install_over_a_newer_hako() {
+        let dir = std::env::temp_dir().join(format!("hako-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("hako");
+        std::fs::write(&bin, b"0.2.5").unwrap();
+        let started = stamp(&bin).unwrap();
+        assert!(still_installed(&bin, &started).is_ok());
+        // install-user.sh puts a new file in place.
+        std::fs::write(dir.join("new"), b"0.2.6").unwrap();
+        std::fs::rename(dir.join("new"), &bin).unwrap();
+        let e = still_installed(&bin, &started).unwrap_err();
+        assert!(format!("{e:#}").contains("reopen hako"), "{e:#}");
+        std::fs::remove_file(&bin).unwrap();
+        assert!(still_installed(&bin, &started).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

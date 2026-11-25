@@ -367,17 +367,11 @@ fn protocol(desc: &[u8]) -> Option<Protocol> {
 /// then Usage 0x01 (or one 4-byte usage 0x00590001), any global / local items
 /// between, then Collection (Application); every item in any data size.
 pub fn udev_pattern() -> String {
-    let byte = " [0-9a-f]{2}";
-    // Non-main short items: type bits (2-3) global or local, by data size.
-    let item = format!(
-        "( [0-9a-f][48]| [0-9a-f][59]{byte}| [0-9a-f][6a]{}| [0-9a-f][7b]{})",
-        byte.repeat(2),
-        byte.repeat(4)
-    );
-    let page = "( 05 59| 06 59 00| 07 59 00 00 00)";
-    let usage = "( 09 01| 0a 01 00| 0b 01 00 00 00)";
-    let collection = "( a1 01| a2 01 00| a3 01 00 00 00)";
-    format!("({page}{item}*{usage}| 0b 01 00 59 00){item}*{collection}")
+    crate::drivers::udev_application(
+        "( 05 59| 06 59 00| 07 59 00 00 00)",
+        "( 09 01| 0a 01 00| 0b 01 00 00 00)",
+        " 0b 01 00 59 00",
+    )
 }
 
 /// A lamp's level counts (Red, Green, Blue, Intensity), HUTRR84 3.2.4.
@@ -567,7 +561,7 @@ fn open(pid: u16, ctx: &DriverCtx) -> Opened {
     };
     a.battery = kernel_battery(&a.hid_dirs);
     // Device state is volatile; re-apply a host colour, leave onboard alone.
-    if a.effect() == "static" {
+    if a.restore_on_open() {
         a.last_error = a.apply().err().map(|e| e.to_string());
     }
     Ok(vec![Box::new(a)])
@@ -601,6 +595,16 @@ impl LampArrayAdapter {
         get_setting(&self.settings, SettingKey::Effect)
             .and_then(SettingValue::as_str)
             .unwrap_or(default)
+    }
+
+    /// A static look the owner saved: never painted on a device that was
+    /// only discovered.
+    fn restore_on_open(&self) -> bool {
+        self.effect() == "static"
+            && [SettingKey::Effect, SettingKey::Brightness]
+                .into_iter()
+                .chain(COLOR_KEYS)
+                .any(|k| get_setting(&self.settings, k).is_some())
     }
 
     fn controls(&self) -> Vec<SettingMeta> {
@@ -1172,6 +1176,52 @@ mod tests {
         assert!(a.settings.is_empty(), "rolled back");
         assert_eq!(std::fs::read_dir(&paths.devices_dir).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_a_saved_static_look_is_restored_on_open() {
+        let root = temp_root("restore");
+        let mut proto = spec();
+        proto.control = None;
+        let mut a = LampArrayAdapter {
+            id: DeviceId {
+                vendor_id: 0x1234,
+                product_id: 0x5678,
+                instance: "x".into(),
+            },
+            kind: DeviceKind::Other,
+            name: "Lamp".into(),
+            dev: None,
+            proto,
+            lamps: Vec::new(),
+            interval: Duration::ZERO,
+            last_update: None,
+            settings: SettingsMap::new(),
+            paths: ConfigPaths {
+                config_toml: root.join("config.toml"),
+                devices_dir: root.join("devices"),
+                profiles_dir: root.join("profiles"),
+                remaps_dir: root.join("remaps"),
+                root: root.clone(),
+            },
+            last_error: None,
+            hid_dirs: Vec::new(),
+            battery: None,
+            last_poll: Instant::now(),
+        };
+        // No control report: "static" by default, but nothing was saved.
+        assert_eq!(a.effect(), "static");
+        assert!(!a.restore_on_open());
+        a.settings.insert("color_g".into(), SettingValue::Int(0));
+        assert!(a.restore_on_open());
+        a.settings.clear();
+        a.settings
+            .insert("effect".into(), SettingValue::Text("static".into()));
+        assert!(a.restore_on_open());
+        a.proto.control = spec().control;
+        a.settings
+            .insert("effect".into(), SettingValue::Text("onboard".into()));
+        assert!(!a.restore_on_open());
     }
 
     #[test]

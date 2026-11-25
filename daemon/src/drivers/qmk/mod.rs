@@ -93,6 +93,16 @@ fn is_raw_hid(desc: &[u8]) -> bool {
     false
 }
 
+/// ERE for the udev rule: a raw HID collection as [`is_raw_hid`] finds one
+/// (Usage Page 0xFF60 then Usage 0x61, or one 4-byte usage 0xFF600061).
+pub fn udev_pattern() -> String {
+    crate::drivers::udev_application(
+        "( 06 60 ff| 07 60 ff 00 00)",
+        "( 09 61| 0a 61 00| 0b 61 00 00 00)",
+        " 0b 61 00 60 ff",
+    )
+}
+
 fn display_name(nodes: &[&HidDeviceInfo]) -> String {
     let named = nodes.iter().map(|n| n.name.trim()).find(|n| !n.is_empty());
     match (named, nodes.first()) {
@@ -664,6 +674,67 @@ mod tests {
             0x06, 0x60, 0xff, 0x09, 0x61, 0xa1, 0x02, 0xc0
         ]));
         assert!(!is_raw_hid(&[]));
+    }
+
+    /// The generated udev rule grants access to the descriptors the probe
+    /// claims, whatever item sizes they use.
+    #[test]
+    fn udev_rule_matches_what_the_probe_claims() {
+        let rules = crate::drivers::udev_rules();
+        let line = rules
+            .lines()
+            .skip_while(|l| !l.starts_with("# QMK / VIA"))
+            .find(|l| l.contains("PROGRAM="))
+            .unwrap();
+        let program = line.split("PROGRAM=\"").nth(1).unwrap();
+        let program = program
+            .split("\", MODE")
+            .next()
+            .unwrap()
+            .replace("\\\"", "\"");
+        let path = std::env::temp_dir().join(format!("hako-qmk-desc-{}", std::process::id()));
+        let program = program.replace("/sys%p/device/report_descriptor", path.to_str().unwrap());
+        let rule = |desc: &[u8]| {
+            std::fs::write(&path, desc).unwrap();
+            std::process::Command::new("/bin/sh")
+                .args(["-c", &program])
+                .status()
+                .unwrap()
+                .success()
+        };
+        let cases: [(&str, &[u8]); 8] = [
+            ("qmk", &QMK_RAW),
+            (
+                "extended",
+                &[0x0b, 0x61, 0x00, 0x60, 0xff, 0xa1, 0x01, 0xc0],
+            ),
+            // 2-byte usage (holds 0x0a, a newline to grep) after a global item.
+            (
+                "usage16",
+                &[
+                    0x06, 0x60, 0xff, 0x15, 0x00, 0x0a, 0x61, 0x00, 0xa1, 0x01, 0xc0,
+                ],
+            ),
+            (
+                "page32",
+                &[0x07, 0x60, 0xff, 0x00, 0x00, 0x09, 0x61, 0xa1, 0x01, 0xc0],
+            ),
+            (
+                "other usage",
+                &[0x06, 0x60, 0xff, 0x09, 0x74, 0xa1, 0x01, 0xc0],
+            ),
+            (
+                "other page",
+                &[0x06, 0x00, 0xff, 0x09, 0x61, 0xa1, 0x01, 0xc0],
+            ),
+            ("logical", &[0x06, 0x60, 0xff, 0x09, 0x61, 0xa1, 0x02, 0xc0]),
+            ("keyboard", &[0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0xc0]),
+        ];
+        for (name, desc) in cases {
+            assert_eq!(rule(desc), is_raw_hid(desc), "{name}");
+        }
+        assert!(rule(&QMK_RAW));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

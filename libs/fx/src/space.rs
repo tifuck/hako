@@ -102,6 +102,7 @@ pub struct Reverb {
 
 impl Reverb {
     pub fn new(rate: f32) -> Self {
+        let rate = sane_rate(rate);
         let scale = rate / 44100.0;
         let len =
             |n: usize, ch: usize| (((n + ch * SPREAD) as f32 * scale).round() as usize).max(1);

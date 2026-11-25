@@ -58,8 +58,13 @@ const PENDING: Duration = Duration::from_secs(60);
 /// A denied key is refused for this long, and so are pairing requests
 /// from an address whose last one ended unanswered.
 const DENIED: Duration = Duration::from_secs(60);
-/// Addresses cooling down after an unanswered request (the oldest goes).
+/// Addresses cooling down after an unanswered request; while this many
+/// are, pairing requests from other addresses are `Busy` too.
 const MAX_COOLING: usize = 64;
+/// Pairing requests admitted (each one's nonce revealed) per `REVEAL_WINDOW`
+/// from all addresses together: the pairing code cannot be ground faster.
+const MAX_REVEALS: usize = 5;
+const REVEAL_WINDOW: Duration = Duration::from_secs(60);
 const MAX_PENDING: usize = 4;
 /// Pairing requests waiting from one IP address.
 const MAX_PENDING_PER_IP: usize = 1;
@@ -280,6 +285,9 @@ struct Inner {
     /// Addresses whose pairing request ended unanswered, and when: new
     /// requests from them are `Busy` for `DENIED` (keys cost nothing).
     cooling: HashMap<IpAddr, Instant>,
+    /// When pairing requests were admitted, the last `REVEAL_WINDOW` (see
+    /// `MAX_REVEALS`).
+    revealed: Vec<Instant>,
     /// Reconnects in flight.
     dialing: HashSet<String>,
     /// Paired machines being reconnected, by key.
@@ -699,6 +707,9 @@ impl Shared {
                         .map(|()| stage)
                         .map_err(|e| (Control::Bye, e))
                 });
+            if let Ok(Stage::Incoming) = admitted {
+                inner.revealed.push(Instant::now());
+            }
             (admitted, old)
         };
         if let Some(old) = old {
@@ -712,10 +723,14 @@ impl Shared {
                 bail!("{}: {e}", s.name);
             }
         };
-        let revealed = writer.write_all(&reveal);
+        // The Hello right after it: a ping in between fails the dialler.
+        let revealed = writer
+            .write_all(&reveal)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| s.cipher.seal_control(&hello))
+            .and_then(|frame| Ok(writer.write_all(&frame)?));
         drop(writer);
-        let setup = revealed.map_err(anyhow::Error::from).and_then(|()| {
-            s.send(&hello)?;
+        let setup = revealed.and_then(|()| {
             if stage == Stage::Live {
                 self.go_live(&s, false).map_err(|e| anyhow!(message(e)))?;
                 s.send(&Control::Accepted)?;
@@ -1247,7 +1262,7 @@ impl Shared {
                         Stage::Confirm => Control::Denied,
                         _ => Control::Bye,
                     };
-                    Some((e.session.clone(), bye, silent))
+                    Some((e.session.clone(), e.stage, bye, silent))
                 })
                 .collect();
             inner
@@ -1256,6 +1271,9 @@ impl Shared {
             inner
                 .cooling
                 .retain(|_, at| now.duration_since(*at) < DENIED);
+            inner
+                .revealed
+                .retain(|at| now.duration_since(*at) < REVEAL_WINDOW);
             expire(&mut inner.nearby, now);
             inner.stats = lock(&self.links)
                 .values()
@@ -1299,7 +1317,15 @@ impl Shared {
             };
             (stale, sessions, dials, beacon)
         };
-        for (s, bye, silent) in &stale {
+        for (s, stage, bye, silent) in &stale {
+            // Accepted or confirmed since: closing it would leave a pin.
+            let unchanged = lock(&self.inner)
+                .sessions
+                .get(&s.key)
+                .is_some_and(|e| Arc::ptr_eq(&e.session, s) && e.stage == *stage);
+            if !unchanged {
+                continue;
+            }
             if *silent {
                 warn!(
                     "net: {}: silent for {} s, disconnected",
@@ -1524,6 +1550,10 @@ fn admission(
         Err((Control::Denied, "not paired"))
     } else if inner.cooling.contains_key(&ip) {
         Err((Control::Busy, "its last pairing request ended unanswered"))
+    } else if inner.cooling.len() >= MAX_COOLING {
+        Err((Control::Busy, "too many unanswered pairing requests"))
+    } else if inner.revealed.len() >= MAX_REVEALS {
+        Err((Control::Busy, "too many pairing requests this minute"))
     } else if waiting(None) >= MAX_PENDING || waiting(Some(ip)) >= MAX_PENDING_PER_IP {
         Err((Control::Busy, "too many pairing requests"))
     } else {
@@ -1641,15 +1671,13 @@ impl Drop for Dialing {
     }
 }
 
-/// Note that `ip`'s pairing request ended unanswered (see `MAX_COOLING`).
+/// Note that `ip`'s pairing request ended unanswered. Nothing is evicted:
+/// while `MAX_COOLING` addresses cool down, `admission` refuses every
+/// other one.
 fn cool_down(cooling: &mut HashMap<IpAddr, Instant>, ip: IpAddr, now: Instant) {
-    if cooling.len() >= MAX_COOLING && !cooling.contains_key(&ip) {
-        let oldest = cooling.iter().min_by_key(|(_, at)| **at).map(|(ip, _)| *ip);
-        if let Some(ip) = oldest {
-            cooling.remove(&ip);
-        }
+    if cooling.len() < MAX_COOLING || cooling.contains_key(&ip) {
+        cooling.insert(ip, now);
     }
-    cooling.insert(ip, now);
 }
 
 /// The wait after reconnect attempt `n` (1-based): `REDIAL`, doubling, at
@@ -2733,13 +2761,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&c_paths.root);
         done([(a, a_paths), (b, b_paths)]);
 
-        let (mut cooling, now) = (HashMap::new(), Instant::now());
+        // A full list evicts nobody: every other address is refused until
+        // entries expire (rotating addresses buys no reveals).
+        let mut inner = Inner::default();
+        let now = Instant::now();
         for i in 0..=MAX_COOLING as u32 {
             let at = now + Duration::from_millis(i.into());
-            cool_down(&mut cooling, Ipv4Addr::from(i).into(), at);
+            cool_down(&mut inner.cooling, Ipv4Addr::from(i).into(), at);
         }
-        assert_eq!(cooling.len(), MAX_COOLING);
-        assert!(!cooling.contains_key(&Ipv4Addr::from(0).into()), "oldest");
+        assert_eq!(inner.cooling.len(), MAX_COOLING);
+        assert!(
+            inner.cooling.contains_key(&Ipv4Addr::from(0).into()),
+            "oldest"
+        );
+        let (own, new) = ("ff".repeat(32), "ee".repeat(32));
+        let unseen = IpAddr::from([10, 0, 0, 1]);
+        assert_eq!(
+            admission(&inner, &own, &new, unseen, true),
+            Err((Control::Busy, "too many unanswered pairing requests"))
+        );
+        inner.cooling.remove(&Ipv4Addr::from(0).into());
+        assert_eq!(
+            admission(&inner, &own, &new, unseen, true),
+            Ok(Stage::Incoming)
+        );
+    }
+
+    #[test]
+    fn pairing_reveals_have_a_budget_across_addresses() {
+        let (own, new, known) = ("ff".repeat(32), "ee".repeat(32), "dd".repeat(32));
+        let mut inner = Inner::default();
+        inner.file.peers.push(Peer {
+            id: peer_id(&known),
+            name: "Known".into(),
+            key: known.clone(),
+            jitter_ms: DEFAULT_JITTER_MS,
+            address: None,
+        });
+        let ip = |n: u8| IpAddr::from([10, 0, 0, n]);
+        inner.revealed = vec![Instant::now(); MAX_REVEALS];
+        assert_eq!(
+            admission(&inner, &own, &new, ip(9), true),
+            Err((Control::Busy, "too many pairing requests this minute"))
+        );
+        // A paired key's reconnect costs no reveal budget.
+        assert_eq!(
+            admission(&inner, &own, &known, ip(9), false),
+            Ok(Stage::Live)
+        );
+        inner.revealed.pop();
+        assert_eq!(
+            admission(&inner, &own, &new, ip(9), true),
+            Ok(Stage::Incoming)
+        );
     }
 
     #[test]
@@ -2777,6 +2851,7 @@ mod tests {
         let (stream, refused) = ask();
         assert_eq!(refused, None);
         assert_eq!(b.state().requests.len(), 1);
+        assert_eq!(lock(&b.shared.inner).revealed.len(), 1);
         // Given up at once: its address cools down, so retrying for another
         // code gets no reveal.
         drop(stream);

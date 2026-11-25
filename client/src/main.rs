@@ -8,6 +8,7 @@ use eframe::egui;
 use hako_core::catalog::{ControlKind, SettingKey, SettingValue};
 use hako_core::default_socket_path;
 use hako_core::device::{DeviceSnapshot, HubState};
+use hako_core::hotkey::{HotkeyCaptureState, HotkeysState, PatchHotkeysParams};
 use hako_core::ipc::{
     AppSettings, EventKind, IpcEvent, IpcRequest, IpcResponse, MeterLevels, MeterTargetSpec,
     Method, ProfileNameParams, SetManyParams, SetParams, SubscribeMetersParams,
@@ -16,6 +17,9 @@ use hako_core::mixer::{MixerState, PatchMixerParams};
 use hako_core::net::{NetState, PatchNetParams};
 use hako_core::remap::{
     CancelCaptureParams, ClearRemapParams, DeviceRemaps, SetRemapParams, StartCaptureParams,
+};
+use hako_core::voice::{
+    PatchVoiceParams, VoiceAction, VoiceControlParams, VoicePartial, VoiceState,
 };
 use hako_core::{read_json_frame, write_json_frame};
 use hako_ui::widgets::{Tone, UpdateOffer};
@@ -58,11 +62,46 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 #[derive(Parser, Debug)]
 #[command(name = "hako", version, about = "hako control panel")]
 struct Cli {
-    #[arg(long, default_value = "info")]
+    #[arg(long, default_value = "info", global = true)]
     log_level: String,
 
-    #[arg(long)]
+    #[arg(long, global = true)]
     socket: Option<std::path::PathBuf>,
+
+    /// Without a command the control panel opens.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug, PartialEq)]
+enum Command {
+    /// Control dictation (for scripts and desktop shortcuts).
+    Voice {
+        #[arg(value_enum)]
+        action: VoiceVerb,
+        /// Use the alternate profile.
+        #[arg(long)]
+        alt: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq)]
+enum VoiceVerb {
+    Start,
+    Stop,
+    Toggle,
+    Cancel,
+}
+
+impl From<VoiceVerb> for VoiceAction {
+    fn from(v: VoiceVerb) -> Self {
+        match v {
+            VoiceVerb::Start => Self::Start,
+            VoiceVerb::Stop => Self::Stop,
+            VoiceVerb::Toggle => Self::Toggle,
+            VoiceVerb::Cancel => Self::Cancel,
+        }
+    }
 }
 
 struct App {
@@ -76,11 +115,17 @@ struct App {
     mixer_rev: u64,
     /// `ClientState::net_rev` the UI has seen.
     net_rev: u64,
+    /// `ClientState::hotkeys_rev` / `voice_rev` / `capture_rev` /
+    /// `partial_rev` the UI has seen.
+    hotkeys_rev: u64,
+    voice_rev: u64,
+    capture_rev: u64,
+    partial_rev: u64,
     /// `ClientState::settings_rev` the UI has adopted.
     settings_rev: u64,
     rt: Handle,
     /// `(owner/repo, installed binary)` when this build can update itself.
-    updater: Option<(&'static str, PathBuf)>,
+    updater: Option<(&'static str, PathBuf, update::Stamp)>,
     meters: Arc<Mutex<Meters>>,
 }
 
@@ -120,6 +165,9 @@ struct ClientState {
     pending: usize,
     /// Newer release, downloaded and waiting for a restart.
     update: Option<update::Ready>,
+    /// "Later" was picked: `update` stays downloaded but is not offered
+    /// until the next check.
+    update_dismissed: bool,
     /// Looking for or downloading a release.
     checking: bool,
     /// Installing `update`.
@@ -143,6 +191,23 @@ struct ClientState {
     net_rev: u64,
     /// `PatchNet` calls sent and not yet answered.
     net_pending: usize,
+    /// Latest hotkeys from `GetHotkeys` / `PatchHotkeys` / `HotkeysUpdated`,
+    /// or why `GetHotkeys` failed; `hotkeys_rev` counts changes.
+    hotkeys: Option<Result<HotkeysState, String>>,
+    hotkeys_rev: u64,
+    /// `PatchHotkeys` calls sent and not yet answered.
+    hotkeys_pending: usize,
+    /// Latest chord capture state; `capture_rev` counts changes.
+    capture: Option<HotkeyCaptureState>,
+    capture_rev: u64,
+    /// Latest Voice state, like `hotkeys`.
+    voice: Option<Result<VoiceState, String>>,
+    voice_rev: u64,
+    /// `PatchVoice` calls sent and not yet answered.
+    voice_pending: usize,
+    /// Latest live transcript; `partial_rev` counts changes.
+    partial: Option<VoicePartial>,
+    partial_rev: u64,
 }
 
 impl ClientState {
@@ -154,6 +219,21 @@ impl ClientState {
     fn set_net(&mut self, n: Result<NetState, String>) {
         self.net = Some(n);
         self.net_rev += 1;
+    }
+
+    fn set_hotkeys(&mut self, h: Result<HotkeysState, String>) {
+        self.hotkeys = Some(h);
+        self.hotkeys_rev += 1;
+    }
+
+    fn set_capture(&mut self, c: HotkeyCaptureState) {
+        self.capture = Some(c);
+        self.capture_rev += 1;
+    }
+
+    fn set_voice(&mut self, v: Result<VoiceState, String>) {
+        self.voice = Some(v);
+        self.voice_rev += 1;
     }
 
     /// A call for `method` is on its way.
@@ -168,6 +248,12 @@ impl ClientState {
         if method == Method::PatchNet {
             self.net_pending += 1;
         }
+        if method == Method::PatchHotkeys {
+            self.hotkeys_pending += 1;
+        }
+        if method == Method::PatchVoice {
+            self.voice_pending += 1;
+        }
     }
 
     /// A call for `method` was answered, failed or dropped.
@@ -181,6 +267,12 @@ impl ClientState {
         }
         if method == Method::PatchNet {
             self.net_pending -= 1;
+        }
+        if method == Method::PatchHotkeys {
+            self.hotkeys_pending -= 1;
+        }
+        if method == Method::PatchVoice {
+            self.voice_pending -= 1;
         }
     }
 
@@ -214,7 +306,14 @@ impl Notices {
 
 /// Calls that only read: losing one changes nothing worth telling.
 fn read_only(method: Method) -> bool {
-    matches!(method, Method::GetState | Method::GetMixer | Method::GetNet)
+    matches!(
+        method,
+        Method::GetState
+            | Method::GetMixer
+            | Method::GetNet
+            | Method::GetHotkeys
+            | Method::GetVoice
+    )
 }
 
 /// What to tell the user when a command finishes.
@@ -250,6 +349,19 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(cli.log_level)
         .init();
+    let socket = cli.socket.unwrap_or_else(default_socket_path);
+    if let Some(Command::Voice { action, alt }) = cli.command {
+        let params = VoiceControlParams {
+            action: action.into(),
+            alt,
+        };
+        let done = Runtime::new()?.block_on(voice_control(&socket, params));
+        if let Err(e) = done {
+            eprintln!("hako voice: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     // Set by the previous process when it restarted us after an update;
     // cleared before any thread starts so children don't inherit it.
@@ -266,7 +378,6 @@ fn main() -> Result<()> {
     std::env::remove_var(update::UPDATED_ENV);
     std::env::remove_var(update::WARN_ENV);
 
-    let socket = cli.socket.unwrap_or_else(default_socket_path);
     let rt = Runtime::new()?;
     let state = Arc::new(Mutex::new(ClientState {
         error: Some(format!("Connecting to {}…", socket.display())),
@@ -276,7 +387,7 @@ fn main() -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ClientCmd>();
 
     let updater = update::target();
-    if let Some((repo, _)) = updater {
+    if let Some((repo, ..)) = updater {
         rt.spawn(update_checks(repo, state.clone()));
     }
 
@@ -316,6 +427,10 @@ fn main() -> Result<()> {
         lost: false,
         mixer_rev: 0,
         net_rev: 0,
+        hotkeys_rev: 0,
+        voice_rev: 0,
+        capture_rev: 0,
+        partial_rev: 0,
         settings_rev: 0,
         rt: rt.handle().clone(),
         updater,
@@ -387,6 +502,36 @@ impl eframe::App for App {
                     None => {}
                 }
             }
+            self.ui.hotkeys.busy = st.hotkeys_pending > 0;
+            if st.hotkeys_rev != self.hotkeys_rev {
+                self.hotkeys_rev = st.hotkeys_rev;
+                match &st.hotkeys {
+                    Some(Ok(h)) => self.ui.hotkeys.receive(h.clone()),
+                    Some(Err(e)) => self.ui.hotkeys.unavailable(e.clone()),
+                    None => {}
+                }
+            }
+            if st.capture_rev != self.capture_rev {
+                self.capture_rev = st.capture_rev;
+                if let Some(c) = &st.capture {
+                    self.ui.hotkeys.capture_update(c.clone());
+                }
+            }
+            self.ui.voice.busy = st.voice_pending > 0;
+            if st.voice_rev != self.voice_rev {
+                self.voice_rev = st.voice_rev;
+                match &st.voice {
+                    Some(Ok(v)) => self.ui.voice.receive(v.clone()),
+                    Some(Err(e)) => self.ui.voice.unavailable(e.clone()),
+                    None => {}
+                }
+            }
+            if st.partial_rev != self.partial_rev {
+                self.partial_rev = st.partial_rev;
+                if let Some(p) = &st.partial {
+                    self.ui.voice.partial(p.clone());
+                }
+            }
             // Adopt server settings once every call is answered, so a
             // refused edit flips back but a reply doesn't clobber a newer edit.
             let answered = st.settings_rev != self.settings_rev && st.pending == 0;
@@ -404,10 +549,14 @@ impl eframe::App for App {
                     Vec::new()
                 };
             }
-            self.ui.update = st.update.as_ref().map(|r| UpdateOffer {
-                version: r.version.clone(),
-                busy: st.updating,
-            });
+            self.ui.update = st
+                .update
+                .as_ref()
+                .filter(|_| !st.update_dismissed)
+                .map(|r| UpdateOffer {
+                    version: r.version.clone(),
+                    busy: st.updating,
+                });
             (
                 std::mem::take(&mut st.notices.0),
                 st.error.is_none() && st.hub.is_some(),
@@ -550,7 +699,7 @@ impl eframe::App for App {
                     continue;
                 }
                 UiCommand::DismissUpdate => {
-                    self.state.lock().unwrap().update = None;
+                    self.state.lock().unwrap().update_dismissed = true;
                     continue;
                 }
                 UiCommand::GetMixer => ClientCmd::Call(
@@ -572,6 +721,41 @@ impl eframe::App for App {
                     Method::PatchNet,
                     to(serde_json::to_value(PatchNetParams { ops })),
                     Feedback::quiet("Couldn't change network audio"),
+                ),
+                UiCommand::GetHotkeys => ClientCmd::Call(
+                    Method::GetHotkeys,
+                    serde_json::Value::Null,
+                    Feedback::quiet("Couldn't load the hotkeys"),
+                ),
+                UiCommand::PatchHotkeys(ops) => ClientCmd::Call(
+                    Method::PatchHotkeys,
+                    to(serde_json::to_value(PatchHotkeysParams { ops })),
+                    Feedback::quiet("Couldn't change the hotkey"),
+                ),
+                UiCommand::StartHotkeyCapture => ClientCmd::Call(
+                    Method::StartHotkeyCapture,
+                    serde_json::Value::Null,
+                    Feedback::quiet("Couldn't start listening for keys"),
+                ),
+                UiCommand::CancelHotkeyCapture => ClientCmd::Call(
+                    Method::CancelHotkeyCapture,
+                    serde_json::Value::Null,
+                    Feedback::quiet("Couldn't stop listening for keys"),
+                ),
+                UiCommand::GetVoice => ClientCmd::Call(
+                    Method::GetVoice,
+                    serde_json::Value::Null,
+                    Feedback::quiet("Couldn't load Voice"),
+                ),
+                UiCommand::PatchVoice(ops) => ClientCmd::Call(
+                    Method::PatchVoice,
+                    to(serde_json::to_value(PatchVoiceParams { ops })),
+                    Feedback::quiet("Couldn't change Voice"),
+                ),
+                UiCommand::VoiceControl(params) => ClientCmd::Call(
+                    Method::VoiceControl,
+                    to(serde_json::to_value(params)),
+                    Feedback::quiet("Couldn't control dictation"),
                 ),
             };
             let ClientCmd::Call(method, ..) = &cmd;
@@ -600,7 +784,7 @@ impl eframe::App for App {
 
 impl App {
     fn check_updates(&self) {
-        let Some((repo, _)) = self.updater else {
+        let Some((repo, ..)) = self.updater else {
             self.state.lock().unwrap().notices.push((
                 Tone::Warn,
                 "Updates are only available for installs from a GitHub release (.deb or tarball)"
@@ -626,7 +810,7 @@ impl App {
     }
 
     fn install_update(&self) {
-        let Some((_, bin)) = self.updater.clone() else {
+        let Some((_, bin, started)) = self.updater.clone() else {
             return;
         };
         let rel = {
@@ -648,7 +832,7 @@ impl App {
         };
         let state = self.state.clone();
         let install = self.rt.spawn_blocking(move || {
-            let res = update::install(&rel);
+            let res = update::install(&rel, &bin, &started);
             // Held through the restart, so a window closed meanwhile stays closed.
             let mut s = state.lock().unwrap();
             let msg = match res {
@@ -712,6 +896,7 @@ fn fetch_update(repo: &str, state: &Mutex<ClientState>, loud: bool) -> anyhow::R
             .unwrap()
             .update
             .as_ref()
+            .filter(|r| r.on_disk())
             .map(|r| r.version.clone());
         if have.as_deref() != Some(rel.version.as_str()) {
             {
@@ -726,6 +911,7 @@ fn fetch_update(repo: &str, state: &Mutex<ClientState>, loud: bool) -> anyhow::R
             let ready = update::download(&rel)?;
             state.lock().unwrap().update = Some(ready);
         }
+        state.lock().unwrap().update_dismissed = false;
         Ok(true)
     })();
     state.lock().unwrap().checking = false;
@@ -837,6 +1023,8 @@ async fn session(
     fetch_config(stream, state).await?;
     fetch_mixer(stream, state).await?;
     fetch_net(stream, state).await?;
+    fetch_hotkeys(stream, state).await?;
+    fetch_voice(stream, state).await?;
     let mut events = tokio::spawn(subscribe(socket.to_path_buf(), state.clone()));
     let lost = loop {
         tokio::select! {
@@ -856,7 +1044,9 @@ async fn session(
                         fetch_config(stream, state).await?;
                     }
                     fetch_mixer(stream, state).await?;
-                    fetch_net(stream, state).await
+                    fetch_net(stream, state).await?;
+                    fetch_hotkeys(stream, state).await?;
+                    fetch_voice(stream, state).await
                 };
                 if let Err(e) = polled.await {
                     break Err(e);
@@ -918,6 +1108,54 @@ async fn command(
         }
         Method::GetNet | Method::PatchNet => {
             state.lock().unwrap().set_net(net_result(resp));
+            Ok(())
+        }
+        Method::PatchHotkeys if !resp.ok => {
+            let msg = format!("{}: {}", feedback.failed, why(resp));
+            state.lock().unwrap().notices.push((Tone::Error, msg));
+            fetch_hotkeys(stream, state).await
+        }
+        Method::GetHotkeys | Method::PatchHotkeys => {
+            state.lock().unwrap().set_hotkeys(hotkeys_result(resp));
+            Ok(())
+        }
+        Method::PatchVoice if !resp.ok => {
+            let msg = format!("{}: {}", feedback.failed, why(resp));
+            state.lock().unwrap().notices.push((Tone::Error, msg));
+            fetch_voice(stream, state).await
+        }
+        Method::GetVoice | Method::PatchVoice => {
+            state.lock().unwrap().set_voice(voice_result(resp));
+            Ok(())
+        }
+        // The capture runs on: its progress comes as events. Refused, it
+        // ends at once so the page stops waiting.
+        Method::StartHotkeyCapture => {
+            let mut s = state.lock().unwrap();
+            let started = resp
+                .result
+                .clone()
+                .filter(|_| resp.ok)
+                .and_then(|r| serde_json::from_value::<HotkeyCaptureState>(r).ok());
+            match started {
+                Some(c) => s.set_capture(c),
+                None => {
+                    s.set_capture(HotkeyCaptureState {
+                        done: true,
+                        cancelled: true,
+                        ..Default::default()
+                    });
+                    let msg = format!("{}: {}", feedback.failed, why(resp));
+                    s.notices.push((Tone::Error, msg));
+                }
+            }
+            Ok(())
+        }
+        Method::CancelHotkeyCapture | Method::VoiceControl => {
+            if !resp.ok {
+                let msg = format!("{}: {}", feedback.failed, why(resp));
+                state.lock().unwrap().notices.push((Tone::Error, msg));
+            }
             Ok(())
         }
         _ => {
@@ -1099,6 +1337,66 @@ async fn fetch_net(stream: &mut UnixStream, state: &Arc<Mutex<ClientState>>) -> 
     Ok(())
 }
 
+/// A hakod from before Voice: `unsupported`, or a method it cannot parse.
+fn too_old(e: &hako_core::ipc::IpcErrorBody) -> bool {
+    e.code == "unsupported" || (e.code == "invalid_value" && e.message.contains("unknown variant"))
+}
+
+/// A `GetHotkeys` / `PatchHotkeys` answer: the state, or why there is none.
+fn hotkeys_result(resp: IpcResponse) -> Result<HotkeysState, String> {
+    match (resp.result, resp.error) {
+        (Some(r), _) if resp.ok => serde_json::from_value(r)
+            .map_err(|e| format!("hakod sent hotkeys this UI cannot read ({e}); update both")),
+        (_, Some(e)) if too_old(&e) => Err("Hotkeys need a newer hakod.".into()),
+        (_, e) => Err(e.map_or_else(|| "no reason given".into(), |e| e.message)),
+    }
+}
+
+/// Reload the hotkeys. Fails when the connection is unusable.
+async fn fetch_hotkeys(
+    stream: &mut UnixStream,
+    state: &Arc<Mutex<ClientState>>,
+) -> Result<(), String> {
+    let resp = call(stream, Method::GetHotkeys, serde_json::Value::Null).await?;
+    state.lock().unwrap().set_hotkeys(hotkeys_result(resp));
+    Ok(())
+}
+
+/// A `GetVoice` / `PatchVoice` answer: the state, or why there is none.
+fn voice_result(resp: IpcResponse) -> Result<VoiceState, String> {
+    match (resp.result, resp.error) {
+        (Some(r), _) if resp.ok => serde_json::from_value(r).map_err(|e| {
+            format!("hakod sent a Voice state this UI cannot read ({e}); update both")
+        }),
+        (_, Some(e)) if too_old(&e) => Err("Voice needs a newer hakod.".into()),
+        (_, e) => Err(e.map_or_else(|| "no reason given".into(), |e| e.message)),
+    }
+}
+
+/// Reload Voice. Fails when the connection is unusable.
+async fn fetch_voice(
+    stream: &mut UnixStream,
+    state: &Arc<Mutex<ClientState>>,
+) -> Result<(), String> {
+    let resp = call(stream, Method::GetVoice, serde_json::Value::Null).await?;
+    state.lock().unwrap().set_voice(voice_result(resp));
+    Ok(())
+}
+
+/// `hako voice ...`: one `VoiceControl` request; the daemon's refusal is the error.
+async fn voice_control(socket: &std::path::Path, params: VoiceControlParams) -> Result<(), String> {
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .map_err(|e| format!("cannot connect to hakod at {} ({e})", socket.display()))?;
+    let params = serde_json::to_value(params).map_err(|e| e.to_string())?;
+    let resp = call(&mut stream, Method::VoiceControl, params).await?;
+    match resp.error {
+        _ if resp.ok => Ok(()),
+        Some(e) if too_old(&e) => Err("this hakod has no Voice yet; update it".into()),
+        e => Err(e.map_or_else(|| "refused".into(), |e| e.message)),
+    }
+}
+
 /// Event stream on its own connection; snapshots are applied in place.
 /// Events missed around it (before it subscribed, while it was down, or
 /// dropped by a lagging daemon) are caught up by the session's poll.
@@ -1140,6 +1438,34 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
             }
             continue;
         }
+        match ev.kind {
+            EventKind::HotkeysUpdated => {
+                if let Ok(h) = serde_json::from_value::<HotkeysState>(ev.payload) {
+                    s.set_hotkeys(Ok(h));
+                }
+                continue;
+            }
+            EventKind::HotkeyCapture => {
+                if let Ok(c) = serde_json::from_value::<HotkeyCaptureState>(ev.payload) {
+                    s.set_capture(c);
+                }
+                continue;
+            }
+            EventKind::VoiceUpdated => {
+                if let Ok(v) = serde_json::from_value::<VoiceState>(ev.payload) {
+                    s.set_voice(Ok(v));
+                }
+                continue;
+            }
+            EventKind::VoicePartial => {
+                if let Ok(p) = serde_json::from_value::<VoicePartial>(ev.payload) {
+                    s.partial = Some(p);
+                    s.partial_rev += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
         if ev.kind == EventKind::Error {
             if let Some(msg) = ev.payload.get("message").and_then(|m| m.as_str()) {
                 s.notices.push((Tone::Error, msg.to_string()));
@@ -1174,7 +1500,11 @@ async fn subscribe(socket: std::path::PathBuf, state: Arc<Mutex<ClientState>>) {
             | EventKind::DaemonShuttingDown
             | EventKind::Meters
             | EventKind::MixerUpdated
-            | EventKind::NetUpdated => {}
+            | EventKind::NetUpdated
+            | EventKind::HotkeysUpdated
+            | EventKind::HotkeyCapture
+            | EventKind::VoiceUpdated
+            | EventKind::VoicePartial => {}
         }
     }
 }
@@ -1305,6 +1635,95 @@ mod tests {
         s.finish(Method::ApplyProfile);
         assert_eq!(s.mixer_pending, 0);
         assert!(!s.mixer_locked(Method::PatchMixer));
+    }
+
+    #[test]
+    fn voice_commands_parse_and_no_command_opens_the_window() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|c| c.command);
+        assert_eq!(parse(&["hako"]).unwrap(), None);
+        assert_eq!(
+            parse(&["hako", "voice", "toggle"]).unwrap(),
+            Some(Command::Voice {
+                action: VoiceVerb::Toggle,
+                alt: false
+            })
+        );
+        assert_eq!(
+            parse(&["hako", "voice", "start", "--alt", "--socket", "/tmp/x"]).unwrap(),
+            Some(Command::Voice {
+                action: VoiceVerb::Start,
+                alt: true
+            })
+        );
+        assert!(parse(&["hako", "voice"]).is_err());
+        assert!(parse(&["hako", "voice", "pause"]).is_err());
+        let cli = Cli::try_parse_from(["hako", "--socket", "/tmp/s", "voice", "cancel"]).unwrap();
+        assert_eq!(cli.socket.as_deref(), Some(std::path::Path::new("/tmp/s")));
+        assert_eq!(VoiceAction::from(VoiceVerb::Stop), VoiceAction::Stop);
+    }
+
+    #[tokio::test]
+    async fn voice_control_reports_the_daemons_answer() {
+        let dir = std::env::temp_dir().join(format!("hako-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let answers = [
+            IpcResponse::ok(serde_json::json!("VoiceControl"), serde_json::json!({})),
+            IpcResponse::err(
+                serde_json::json!(null),
+                "invalid_value",
+                "no model is ready",
+            ),
+            IpcResponse::err(
+                serde_json::json!(null),
+                "unsupported",
+                "voice is not available",
+            ),
+        ];
+        let daemon = tokio::spawn(async move {
+            for resp in answers {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let req = read_json_frame(&mut s).await.unwrap();
+                assert_eq!(req["method"], "VoiceControl");
+                assert_eq!(req["params"]["action"], "toggle");
+                write_json_frame(&mut s, &resp).await.unwrap();
+            }
+        });
+        let params = || VoiceControlParams {
+            action: VoiceAction::Toggle,
+            alt: false,
+        };
+        assert_eq!(voice_control(&path, params()).await, Ok(()));
+        assert_eq!(
+            voice_control(&path, params()).await,
+            Err("no model is ready".into())
+        );
+        let old = voice_control(&path, params()).await.unwrap_err();
+        assert!(old.contains("no Voice"), "{old}");
+        daemon.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_older_hakod_without_voice_is_explained() {
+        let unknown = IpcResponse::err(
+            serde_json::json!(null),
+            "invalid_value",
+            "unknown variant `GetVoice`, expected one of ...",
+        );
+        assert_eq!(
+            voice_result(unknown).unwrap_err(),
+            "Voice needs a newer hakod."
+        );
+        let stub = IpcResponse::err(serde_json::json!(1), "unsupported", "not yet");
+        assert_eq!(
+            hotkeys_result(stub).unwrap_err(),
+            "Hotkeys need a newer hakod."
+        );
+        let other = IpcResponse::err(serde_json::json!(1), "io", "disk full");
+        assert_eq!(voice_result(other).unwrap_err(), "disk full");
     }
 
     #[test]
