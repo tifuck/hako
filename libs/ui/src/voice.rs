@@ -1,10 +1,11 @@
 //! Voice page: dictation recognised on this computer. Off: one card and
-//! Turn on. On: a header with the status and the live transcript, then
-//! Model (the whole catalog), Hotkeys, Microphone, Output, Language and
-//! Streaming, the rest of dictation as folded sections, then Jarvis (wake
-//! word, push-to-command, the user's commands, what it understands).
-//! Each edit is its section's `VoiceOp`, checked with `VoiceFile::validate`
-//! and applied to the local copy until the daemon answers.
+//! Turn on. On: a header with the status and the live transcript, then one
+//! tab at a time: Dictation (hotkeys, microphone, output, sounds), Model
+//! (recognition settings and the catalog), Text, Jarvis (wake word,
+//! push-to-command, the user's commands, what it understands), History and
+//! Advanced. Each edit is its section's `VoiceOp`, checked with
+//! `VoiceFile::validate` and applied to the local copy until the daemon
+//! answers.
 
 use crate::hotkeys;
 use crate::theme::{self, pal};
@@ -216,6 +217,15 @@ pub fn languages_label(langs: &[String]) -> String {
     }
 }
 
+/// Every language some catalog model knows.
+fn catalog_languages() -> BTreeSet<&'static String> {
+    CATALOG
+        .models
+        .iter()
+        .flat_map(|m| m.languages.iter())
+        .collect()
+}
+
 /// Codes sorted by their names.
 fn by_name<'a>(codes: impl IntoIterator<Item = &'a String>) -> Vec<&'a String> {
     let mut v: Vec<&String> = codes.into_iter().collect();
@@ -235,9 +245,53 @@ fn engine_label(e: &EngineStatus) -> (&'static str, Color32) {
     }
 }
 
+/// The Voice page's tabs, in their order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VoiceTab {
+    #[default]
+    Dictation,
+    Model,
+    Text,
+    Jarvis,
+    History,
+    Advanced,
+}
+
+impl VoiceTab {
+    pub const ALL: [Self; 6] = [
+        Self::Dictation,
+        Self::Model,
+        Self::Text,
+        Self::Jarvis,
+        Self::History,
+        Self::Advanced,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dictation => "Dictation",
+            Self::Model => "Model",
+            Self::Text => "Text",
+            Self::Jarvis => "Jarvis",
+            Self::History => "History",
+            Self::Advanced => "Advanced",
+        }
+    }
+
+    /// The tab listing hotkeys of `action`.
+    pub fn of(action: HotkeyAction) -> Self {
+        match action {
+            HotkeyAction::JarvisListen => Self::Jarvis,
+            _ => Self::Dictation,
+        }
+    }
+}
+
 /// The page's state: daemon state, live preview, catalog view and drafts.
 #[derive(Default)]
 pub struct VoiceUi {
+    /// The tab shown while Voice is on.
+    pub(crate) tab: VoiceTab,
     /// Daemon state plus local edits not yet answered.
     state: Option<VoiceState>,
     /// Newest daemon state, adopted once nothing is in flight.
@@ -605,51 +659,6 @@ pub fn icon_mic(p: &egui::Painter, r: Rect, c: Color32) {
     );
 }
 
-/// Folded sections, by title; open state is kept per title.
-#[cfg(test)]
-pub(crate) const FOLDS: [&str; 6] = [
-    "Text",
-    "Sounds",
-    "History",
-    "Advanced",
-    "Alternate profile",
-    "What can I say",
-];
-
-pub(crate) fn fold_id(title: &str) -> egui::Id {
-    egui::Id::new(("voice_fold", title))
-}
-
-/// A card whose body shows once its title is clicked.
-fn fold(ui: &mut Ui, title: &str, hint: &str, body: impl FnOnce(&mut Ui)) {
-    let id = fold_id(title);
-    let open = ui.data(|m| m.get_temp::<bool>(id)).unwrap_or(false);
-    let mut toggle = false;
-    widgets::section_with(
-        ui,
-        |ui| {
-            let resp = ui
-                .add(egui::Label::new(widgets::section_title(title)).sense(egui::Sense::click()))
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            ui.label(egui::RichText::new(hint).small().color(pal().text_faint));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let tip = if open { "Collapse" } else { "Expand" };
-                let chev = widgets::icon_button(ui, 26.0, tip, true, |p, r, c| {
-                    widgets::icon_chevron(p, r, c, !open)
-                });
-                toggle = chev.clicked() || resp.clicked();
-            });
-        },
-        |ui| {
-            if open {
-                // Rows are keyed by label: keep them apart from other cards'.
-                ui.push_id(title, body);
-            }
-        },
-    );
-    ui.data_mut(|m| m.insert_temp(id, open != toggle));
-}
-
 /// A switch row; `Some(new)` when flipped.
 fn switch_row(ui: &mut Ui, label: &str, hint: Option<&str>, on: bool) -> Option<bool> {
     let mut v = on;
@@ -815,6 +824,7 @@ impl HakoAppUi {
         ui.add_space(theme::SPACE_LG);
 
         let Some(st) = st else {
+            widgets::page_transition(ui, ("voice", None::<VoiceTab>));
             let body = match &self.voice.error {
                 Some(e) => e.as_str(),
                 None => "Loading…",
@@ -843,25 +853,44 @@ impl HakoAppUi {
             ui.add_space(theme::SPACE_SM);
         }
         if !st.file.enabled {
+            widgets::page_transition(ui, ("voice", None::<VoiceTab>));
             off_card(ui, &mut edits);
             self.apply_voice(edits, out);
             return None;
         }
-        status_card(ui, &st, self.voice.partial.as_ref());
-        model_section(ui, &mut self.voice, &st, &mut edits);
-        let nav = self.voice_hotkeys(ui, out);
-        self.mic_section(ui, &st, &mut edits);
-        output_section(ui, &mut self.voice, &st, &mut edits);
-        language_section(ui, &st, &mut edits);
-        streaming_section(ui, &st.file, &mut edits);
-        text_fold(ui, &mut self.voice, &st.file, &mut edits);
-        sounds_fold(ui, &st.file, &mut edits);
-        history_fold(ui, &st, &mut edits);
-        advanced_fold(ui, &st, &mut edits);
-        alt_fold(ui, &st, &mut edits);
-        self.jarvis_section(ui, &st, &mut edits, out);
-        self.commands_section(ui, &st, &mut edits, out);
-        say_fold(ui, &st.file);
+        status_card(ui, &st, self.voice.partial.as_ref(), &mut self.voice.tab);
+        let tab = self.voice.tab;
+        let labels = VoiceTab::ALL.map(VoiceTab::label);
+        let active = VoiceTab::ALL.iter().position(|t| *t == tab).unwrap_or(0);
+        if let Some(i) = crate::tab_bar(ui, egui::Id::new("voice_tab"), &labels, active) {
+            self.voice.tab = VoiceTab::ALL[i];
+        }
+        ui.add_space(theme::SPACE_LG);
+        widgets::page_transition(ui, ("voice", Some(tab)));
+        let mut nav = None;
+        match tab {
+            VoiceTab::Dictation => {
+                nav = self.voice_hotkeys(ui, out);
+                self.mic_section(ui, &st, &mut edits);
+                output_section(ui, &mut self.voice, &st, &mut edits);
+                sounds_section(ui, &st.file, &mut edits);
+            }
+            VoiceTab::Model => {
+                recognition_section(ui, &st, &mut edits);
+                models_section(ui, &mut self.voice, &st, &mut edits);
+            }
+            VoiceTab::Text => text_sections(ui, &mut self.voice, &st.file, &mut edits),
+            VoiceTab::Jarvis => {
+                self.jarvis_section(ui, &st, &mut edits, out);
+                self.commands_section(ui, &st, &mut edits, out);
+                say_section(ui, &st.file);
+            }
+            VoiceTab::History => history_sections(ui, &st, &mut edits),
+            VoiceTab::Advanced => {
+                advanced_sections(ui, &st, &mut edits);
+                alt_section(ui, &st, &mut edits);
+            }
+        }
         self.apply_voice(edits, out);
         nav
     }
@@ -986,7 +1015,7 @@ impl HakoAppUi {
                                 hk.detect(HotkeyBinding::new(&id, action, &[]), out);
                             }
                         }
-                        hotkeys::action_picker(ui, "voice_add_action", &mut action);
+                        hotkeys::action_picker(ui, "voice_add_action", Some("Voice"), &mut action);
                     },
                 );
                 *add_action = Some(action);
@@ -1169,16 +1198,10 @@ impl HakoAppUi {
                 if let Some(why) = &v.jarvis_error {
                     ui.colored_label(pal().danger, format!("Not saved: {why}"));
                 }
-                ui.add_space(theme::SPACE_SM);
-                widgets::divider(ui);
-                ui.add_space(theme::SPACE_SM);
-                last_command(ui, st);
-                ui.add_space(theme::SPACE_SM);
-                widgets::divider(ui);
-                ui.add_space(theme::SPACE_SM);
-                push_to_command(ui, hk, &devices, out);
             },
         );
+        last_command(ui, st);
+        push_to_command(ui, hk, &devices, out);
     }
 
     /// The user's own commands: list, reorder, remove, and the editor.
@@ -1357,7 +1380,7 @@ fn off_card(ui: &mut Ui, edits: &mut Vec<Edit>) {
 }
 
 /// Engine status, problems, and the utterance being recognised.
-fn status_card(ui: &mut Ui, st: &VoiceState, partial: Option<&VoicePartial>) {
+fn status_card(ui: &mut Ui, st: &VoiceState, partial: Option<&VoicePartial>, tab: &mut VoiceTab) {
     widgets::section(
         ui,
         "Status",
@@ -1372,10 +1395,19 @@ fn status_card(ui: &mut Ui, st: &VoiceState, partial: Option<&VoicePartial>) {
         |ui| {
             match &st.engine {
                 EngineStatus::NoModel => {
-                    ui.colored_label(
-                        pal().warn,
-                        "Voice cannot dictate until a model is ready: download one below and click Use.",
-                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            pal().warn,
+                            "Voice cannot dictate until a model is ready: download one and click Use.",
+                        );
+                        if *tab != VoiceTab::Model
+                            && ui
+                                .link(egui::RichText::new("Choose a model").color(pal().accent))
+                                .clicked()
+                        {
+                            *tab = VoiceTab::Model;
+                        }
+                    });
                 }
                 EngineStatus::Error { message } => {
                     ui.colored_label(pal().danger, message);
@@ -1416,18 +1448,12 @@ fn status_card(ui: &mut Ui, st: &VoiceState, partial: Option<&VoicePartial>) {
     );
 }
 
-fn model_section(ui: &mut Ui, v: &mut VoiceUi, st: &VoiceState, edits: &mut Vec<Edit>) {
-    let shown = filter_models(&CATALOG.models, &v.filter, &v.quants);
+/// The model in use, the language spoken and when text is typed.
+fn recognition_section(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
     widgets::section(
         ui,
-        "Model",
-        |ui| {
-            ui.label(
-                egui::RichText::new(format!("{} of {}", shown.len(), CATALOG.models.len()))
-                    .small()
-                    .color(pal().text_faint),
-            );
-        },
+        "Recognition",
+        |_| {},
         |ui| {
             let in_use = match &st.file.model {
                 Some(ModelChoice::Catalog { id, quant }) => Some(format!(
@@ -1437,17 +1463,43 @@ fn model_section(ui: &mut Ui, v: &mut VoiceUi, st: &VoiceState, edits: &mut Vec<
                 Some(ModelChoice::Custom { file }) => Some(file.clone()),
                 None => None,
             };
-            if let Some(name) = in_use {
-                widgets::row(ui, "In use", None, |ui| {
+            let hint = in_use
+                .is_none()
+                .then_some("Download one below and click Use");
+            widgets::row(ui, "Model", hint, |ui| match in_use {
+                Some(name) => {
                     ui.label(egui::RichText::new(name).color(pal().text));
-                });
-            } else {
-                widgets::hint(
-                    ui,
-                    "No model chosen yet. Live models type while you speak; Batch models type at pauses. Smaller models are faster, larger ones more accurate.",
-                );
-                ui.add_space(theme::SPACE_SM);
-            }
+                }
+                None => {
+                    ui.label(egui::RichText::new("None yet").color(pal().warn));
+                }
+            });
+            language_rows(ui, st, edits);
+            widgets::divider(ui);
+            streaming_rows(ui, &st.file, edits);
+        },
+    );
+}
+
+/// The catalog with its filters, then the user's own model files.
+fn models_section(ui: &mut Ui, v: &mut VoiceUi, st: &VoiceState, edits: &mut Vec<Edit>) {
+    let shown = filter_models(&CATALOG.models, &v.filter, &v.quants);
+    widgets::section(
+        ui,
+        "Models",
+        |ui| {
+            ui.label(
+                egui::RichText::new(format!("{} of {}", shown.len(), CATALOG.models.len()))
+                    .small()
+                    .color(pal().text_faint),
+            );
+        },
+        |ui| {
+            widgets::hint(
+                ui,
+                "Live models type while you speak; Batch models type at pauses. Smaller models are faster, larger ones more accurate.",
+            );
+            ui.add_space(theme::SPACE_SM);
             filters(ui, &mut v.filter);
             ui.add_space(theme::SPACE_SM);
             let downloading = st
@@ -1490,11 +1542,7 @@ fn model_section(ui: &mut Ui, v: &mut VoiceUi, st: &VoiceState, edits: &mut Vec<
 
 fn filters(ui: &mut Ui, f: &mut CatalogFilter) {
     ui.horizontal_wrapped(|ui| {
-        let langs: BTreeSet<&String> = CATALOG
-            .models
-            .iter()
-            .flat_map(|m| m.languages.iter())
-            .collect();
+        let langs = catalog_languages();
         let current = f
             .language
             .as_deref()
@@ -1993,124 +2041,121 @@ fn model_caps(st: &VoiceState) -> (Vec<String>, bool, bool) {
     }
 }
 
-fn language_section(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
+fn language_rows(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
     let (langs, translate, detect) = model_caps(st);
-    widgets::section(
-        ui,
-        "Language",
-        |_| {},
-        |ui| {
-            if let [only] = langs.as_slice() {
-                widgets::row(
-                    ui,
-                    "Language",
-                    Some("The only language of this model"),
-                    |ui| {
-                        ui.label(egui::RichText::new(lang_name(only)).color(pal().text));
-                    },
-                );
+    if let [only] = langs.as_slice() {
+        widgets::row(
+            ui,
+            "Language",
+            Some("The only language of this model"),
+            |ui| {
+                ui.label(egui::RichText::new(lang_name(only)).color(pal().text));
+            },
+        );
+    } else {
+        let mut options = vec![(
+            None,
+            if detect || langs.is_empty() {
+                "Detect automatically".to_string()
             } else {
-                let mut options = vec![(
-                    None,
-                    if detect || langs.is_empty() {
-                        "Detect automatically".to_string()
-                    } else {
-                        "Model default".to_string()
-                    },
-                )];
-                options.extend(
-                    by_name(&langs)
-                        .into_iter()
-                        .map(|l| (Some(l.clone()), lang_name(l).to_string())),
-                );
-                if let Some(l) = &st.file.language {
-                    if !langs.contains(l) {
-                        options.push((Some(l.clone()), lang_name(l).to_string()));
-                    }
-                }
-                if let Some(language) = choice_row(
-                    ui,
-                    "Language",
-                    Some("What you speak"),
-                    &st.file.language,
-                    &options,
-                ) {
-                    edits.push(Edit::Send(VoiceOp::SetLanguage { language }));
-                }
+                "Model default".to_string()
+            },
+        )];
+        options.extend(
+            by_name(&langs)
+                .into_iter()
+                .map(|l| (Some(l.clone()), lang_name(l).to_string())),
+        );
+        if let Some(l) = &st.file.language {
+            if !langs.contains(l) {
+                options.push((Some(l.clone()), lang_name(l).to_string()));
             }
-            if translate {
-                if let Some(on) = switch_row(
-                    ui,
-                    "Translate to English",
-                    Some("Speak any language, get English text"),
-                    st.file.translate,
-                ) {
-                    edits.push(Edit::Send(VoiceOp::SetTranslate { on }));
-                }
-            }
-        },
-    );
+        }
+        if let Some(language) = choice_row(
+            ui,
+            "Language",
+            Some("What you speak"),
+            &st.file.language,
+            &options,
+        ) {
+            edits.push(Edit::Send(VoiceOp::SetLanguage { language }));
+        }
+    }
+    if translate {
+        if let Some(on) = switch_row(
+            ui,
+            "Translate to English",
+            Some("Speak any language, get English text"),
+            st.file.translate,
+        ) {
+            edits.push(Edit::Send(VoiceOp::SetTranslate { on }));
+        }
+    }
 }
 
-fn streaming_section(ui: &mut Ui, f: &VoiceFile, edits: &mut Vec<Edit>) {
+fn streaming_rows(ui: &mut Ui, f: &VoiceFile, edits: &mut Vec<Edit>) {
+    let mut s = f.streaming.clone();
+    if let Some(on) = switch_row(
+        ui,
+        "Type at pauses",
+        Some("Batch models type each sentence when you pause, not all at the end. Live models always type as you speak."),
+        s.transcribe_at_pauses,
+    ) {
+        s.transcribe_at_pauses = on;
+        edits.push(Edit::Send(VoiceOp::SetStreaming {
+            streaming: s.clone(),
+        }));
+    }
+    let (lo, hi) = PAUSE_MS_RANGE;
+    let mut ms = s.pause_ms as f32;
+    let res = slider_row(
+        ui,
+        "Pause length",
+        Some("Silence that ends a sentence"),
+        &mut ms,
+        (lo as f32, hi as f32),
+        false,
+        format!("{} ms", s.pause_ms),
+    );
+    s.pause_ms = (ms / 50.0).round() as u32 * 50;
+    edits.extend(slid(res, || VoiceOp::SetStreaming { streaming: s }));
+}
+
+/// Punctuation and fillers, custom words, replacements: one `SetText`.
+fn text_sections(ui: &mut Ui, v: &mut VoiceUi, f: &VoiceFile, edits: &mut Vec<Edit>) {
+    let mut t = f.text.clone();
+    let mut send = false;
     widgets::section(
         ui,
-        "Streaming",
+        "Punctuation and fillers",
         |_| {},
         |ui| {
-            let mut s = f.streaming.clone();
-            if let Some(on) = switch_row(
-                ui,
-                "Type at pauses",
-                Some("Batch models: type each sentence when you pause, not all at the end"),
-                s.transcribe_at_pauses,
-            ) {
-                s.transcribe_at_pauses = on;
-                edits.push(Edit::Send(VoiceOp::SetStreaming {
-                    streaming: s.clone(),
-                }));
-            }
-            let (lo, hi) = PAUSE_MS_RANGE;
-            let mut ms = s.pause_ms as f32;
-            let res = slider_row(
-                ui,
-                "Pause length",
-                Some("Silence that ends a sentence"),
-                &mut ms,
-                (lo as f32, hi as f32),
-                false,
-                format!("{} ms", s.pause_ms),
-            );
-            s.pause_ms = (ms / 50.0).round() as u32 * 50;
-            edits.extend(slid(res, || VoiceOp::SetStreaming { streaming: s }));
-            widgets::hint(ui, "Live models type while you speak either way.");
-        },
-    );
-}
-
-fn text_fold(ui: &mut Ui, v: &mut VoiceUi, f: &VoiceFile, edits: &mut Vec<Edit>) {
-    fold(
-        ui,
-        "Text",
-        "Vocabulary, fillers, replacements, punctuation",
-        |ui| {
-            let mut t = f.text.clone();
-            let mut send = false;
-            ui.label(egui::RichText::new("Custom words").color(pal().text));
-            widgets::hint(ui, "Names and jargon, one per line");
-            if let Some(text) = text_commit(
-                ui,
-                "custom_words",
-                &t.custom_words.join("\n"),
-                "hako\nPipeWire",
-                f32::INFINITY,
-                true,
-            ) {
-                t.custom_words = word_list(&text);
+            let punct = [
+                (None, "Model default".to_string()),
+                (Some(true), "On".to_string()),
+                (Some(false), "Off".to_string()),
+            ];
+            if let Some(p) =
+                choice_row(ui, "Punctuation and capitals", None, &t.punctuation, &punct)
+            {
+                t.punctuation = p;
                 send = true;
             }
-            ui.add_space(theme::SPACE_SM);
-            if let Some(on) = switch_row(ui, "Remove filler words", None, t.remove_fillers) {
+            if let Some(on) = switch_row(
+                ui,
+                "Spoken punctuation",
+                Some("Say \"comma\", \"period\", \"new line\""),
+                t.spoken_punctuation,
+            ) {
+                t.spoken_punctuation = on;
+                send = true;
+            }
+            if let Some(on) = switch_row(
+                ui,
+                "Remove filler words",
+                Some("Drops \"um\", \"uh\" and the like"),
+                t.remove_fillers,
+            ) {
                 t.remove_fillers = on;
                 send = true;
             }
@@ -2134,29 +2179,64 @@ fn text_fold(ui: &mut Ui, v: &mut VoiceUi, f: &VoiceFile, edits: &mut Vec<Edit>)
                     },
                 );
             }
-            widgets::divider(ui);
-            ui.add_space(theme::SPACE_SM);
-            ui.label(egui::RichText::new("Replacements").color(pal().text));
+        },
+    );
+    widgets::section(
+        ui,
+        "Custom words",
+        |_| {},
+        |ui| {
+            widgets::hint(ui, "Names and jargon to recognise as written, one per line");
+            ui.add_space(theme::SPACE_XS);
+            if let Some(text) = text_commit(
+                ui,
+                "custom_words",
+                &t.custom_words.join("\n"),
+                "hako\nPipeWire",
+                f32::INFINITY,
+                true,
+            ) {
+                t.custom_words = word_list(&text);
+                send = true;
+            }
+        },
+    );
+    let count = t.replacements.len();
+    widgets::section(
+        ui,
+        "Replacements",
+        |ui| {
+            ui.label(
+                egui::RichText::new(count.to_string())
+                    .small()
+                    .color(pal().text_faint),
+            );
+        },
+        |ui| {
             widgets::hint(
                 ui,
                 "Whole phrases, any case; \\n in the replacement is a new line",
             );
+            ui.add_space(theme::SPACE_XS);
             let mut remove = None;
             for (i, r) in t.replacements.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&r.from).color(pal().text));
-                    ui.label(
-                        egui::RichText::new("becomes")
-                            .small()
-                            .color(pal().text_faint),
-                    );
-                    ui.label(egui::RichText::new(r.to.replace('\n', "\\n")).color(pal().text));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::icon_button(ui, 24.0, "Remove", true, widgets::icon_close)
-                            .clicked()
-                        {
-                            remove = Some(i);
-                        }
+                ui.push_id(("replacement", i), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(theme::CONTROL_H);
+                        ui.label(egui::RichText::new(&r.from).color(pal().text));
+                        ui.label(
+                            egui::RichText::new("becomes")
+                                .small()
+                                .color(pal().text_faint),
+                        );
+                        ui.label(egui::RichText::new(r.to.replace('\n', "\\n")).color(pal().text));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if widgets::icon_button(ui, 24.0, "Remove", true, widgets::icon_close)
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                        });
                     });
                 });
             }
@@ -2164,9 +2244,19 @@ fn text_fold(ui: &mut Ui, v: &mut VoiceUi, f: &VoiceFile, edits: &mut Vec<Edit>)
                 t.replacements.remove(i);
                 send = true;
             }
+            if !t.replacements.is_empty() {
+                ui.add_space(theme::SPACE_XS);
+                widgets::divider(ui);
+                ui.add_space(theme::SPACE_SM);
+            }
             ui.horizontal(|ui| {
                 let (from, to) = &mut v.replacement;
                 widgets::text_field(ui, from, "new paragraph", 180.0);
+                ui.label(
+                    egui::RichText::new("becomes")
+                        .small()
+                        .color(pal().text_faint),
+                );
                 widgets::text_field(ui, to, "\\n\\n", 180.0);
                 let ok = !from.trim().is_empty();
                 if ui
@@ -2183,54 +2273,33 @@ fn text_fold(ui: &mut Ui, v: &mut VoiceUi, f: &VoiceFile, edits: &mut Vec<Edit>)
                     send = true;
                 }
             });
-            ui.add_space(theme::SPACE_SM);
-            widgets::divider(ui);
-            if let Some(on) = switch_row(
-                ui,
-                "Spoken punctuation",
-                Some("Say \"comma\", \"period\", \"new line\""),
-                t.spoken_punctuation,
-            ) {
-                t.spoken_punctuation = on;
-                send = true;
-            }
-            let punct = [
-                (None, "Model default".to_string()),
-                (Some(true), "On".to_string()),
-                (Some(false), "Off".to_string()),
-            ];
-            if let Some(p) =
-                choice_row(ui, "Punctuation and capitals", None, &t.punctuation, &punct)
-            {
-                t.punctuation = p;
-                send = true;
-            }
-            if send {
-                edits.push(Edit::Send(VoiceOp::SetText { text: t }));
-            }
         },
     );
+    if send {
+        edits.push(Edit::Send(VoiceOp::SetText { text: t }));
+    }
 }
 
-fn sounds_fold(ui: &mut Ui, f: &VoiceFile, edits: &mut Vec<Edit>) {
-    fold(
+fn sounds_section(ui: &mut Ui, f: &VoiceFile, edits: &mut Vec<Edit>) {
+    widgets::section(
         ui,
         "Sounds",
-        "Pings when recording starts and stops",
+        |_| {},
         |ui| {
             let mut s = f.sounds.clone();
             let mut send = false;
             for (label, on) in [
-                ("Start", &mut s.start),
-                ("Stop", &mut s.stop),
-                ("Cancel", &mut s.cancel),
-                ("Error", &mut s.error),
+                ("When recording starts", &mut s.start),
+                ("When recording stops", &mut s.stop),
+                ("When dictation is cancelled", &mut s.cancel),
+                ("On errors", &mut s.error),
             ] {
                 if let Some(v) = switch_row(ui, label, None, *on) {
                     *on = v;
                     send = true;
                 }
             }
+            widgets::divider(ui);
             let themes = [
                 (SoundTheme::Soft, "Soft".to_string()),
                 (SoundTheme::Click, "Click".to_string()),
@@ -2259,82 +2328,90 @@ fn sounds_fold(ui: &mut Ui, f: &VoiceFile, edits: &mut Vec<Edit>) {
     );
 }
 
-fn history_fold(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
-    fold(ui, "History", "Recent transcripts", |ui| {
-        let mut h = st.file.history.clone();
-        let mut keep = h.keep as f32;
-        let res = slider_row(
-            ui,
-            "Keep",
-            Some("0 keeps none"),
-            &mut keep,
-            (0.0, MAX_HISTORY as f32),
-            false,
-            format!("{}", h.keep),
-        );
-        h.keep = keep.round() as u32;
-        if let Some(on) = switch_row(ui, "Keep the audio too", None, h.keep_audio) {
-            h.keep_audio = on;
-            edits.push(Edit::Send(VoiceOp::SetHistory { history: h.clone() }));
-        } else {
-            edits.extend(slid(res, || VoiceOp::SetHistory { history: h }));
-        }
-        widgets::divider(ui);
-        if st.history.is_empty() {
-            ui.add_space(theme::SPACE_SM);
-            widgets::hint(ui, "Nothing yet.");
-        }
-        for (i, e) in st.history.iter().enumerate() {
-            ui.push_id(("history", i), |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_min_height(theme::CONTROL_H);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // ponytail: "Insert again" copies too until the daemon
-                        // can type a history entry.
-                        let insert = widgets::button(ui, "Insert again")
-                            .on_hover_text("Copies it: paste with Ctrl + V")
-                            .clicked();
-                        let copy = widgets::button(ui, "Copy").clicked();
-                        if insert || copy {
-                            ui.ctx().copy_text(e.text.clone());
-                        }
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(&e.text).color(pal().text))
-                                    .truncate(),
-                            )
-                            .on_hover_text(format!("{}\n\n{}", e.text, e.model));
-                        });
+/// Recent transcripts, then how many are kept.
+fn history_sections(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
+    widgets::section(
+        ui,
+        "Recent transcripts",
+        |ui| {
+            if !st.history.is_empty() && widgets::button(ui, "Clear history").clicked() {
+                edits.push(Edit::Send(VoiceOp::ClearHistory));
+            }
+        },
+        |ui| history_list(ui, st),
+    );
+    widgets::section(
+        ui,
+        "Saving",
+        |_| {},
+        |ui| {
+            let mut h = st.file.history.clone();
+            let mut keep = h.keep as f32;
+            let res = slider_row(
+                ui,
+                "Transcripts to keep",
+                Some("0 keeps none"),
+                &mut keep,
+                (0.0, MAX_HISTORY as f32),
+                false,
+                format!("{}", h.keep),
+            );
+            h.keep = keep.round() as u32;
+            if let Some(on) = switch_row(
+                ui,
+                "Keep the audio too",
+                Some("A recording of each kept transcript"),
+                h.keep_audio,
+            ) {
+                h.keep_audio = on;
+                edits.push(Edit::Send(VoiceOp::SetHistory { history: h.clone() }));
+            } else {
+                edits.extend(slid(res, || VoiceOp::SetHistory { history: h }));
+            }
+        },
+    );
+}
+
+fn history_list(ui: &mut Ui, st: &VoiceState) {
+    if st.history.is_empty() {
+        widgets::hint(ui, "Nothing yet. What you dictate shows here.");
+    }
+    for (i, e) in st.history.iter().enumerate() {
+        ui.push_id(("history", i), |ui| {
+            ui.horizontal(|ui| {
+                ui.set_min_height(theme::CONTROL_H);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // ponytail: "Insert again" copies too until the daemon
+                    // can type a history entry.
+                    let insert = widgets::button(ui, "Insert again")
+                        .on_hover_text("Copies it: paste with Ctrl + V")
+                        .clicked();
+                    let copy = widgets::button(ui, "Copy").clicked();
+                    if insert || copy {
+                        ui.ctx().copy_text(e.text.clone());
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&e.text).color(pal().text))
+                                .truncate(),
+                        )
+                        .on_hover_text(format!("{}\n\n{}", e.text, e.model));
                     });
                 });
             });
-        }
-        if !st.history.is_empty() {
-            ui.add_space(theme::SPACE_SM);
-            if widgets::button(ui, "Clear history").clicked() {
-                edits.push(Edit::Send(VoiceOp::ClearHistory));
-            }
-        }
-    });
+        });
+    }
 }
 
-fn advanced_fold(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
-    fold(
+/// Performance and Recording: one `SetAdvanced`.
+fn advanced_sections(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
+    let mut a = st.file.advanced.clone();
+    let mut send = false;
+    widgets::section(
         ui,
-        "Advanced",
-        "Silence detection, accelerator, memory",
+        "Performance",
+        |_| {},
         |ui| {
-            let mut a = st.file.advanced.clone();
-            let mut send = false;
-            if let Some(on) = switch_row(
-                ui,
-                "Skip silence",
-                Some("Silero VAD, before batch transcription"),
-                a.vad,
-            ) {
-                a.vad = on;
-                send = true;
-            }
             let mut accel = vec![
                 (Accelerator::Auto, "Automatic".to_string()),
                 (Accelerator::Cpu, "CPU".to_string()),
@@ -2387,6 +2464,26 @@ fn advanced_fold(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
             for (label, hint, on) in [
                 ("Load at startup", "Instant first use", &mut a.preload),
                 (
+                    "Skip silence",
+                    "Silero VAD, before batch transcription",
+                    &mut a.vad,
+                ),
+            ] {
+                if let Some(v) = switch_row(ui, label, Some(hint), *on) {
+                    *on = v;
+                    send = true;
+                }
+            }
+        },
+    );
+    let mut res = None;
+    widgets::section(
+        ui,
+        "Recording",
+        |_| {},
+        |ui| {
+            for (label, hint, on) in [
+                (
                     "Keep the microphone open",
                     "No start delay; the mic shows as in use",
                     &mut a.always_on_mic,
@@ -2404,7 +2501,7 @@ fn advanced_fold(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
             }
             let (lo, hi) = MAX_RECORDING_S;
             let mut s = a.max_seconds as f32;
-            let res = slider_row(
+            res = slider_row(
                 ui,
                 "Longest recording",
                 Some("Stops by itself after this"),
@@ -2414,13 +2511,13 @@ fn advanced_fold(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
                 fmt_secs(a.max_seconds),
             );
             a.max_seconds = s.round() as u32;
-            if send {
-                edits.push(Edit::Send(VoiceOp::SetAdvanced { advanced: a }));
-            } else {
-                edits.extend(slid(res, || VoiceOp::SetAdvanced { advanced: a }));
-            }
         },
     );
+    if send {
+        edits.push(Edit::Send(VoiceOp::SetAdvanced { advanced: a }));
+    } else {
+        edits.extend(slid(res, || VoiceOp::SetAdvanced { advanced: a }));
+    }
 }
 
 /// `45 s`, `5 min`, `5 min 30 s`.
@@ -2432,19 +2529,20 @@ fn fmt_secs(s: u32) -> String {
     }
 }
 
-fn alt_fold(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
-    fold(
+/// What the Dictate (alternate) hotkey does differently.
+fn alt_section(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
+    widgets::section(
         ui,
-        "Alternate profile",
-        "For the Dictate (alternate) hotkey",
+        "Alternate dictation",
+        |_| {},
         |ui| {
             widgets::hint(
                 ui,
-                "What the alternate hotkey does differently; the rest is as above.",
+                "What the Dictate (alternate) hotkey does differently; everything else is as for Dictate.",
             );
             let mut a = st.file.alt.clone();
             let mut send = false;
-            let mut models = vec![(None, "Same as above".to_string())];
+            let mut models = vec![(None, SAME.to_string())];
             models.extend(
                 st.installed
                     .iter()
@@ -2477,27 +2575,31 @@ fn alt_fold(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
                 a.model = m;
                 send = true;
             }
-            if let Some(l) = optional_text_row(
-                ui,
-                "Language",
-                Some("Code such as en or de; empty is as above"),
-                &a.language,
-                "Same",
-            ) {
+            let mut langs = vec![(None, SAME.to_string())];
+            langs.extend(
+                by_name(catalog_languages())
+                    .into_iter()
+                    .map(|l| (Some(l.clone()), lang_name(l).to_string())),
+            );
+            if let Some(l) = a.language.as_ref() {
+                if !langs.iter().any(|(v, _)| v.as_ref() == Some(l)) {
+                    langs.push((Some(l.clone()), lang_name(l).to_string()));
+                }
+            }
+            if let Some(l) = choice_row(ui, "Language", None, &a.language, &langs) {
                 a.language = l;
                 send = true;
             }
-            let same = |t: &str| t.to_string();
             let translate = [
-                (None, same("Same as above")),
-                (Some(true), same("Translate to English")),
-                (Some(false), same("Don't translate")),
+                (None, SAME.to_string()),
+                (Some(true), "Translate to English".to_string()),
+                (Some(false), "Don't translate".to_string()),
             ];
             if let Some(t) = choice_row(ui, "Translate", None, &a.translate, &translate) {
                 a.translate = t;
                 send = true;
             }
-            let mut methods = vec![(None, same("Same as above"))];
+            let mut methods = vec![(None, SAME.to_string())];
             methods.extend(
                 OutputMethod::ALL
                     .iter()
@@ -2513,6 +2615,9 @@ fn alt_fold(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
         },
     );
 }
+
+/// An alternate dictation setting left as Dictate has it.
+const SAME: &str = "Same as Dictate";
 
 /// Owner of the Detect that records a user command's keys.
 const COMMAND_KEYS: &str = "jarvis_command";
@@ -2583,41 +2688,48 @@ fn wake_model_row(ui: &mut Ui, st: &VoiceState, edits: &mut Vec<Edit>) {
 
 /// What Jarvis heard last, what it made of it and how that went.
 fn last_command(ui: &mut Ui, st: &VoiceState) {
-    ui.label(egui::RichText::new("Last command").color(pal().text));
-    let Some(c) = &st.last_command else {
-        widgets::hint(ui, "Nothing yet. Commands you speak show here.");
-        return;
-    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    theme::inset().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("\u{201c}{}\u{201d}", c.heard))
-                    .strong()
-                    .color(pal().text),
-            );
-            if c.ok {
-                ui.colored_label(pal().ok, "Done");
-            } else {
-                ui.colored_label(pal().danger, "Failed");
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    widgets::section(
+        ui,
+        "Last command",
+        |ui| {
+            if let Some(c) = &st.last_command {
                 widgets::hint(ui, &ago(now, c.at));
+            }
+        },
+        |ui| {
+            let Some(c) = &st.last_command else {
+                widgets::hint(ui, "Nothing yet. Commands you speak show here.");
+                return;
+            };
+            theme::inset().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("\u{201c}{}\u{201d}", c.heard))
+                            .strong()
+                            .color(pal().text),
+                    );
+                    if c.ok {
+                        widgets::pill(ui, "Done", pal().ok);
+                    } else {
+                        widgets::pill(ui, "Failed", pal().danger);
+                    }
+                });
+                let understood = match &c.action {
+                    Some(a) => format!("Understood as: {a}"),
+                    None => "Not understood".to_string(),
+                };
+                ui.label(egui::RichText::new(understood).color(pal().text_muted));
+                if let Some(m) = &c.message {
+                    let color = if c.ok { pal().text_muted } else { pal().danger };
+                    ui.colored_label(color, m);
+                }
             });
-        });
-        let understood = match &c.action {
-            Some(a) => format!("Understood as: {a}"),
-            None => "Not understood".to_string(),
-        };
-        ui.label(egui::RichText::new(understood).color(pal().text_muted));
-        if let Some(m) = &c.message {
-            let color = if c.ok { pal().text_muted } else { pal().danger };
-            ui.colored_label(color, m);
-        }
-    });
+        },
+    );
 }
 
 /// The push-to-command hotkeys with the shared editor, or Add.
@@ -2627,49 +2739,55 @@ fn push_to_command(
     devices: &[DeviceSnapshot],
     out: &mut Vec<UiCommand>,
 ) {
-    ui.label(egui::RichText::new("Push-to-command").color(pal().text));
-    widgets::hint(
+    widgets::section(
         ui,
-        "Hold a hotkey, say a command, let go: no wake word needed, even while listening is off.",
-    );
-    let Some(st) = hk.state().cloned() else {
-        let body = hk.error().unwrap_or("Loading…").to_string();
-        ui.label(egui::RichText::new(body).color(pal().text_muted));
-        return;
-    };
-    let list: Vec<HotkeyBinding> = st
-        .file
-        .bindings
-        .iter()
-        .filter(|b| b.action == HotkeyAction::JarvisListen)
-        .cloned()
-        .collect();
-    for b in &list {
-        hotkeys::editor(ui, hk, b, None, devices, out);
-        hotkeys::status_lines(ui, hk, b);
-        hotkeys::conflicts(ui, hk, b, None, devices, out);
-    }
-    hotkeys::new_binding_row(ui, hk, Some("Jarvis"), out);
-    let adding = hk
-        .detecting()
-        .is_some_and(|d| d.action == HotkeyAction::JarvisListen);
-    if list.is_empty() && !adding {
-        let can = hk.file().is_some() && hk.detecting().is_none();
-        ui.add_space(theme::SPACE_XS);
-        let resp = ui
-            .add_enabled_ui(can, |ui| widgets::button(ui, "Add push-to-command hotkey"))
-            .inner
-            .on_hover_text("Then press the keys on any keyboard or mouse");
-        if resp.clicked() {
-            if let Some(file) = hk.file() {
-                let id = hotkeys::new_id(file, HotkeyAction::JarvisListen);
-                hk.detect(
-                    HotkeyBinding::new(&id, HotkeyAction::JarvisListen, &[]),
-                    out,
-                );
+        "Push-to-command",
+        |_| {},
+        |ui| {
+            widgets::hint(
+                ui,
+                "Hold a hotkey, say a command, let go: no wake word needed, even while listening is off.",
+            );
+            let Some(st) = hk.state().cloned() else {
+                let body = hk.error().unwrap_or("Loading…").to_string();
+                ui.label(egui::RichText::new(body).color(pal().text_muted));
+                return;
+            };
+            let list: Vec<HotkeyBinding> = st
+                .file
+                .bindings
+                .iter()
+                .filter(|b| b.action == HotkeyAction::JarvisListen)
+                .cloned()
+                .collect();
+            for b in &list {
+                hotkeys::editor(ui, hk, b, None, devices, out);
+                hotkeys::status_lines(ui, hk, b);
+                hotkeys::conflicts(ui, hk, b, None, devices, out);
             }
-        }
-    }
+            hotkeys::new_binding_row(ui, hk, Some("Jarvis"), out);
+            let adding = hk
+                .detecting()
+                .is_some_and(|d| d.action == HotkeyAction::JarvisListen);
+            if list.is_empty() && !adding {
+                let can = hk.file().is_some() && hk.detecting().is_none();
+                ui.add_space(theme::SPACE_SM);
+                let resp = ui
+                    .add_enabled_ui(can, |ui| widgets::button(ui, "Add push-to-command hotkey"))
+                    .inner
+                    .on_hover_text("Then press the keys on any keyboard or mouse");
+                if resp.clicked() {
+                    if let Some(file) = hk.file() {
+                        let id = hotkeys::new_id(file, HotkeyAction::JarvisListen);
+                        hk.detect(
+                            HotkeyBinding::new(&id, HotkeyAction::JarvisListen, &[]),
+                            out,
+                        );
+                    }
+                }
+            }
+        },
+    );
 }
 
 /// The editor of one user command: `Some(true)` on Save, `Some(false)` on
@@ -2822,37 +2940,77 @@ fn command_editor(
     end
 }
 
-/// Everything Jarvis understands, by group, and the user's own commands.
-fn say_fold(ui: &mut Ui, f: &VoiceFile) {
-    fold(ui, "What can I say", "Built-in commands and yours", |ui| {
-        widgets::hint(
+/// A "What can I say" group: its title and (what it does, examples).
+type SayGroup<'a> = (&'a str, Vec<(String, String)>);
+
+/// Everything Jarvis understands, by group, and the user's own commands, in
+/// two columns.
+fn say_section(ui: &mut Ui, f: &VoiceFile) {
+    let quoted = |list: &mut dyn Iterator<Item = &str>| {
+        list.map(|e| format!("\u{201c}{e}\u{201d}"))
+            .collect::<Vec<_>>()
+            .join("   ")
+    };
+    let mut groups: Vec<SayGroup> = say_groups()
+        .into_iter()
+        .map(|(g, specs)| {
+            let items = specs
+                .iter()
+                .map(|s| {
+                    let examples = quoted(&mut s.examples.iter().copied());
+                    (s.description.to_string(), examples)
+                })
+                .collect();
+            (g, items)
+        })
+        .collect();
+    if !f.jarvis.commands.is_empty() {
+        let yours = f
+            .jarvis
+            .commands
+            .iter()
+            .map(|c| {
+                let examples = quoted(&mut c.say.iter().map(String::as_str));
+                (user_action_label(&c.action), examples)
+            })
+            .collect();
+        groups.push(("Yours", yours));
+    }
+    // Each group goes to the shorter column, in order.
+    let mut cols: [Vec<SayGroup>; 2] = Default::default();
+    let mut rows = [0; 2];
+    for g in groups {
+        let k = usize::from(rows[1] < rows[0]);
+        rows[k] += g.1.len() + 1;
+        cols[k].push(g);
+    }
+    widgets::section(
+        ui,
+        "What can I say",
+        |_| {},
+        |ui| {
+            widgets::hint(
             ui,
             "After the wake word. Close variants work too; names of apps, profiles and mixer strips are matched loosely.",
         );
-        let quoted = |list: &mut dyn Iterator<Item = &str>| {
-            list.map(|e| format!("\u{201c}{e}\u{201d}"))
-                .collect::<Vec<_>>()
-                .join("   ")
-        };
-        for (group, specs) in say_groups() {
-            ui.add_space(theme::SPACE_SM);
-            ui.label(theme::eyebrow(group));
-            for s in specs {
-                ui.push_id(s.name, |ui| {
-                    ui.label(egui::RichText::new(s.description).color(pal().text));
-                    widgets::hint(ui, &quoted(&mut s.examples.iter().copied()));
-                });
-            }
-        }
-        if !f.jarvis.commands.is_empty() {
-            ui.add_space(theme::SPACE_SM);
-            ui.label(theme::eyebrow("Yours"));
-            for (i, c) in f.jarvis.commands.iter().enumerate() {
-                ui.push_id(("yours", i), |ui| {
-                    ui.label(egui::RichText::new(user_action_label(&c.action)).color(pal().text));
-                    widgets::hint(ui, &quoted(&mut c.say.iter().map(String::as_str)));
-                });
-            }
-        }
-    });
+            ui.spacing_mut().item_spacing.x = theme::SPACE_LG;
+            ui.columns(2, |c| {
+                for (ui, groups) in c.iter_mut().zip(&cols) {
+                    // Columns are justified: keep wrapped lines ragged.
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        for (group, items) in groups {
+                            ui.add_space(theme::SPACE_SM);
+                            ui.label(theme::eyebrow(group));
+                            for (i, (what, examples)) in items.iter().enumerate() {
+                                ui.push_id((group, i), |ui| {
+                                    ui.label(egui::RichText::new(what).color(pal().text));
+                                    widgets::hint(ui, examples);
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+        },
+    );
 }

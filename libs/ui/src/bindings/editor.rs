@@ -550,7 +550,7 @@ fn hotkey_panel(ui: &mut Ui, cx: &mut Cx, source: EvdevKey) {
                 }
             }
         }
-        hotkeys::action_picker(ui, "bind_hotkey_action", &mut action);
+        hotkeys::action_picker(ui, "bind_hotkey_action", None, &mut action);
     });
     ui.data_mut(|m| m.insert_temp(id, action));
     widgets::hint(

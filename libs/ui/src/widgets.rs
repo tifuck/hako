@@ -381,6 +381,7 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let galley = ui.fonts(|f| f.layout_no_wrap(text.into(), font, color));
     let size = vec2(galley.size().x + 24.0, 22.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
     ui.painter()
         .rect_filled(rect, rect.height() / 2.0, color.gamma_multiply(0.14));
     let dot = pos2(rect.left() + 10.0, rect.center().y);

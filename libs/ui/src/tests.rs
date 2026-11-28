@@ -2691,23 +2691,21 @@ fn voice_app(voice: Option<hako_core::voice::VoiceState>) -> HakoAppUi {
 fn voice_page_renders_every_state() {
     use hako_core::voice::{EngineStatus, ModelStatus, VoicePartial};
     let ctx = egui::Context::default();
-    // Every folded section open.
-    ctx.data_mut(|m| {
-        for t in voice::FOLDS {
-            m.insert_temp(voice::fold_id(t), true);
-        }
-    });
     let mut out = Vec::new();
+    // Every tab, wide and narrow.
     let mut render = |app: &mut HakoAppUi| {
-        for input in [input(), input(), {
-            let mut narrow = input();
-            narrow.screen_rect = Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(900.0, 600.0),
-            ));
-            narrow
-        }] {
-            let _ = ctx.run(input, |ctx| app.ui(ctx, &mut out));
+        for tab in voice::VoiceTab::ALL {
+            app.voice.tab = tab;
+            for input in [input(), input(), {
+                let mut narrow = input();
+                narrow.screen_rect = Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 600.0),
+                ));
+                narrow
+            }] {
+                let _ = ctx.run(input, |ctx| app.ui(ctx, &mut out));
+            }
         }
         assert!(out.is_empty(), "rendering sent {out:?}");
     };
@@ -2754,6 +2752,49 @@ fn voice_page_renders_every_state() {
     app.hotkeys
         .unavailable("Hotkeys need a newer hakod.".into());
     render(&mut app);
+}
+
+#[test]
+fn voice_settings_are_split_into_tabs() {
+    use hako_core::hotkey::HotkeyAction;
+    use hako_core::voice::EngineStatus;
+    let mut h = drive(voice_app(Some(sample_voice())));
+    // Dictation first: hotkeys with their options folded into a summary.
+    assert!(shown(&h, "Microphone"));
+    assert!(!shown(&h, "Recognition"));
+    assert!(!shown(&h, "Pass-through"));
+    assert!(shown(&h, "Smart · Listen · All keyboards and mice"));
+    {
+        use egui_kittest::kittest::Queryable;
+        h.query_all_by_label("Show options").next().unwrap().click();
+        h.run_steps(4);
+    }
+    assert!(shown(&h, "Pass-through"));
+    click(&mut h, "Model");
+    assert!(shown(&h, "Recognition"));
+    assert!(!shown(&h, "Microphone"));
+    click(&mut h, "Jarvis");
+    assert!(shown(&h, "Push-to-command"));
+    assert!(sent(&mut h).is_empty(), "switching tabs sends nothing");
+
+    // No model: the status card leads to the Model tab.
+    let mut none = sample_voice();
+    none.file.model = None;
+    none.engine = EngineStatus::NoModel;
+    let mut h = drive(voice_app(Some(none)));
+    click(&mut h, "Choose a model");
+    assert_eq!(h.state().0.voice.tab, voice::VoiceTab::Model);
+    assert!(!shown(&h, "Choose a model"), "not offered on its own tab");
+
+    // A Bindings page's "Open …" link lands on the tab with that hotkey.
+    assert_eq!(
+        voice::VoiceTab::of(HotkeyAction::JarvisListen),
+        voice::VoiceTab::Jarvis
+    );
+    assert_eq!(
+        voice::VoiceTab::of(HotkeyAction::VoiceCancel),
+        voice::VoiceTab::Dictation
+    );
 }
 
 #[test]
@@ -3033,20 +3074,16 @@ fn a_hotkey_conflict_offers_three_answers() {
 
 // ── Jarvis ───────────────────────────────────────────────────────
 
-/// The whole UI in a window tall enough for the Voice page's lower
-/// sections, every fold open.
-fn drive_voice(app: HakoAppUi) -> Driven {
+/// The whole UI on the Voice page's Jarvis tab, in a window tall enough for
+/// all of it.
+fn drive_voice(mut app: HakoAppUi) -> Driven {
+    app.voice.tab = voice::VoiceTab::Jarvis;
     let mut h = egui_kittest::Harness::builder()
-        .with_size([1200.0, 9000.0])
+        .with_size([1200.0, 5000.0])
         .build_state(
             |ctx, (app, out): &mut (HakoAppUi, Vec<UiCommand>)| app.ui(ctx, out),
             (app, Vec::new()),
         );
-    h.ctx.data_mut(|m| {
-        for t in voice::FOLDS {
-            m.insert_temp(voice::fold_id(t), true);
-        }
-    });
     h.run_steps(4);
     h
 }
@@ -3109,13 +3146,9 @@ fn jarvis_section_renders_every_state() {
     use hako_core::hotkey::{HotkeyAction, HotkeyBinding, HotkeysFile, HotkeysState};
     use hako_core::voice::{CommandOutcome, ModelStatus};
     let ctx = egui::Context::default();
-    ctx.data_mut(|m| {
-        for t in voice::FOLDS {
-            m.insert_temp(voice::fold_id(t), true);
-        }
-    });
     let mut out = Vec::new();
     let mut render = |app: &mut HakoAppUi| {
+        app.voice.tab = voice::VoiceTab::Jarvis;
         for _ in 0..3 {
             let _ = ctx.run(input(), |ctx| app.ui(ctx, &mut out));
         }
@@ -3469,30 +3502,31 @@ fn what_can_i_say_lists_every_action() {
     assert!(shown(&h, "Apply profile Gaming"), "the user's own");
 }
 
-/// The Voice page off, on (every section open) and recording, and a
-/// keyboard's Bindings page with the default hotkey on it.
+/// The Voice page off, each tab while recording, and a keyboard's Bindings
+/// page with the default hotkey on it.
 #[test]
 #[ignore = "needs a GPU (wgpu)"]
 fn snapshot_voice() {
     let mut off = sample_voice();
     off.file.enabled = false;
     shoot_app("voice_off", SHOT, voice_app(Some(off)), |_| {}, |_| {});
-    let open = |ctx: &egui::Context| {
-        ctx.data_mut(|m| {
-            for t in voice::FOLDS {
-                m.insert_temp(voice::fold_id(t), true);
-            }
-        })
-    };
-    let mut rec = sample_voice();
-    rec.engine = hako_core::voice::EngineStatus::Recording;
-    let mut app = voice_app(Some(rec));
-    app.voice.partial(hako_core::voice::VoicePartial {
-        session: 1,
-        committed: "Hello from the".into(),
-        tentative: "keyboard".into(),
-    });
-    shoot_app("voice", [1180.0, 7000.0], app, open, |_| {});
+    for tab in voice::VoiceTab::ALL {
+        let mut rec = jarvis_voice();
+        rec.engine = hako_core::voice::EngineStatus::Recording;
+        rec.file.jarvis.commands = user_commands();
+        let mut app = voice_app(Some(rec));
+        app.voice.tab = tab;
+        app.voice.partial(hako_core::voice::VoicePartial {
+            session: 1,
+            committed: "Hello from the".into(),
+            tentative: "keyboard".into(),
+        });
+        let name = format!("voice_{}", tab.label().to_lowercase());
+        shoot_app(&name, [1180.0, 2600.0], app, |_| {}, |_| {});
+    }
+    let mut app = voice_app(Some(jarvis_voice()));
+    app.voice.tab = voice::VoiceTab::Jarvis;
+    shoot_app("voice_jarvis_narrow", [900.0, 2400.0], app, |_| {}, |_| {});
     let (st, id) = bind_state(
         DeviceKind::Keyboard,
         "Huntsman V2 TKL",

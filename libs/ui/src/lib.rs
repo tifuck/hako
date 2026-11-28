@@ -232,7 +232,6 @@ impl HakoAppUi {
                             return;
                         }
                         if self.show_voice {
-                            widgets::page_transition(ui, "voice");
                             let nav = ui.add_enabled_ui(online, |ui| self.voice_page(ui, out));
                             if let Some((id, binding)) = nav.inner {
                                 self.show_on_device(ui.ctx(), id, binding);
@@ -814,7 +813,8 @@ impl HakoAppUi {
                 } else {
                     bindings::keyboard_page
                 };
-                if page(ui, d, remaps, &mut self.hotkeys, out) {
+                if let Some(action) = page(ui, d, remaps, &mut self.hotkeys, out) {
+                    self.voice.tab = voice::VoiceTab::of(action);
                     self.show_voice = true;
                     out.push(UiCommand::GetVoice);
                 }
@@ -926,9 +926,10 @@ impl HakoAppUi {
                     }
                     if let Some(e) = &st.health.last_error {
                         widgets::divider(ui);
-                        widgets::row(ui, "Last error", None, |ui| {
-                            ui.colored_label(theme::pal().warn, e);
-                        });
+                        ui.add_space(theme::SPACE_SM);
+                        ui.label(egui::RichText::new("Last error").color(theme::pal().text_muted));
+                        ui.colored_label(theme::pal().warn, e);
+                        ui.add_space(theme::SPACE_SM);
                     }
                 }
             },

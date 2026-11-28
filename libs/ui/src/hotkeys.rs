@@ -365,7 +365,8 @@ const MODE_HINTS: [(HotkeyMode, &str); 3] = [
 
 /// The shared editor for one binding: chord, Detect, mode, pass-through,
 /// sides, timing, devices, on/off and remove. `here` is the device page it
-/// sits on (vendor, product, name), offered as the scope.
+/// sits on (vendor, product, name), offered as the scope; without one (the
+/// Voice page's lists) the options fold into a summary line.
 pub(crate) fn editor(
     ui: &mut Ui,
     hk: &mut HotkeysUi,
@@ -378,6 +379,8 @@ pub(crate) fn editor(
     ui.push_id(("hotkey", &b.id), |ui| {
         let mut next = b.clone();
         let mut remove = false;
+        let open_id = ui.id().with("open");
+        let mut open = here.is_some() || ui.data(|m| m.get_temp::<bool>(open_id).unwrap_or(false));
         ui.horizontal(|ui| {
             ui.set_min_height(theme::CONTROL_H);
             ui.label(
@@ -397,6 +400,17 @@ pub(crate) fn editor(
                 chord_caps(ui, &b.keys, b.exact_side, color);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if here.is_none() {
+                    let tip = if open { "Hide options" } else { "Show options" };
+                    if widgets::icon_button(ui, 26.0, tip, true, |p, r, c| {
+                        widgets::icon_chevron(p, r, c, !open)
+                    })
+                    .clicked()
+                    {
+                        open = !open;
+                        ui.data_mut(|m| m.insert_temp(open_id, open));
+                    }
+                }
                 ui.add_enabled_ui(editable, |ui| {
                     if widgets::icon_button(ui, 26.0, "Remove hotkey", true, widgets::icon_close)
                         .clicked()
@@ -427,9 +441,27 @@ pub(crate) fn editor(
                 });
             });
         });
-        ui.add_enabled_ui(editable, |ui| {
-            options(ui, hk, b, &mut next, here, devices);
-        });
+        if open {
+            ui.add_enabled_ui(editable, |ui| {
+                options(ui, hk, b, &mut next, here, devices);
+            });
+        } else {
+            let scope = match &b.scope {
+                HotkeyScope::Any => scope_label(&b.scope, devices, hk.state.as_ref()),
+                s => format!("Only {}", scope_label(s, devices, hk.state.as_ref())),
+            };
+            let pass = match b.pass {
+                PassThrough::Listen => "Listen",
+                PassThrough::Block => "Block",
+            };
+            let parts = if b.action.is_momentary() {
+                ["Fires when pressed", pass, &scope].join(" · ")
+            } else {
+                [b.mode.label(), pass, &scope].join(" · ")
+            };
+            widgets::hint(ui, &parts);
+            block_warning(ui, b);
+        }
         if remove {
             hk.send(&b.id, vec![HotkeyOp::Remove { id: b.id.clone() }], out);
         } else if next != *b {
@@ -536,19 +568,7 @@ fn options(
             }
         },
     );
-    if modifiers
-        && b.pass == PassThrough::Listen
-        && b.mode != HotkeyMode::Toggle
-        && !b.action.is_momentary()
-    {
-        ui.colored_label(
-            pal().warn,
-            egui::RichText::new(
-                "Block is recommended: while a modifier is held, apps could read typed text as shortcuts.",
-            )
-            .small(),
-        );
-    }
+    block_warning(ui, b);
     if modifiers {
         widgets::row(
             ui,
@@ -604,6 +624,23 @@ fn options(
             });
         },
     );
+}
+
+/// Why Block suits a held chord with a modifier.
+fn block_warning(ui: &mut Ui, b: &HotkeyBinding) {
+    if b.keys.iter().any(|k| is_modifier(k.0))
+        && b.pass == PassThrough::Listen
+        && b.mode != HotkeyMode::Toggle
+        && !b.action.is_momentary()
+    {
+        ui.colored_label(
+            pal().warn,
+            egui::RichText::new(
+                "Block is recommended: while a modifier is held, apps could read typed text as shortcuts.",
+            )
+            .small(),
+        );
+    }
 }
 
 /// Milliseconds slider; returns the value and whether it is final.
@@ -788,10 +825,18 @@ pub(crate) fn new_binding_row(
     }
 }
 
-/// The action picker for a new binding.
-pub(crate) fn action_picker(ui: &mut Ui, id_salt: &str, action: &mut HotkeyAction) {
+/// The action picker for a new binding; with `feature`, only that page's.
+pub(crate) fn action_picker(
+    ui: &mut Ui,
+    id_salt: &str,
+    feature: Option<&str>,
+    action: &mut HotkeyAction,
+) {
     widgets::dropdown(id_salt, action.label(), theme::DROPDOWN_W).show_ui(ui, |ui| {
-        for a in HotkeyAction::ALL {
+        for a in HotkeyAction::ALL
+            .into_iter()
+            .filter(|a| feature.is_none_or(|f| a.feature() == f))
+        {
             ui.selectable_value(action, a, a.label());
         }
     });

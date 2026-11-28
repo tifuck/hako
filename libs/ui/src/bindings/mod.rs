@@ -15,6 +15,7 @@ use crate::widgets;
 use crate::UiCommand;
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke, Ui};
 use hako_core::device::{DeviceKind, DeviceSnapshot};
+use hako_core::hotkey::HotkeyAction;
 use hako_core::remap::{CaptureRole, DeviceRemaps, EvdevKey, RemapBinding, RemapMode};
 use layouts::Layout;
 use library::Action;
@@ -26,8 +27,8 @@ pub(crate) struct Cx<'a> {
     pub remaps: &'a DeviceRemaps,
     pub hotkeys: &'a mut HotkeysUi,
     pub out: &'a mut Vec<UiCommand>,
-    /// A hotkey's "Voice" link was clicked.
-    pub open_voice: bool,
+    /// A hotkey's "Open Voice" / "Open Jarvis" link was clicked.
+    pub open_voice: Option<HotkeyAction>,
 }
 
 /// egui memory slot: `(hotkey id, egui time)` whose keys flash on the
@@ -214,33 +215,33 @@ fn assign(ctx: &egui::Context, cx: &mut Cx, source: EvdevKey, action: Action) {
     }
 }
 
-/// The keyboard's Bindings page; true when a hotkey's Voice link was clicked.
+/// The keyboard's Bindings page; the hotkey whose "Open …" link was clicked.
 pub fn keyboard_page(
     ui: &mut Ui,
     d: &DeviceSnapshot,
     remaps: &DeviceRemaps,
     hotkeys: &mut HotkeysUi,
     out: &mut Vec<UiCommand>,
-) -> bool {
+) -> Option<HotkeyAction> {
     let mut cx = Cx {
         d,
         remaps,
         hotkeys,
         out,
-        open_voice: false,
+        open_voice: None,
     };
     page(ui, &mut cx);
     cx.open_voice
 }
 
-/// The mouse's Bindings page; true when a hotkey's Voice link was clicked.
+/// The mouse's Bindings page; the hotkey whose "Open …" link was clicked.
 pub fn mouse_page(
     ui: &mut Ui,
     d: &DeviceSnapshot,
     remaps: &DeviceRemaps,
     hotkeys: &mut HotkeysUi,
     out: &mut Vec<UiCommand>,
-) -> bool {
+) -> Option<HotkeyAction> {
     keyboard_page(ui, d, remaps, hotkeys, out)
 }
 
@@ -296,7 +297,7 @@ fn hotkey_strip(ui: &mut Ui, cx: &mut Cx) {
                                     .color(pal().accent),
                             );
                             if ui.add(link).clicked() {
-                                cx.open_voice = true;
+                                cx.open_voice = Some(b.action);
                             }
                         });
                     });
@@ -703,7 +704,7 @@ mod tests {
             remaps: &remaps,
             hotkeys: &mut hotkeys,
             out: &mut out,
-            open_voice: false,
+            open_voice: None,
         };
         assign(&egui::Context::default(), &mut cx, source, action);
         out
